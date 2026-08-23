@@ -31,6 +31,7 @@ import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
+	getTrustedHomeDir,
 	logger,
 	postmortem,
 	prompt,
@@ -765,10 +766,11 @@ export async function discoverSkills(
  */
 export async function discoverContextFiles(
 	cwd?: string,
-	_agentDir?: string,
+	agentDir?: string,
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	return await loadContextFilesInternal({
 		cwd: cwd ?? getProjectDir(),
+		agentDir,
 	});
 }
 
@@ -805,6 +807,7 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
+	agentDir?: string;
 	appendPrompt?: string;
 	repeatToolDescriptions?: boolean;
 }
@@ -818,6 +821,7 @@ export interface BuildSystemPromptOptions {
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
+		agentDir: options.agentDir,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
@@ -1333,7 +1337,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 	const cwd = options.cwd ?? getProjectDir();
 	const explicitMcpConfigPath = !isCanonicalSubSession && !options.mcpManager ? options.mcpConfigPath : undefined;
-	const agentDir = options.agentDir ?? getDefaultAgentDir();
+	const agentDir = options.agentDir ?? options.settings?.getAgentDir() ?? getDefaultAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
 	const hasInjectedAuth = options.authStorage !== undefined || options.modelRegistry !== undefined;
 
@@ -1513,7 +1517,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// session-context build, tool creation, MCP discovery, and extension discovery.
 		const contextFilesResultPromise = options.contextFiles
 			? Promise.resolve({ contextFiles: options.contextFiles, warnings: [] })
-			: logger.time("discoverContextFiles", loadContextFilesResultInternal, { cwd });
+			: logger.time("discoverContextFiles", loadContextFilesResultInternal, { cwd, agentDir, settings });
 		contextFilesResultPromise.catch(() => {});
 		const promptTemplatesPromise = options.promptTemplates
 			? Promise.resolve(options.promptTemplates)
@@ -1909,7 +1913,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				...settings.getGroup("skills"),
 				agentDir,
 				cwd,
+				agentDir,
 				disabledExtensions: settings.get("disabledExtensions"),
+				settings,
 			});
 			skills = withEmbeddedDefaultGjcSkills(skillsResult.skills);
 			skillWarnings = skillsResult.warnings;
@@ -2220,7 +2226,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		 */
 		const applyRescopedReadState = async (to: string): Promise<void> => {
 			try {
-				const rediscovered = await loadContextFilesResultInternal({ cwd: to });
+				const rediscovered = await loadContextFilesResultInternal({ cwd: to, agentDir, settings });
 				contextFiles = rediscovered.contextFiles;
 			} catch (error) {
 				logger.warn("Failed to re-discover context files after session rescope", {
@@ -2233,7 +2239,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						...settings.getGroup("skills"),
 						agentDir,
 						cwd: to,
+						agentDir,
 						disabledExtensions: settings.get("disabledExtensions"),
+						settings,
 					});
 					skills = withEmbeddedDefaultGjcSkills(reloaded.skills);
 					if (!options.parentTaskPrefix) setActiveSkills(skills);
@@ -2540,6 +2548,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// (review thread P1). For a top-level session this equals the
 			// session id.
 			getSessionId: () => AsyncJobManager.endpointIdOf(asyncJobManager) ?? asyncJobEndpointId,
+			getSessionHome: () => getTrustedHomeDir(),
 			getCredentialSessionId: () => session?.credentialSessionId ?? credentialSessionId,
 			getMcpManager: () => mcpManager ?? options.inheritedMcpManager,
 			isManagedSessionDestination: () => sessionManager.isManagedDestination(),
@@ -2547,6 +2556,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getActiveSkillPhase: () => session?.getActiveSkillPhase(),
 			getDeepInterviewAskStage: () => session?.getDeepInterviewAskStage(),
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
+			getSessionAgentDir: () => agentDir,
 			get model() {
 				return agent?.state.model ?? model;
 			},
@@ -3025,7 +3035,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		if (!options.disableExtensionDiscovery) {
 			try {
-				const hookExtensions = await discoverAndLoadHookExtensions(options.hookPaths ?? [], cwd);
+				const hookExtensions = await discoverAndLoadHookExtensions(
+					options.hookPaths ?? [],
+					cwd,
+					agentDir,
+					settings,
+				);
 				discoveredHookExtensions.push(...hookExtensions.factories);
 				for (const error of hookExtensions.errors) {
 					logger.warn("Rejected discovered hook", { path: error.path, error: error.error });
@@ -3695,6 +3710,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// Live cwd: the prompt is rebuilt after a rescope, and describing the
 				// retired launcher root there is what makes the model pick wrong paths.
 				cwd: getLiveCwd(),
+				agentDir,
+				settings,
 				skills,
 				contextFiles,
 				tools: promptTools,
