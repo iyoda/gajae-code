@@ -743,10 +743,12 @@ describe("signed model preset registry", () => {
 			for (let attempt = 0; attempt < 20 && !modelRegistry.getModelProfile("background-profile"); attempt++)
 				await Bun.sleep(10);
 			expect(modelRegistry.getModelProfile("background-profile")?.source).toBe("registry");
+			const callsBeforeDispose = calls;
 			modelRegistry.dispose();
-			await Bun.sleep(50);
+			await Bun.sleep(100);
+			expect(calls).toBeLessThanOrEqual(callsBeforeDispose + 1);
 			const callsAfterDispose = calls;
-			await Bun.sleep(50);
+			await Bun.sleep(100);
 			expect(calls).toBe(callsAfterDispose);
 		} finally {
 			modelRegistry?.dispose();
