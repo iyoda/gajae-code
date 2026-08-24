@@ -1453,20 +1453,15 @@ export class ModelRegistry {
 	) {
 		this.#settings = registrySettings ?? settings;
 		const configuredAgentDir = path.resolve(modelPresetRegistryDependencies.agentDir ?? getAgentDir());
-		const resolvedModelsPath = modelsPath
-			? path.isAbsolute(modelsPath)
-				? modelsPath
-				: path.resolve(configuredAgentDir, modelsPath)
-			: undefined;
-		this.#modelsConfigFile = ModelsConfigFile.relocate(resolvedModelsPath);
+		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
 		this.#modelPresetRegistryAgentDir = modelPresetRegistryDependencies.agentDir
 			? configuredAgentDir
-			: resolvedModelsPath
-				? path.dirname(resolvedModelsPath)
+			: modelsPath && path.isAbsolute(modelsPath)
+				? path.dirname(modelsPath)
 				: configuredAgentDir;
 		const { agentDir: _agentDir, ...registryDependencies } = modelPresetRegistryDependencies;
 		this.#modelPresetRegistryDependencies = registryDependencies;
-		this.#cacheDbPath = resolvedModelsPath ? path.join(path.dirname(resolvedModelsPath), "models.db") : undefined;
+		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
 			const keyConfig = this.#customProviderApiKeys.get(provider);

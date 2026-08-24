@@ -1246,9 +1246,12 @@ function validateStateGenerations(
 	state: RegistryState,
 	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
 ): void {
-	const byRevision = new Map(
-		state.history.map(generation => [generation.manifest.signed.registryRevision, generation]),
-	);
+	const byRevision = new Map<number, AcceptedGeneration>();
+	for (const generation of state.history) {
+		const revision = generation.manifest.signed.registryRevision;
+		if (byRevision.has(revision)) throw new Error(`Registry history contains duplicate revision ${revision}.`);
+		byRevision.set(revision, generation);
+	}
 	const validated = new Set<number>();
 	const visiting = new Set<number>();
 	const visit = (generation: AcceptedGeneration, ancestryDepth = 0): void => {

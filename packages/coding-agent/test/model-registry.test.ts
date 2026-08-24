@@ -239,11 +239,13 @@ describe("ModelRegistry", () => {
 		});
 	}
 
-	test("resolves a relative models path under the configured agent directory", async () => {
+	test("preserves process-relative models paths independently of registry agent scope", async () => {
+		const relativeDirectory = path.join(tempDir, "relative-models-dir");
 		const scopedAgentDir = path.join(tempDir, "relative-agent-dir");
+		fs.mkdirSync(relativeDirectory, { recursive: true });
 		fs.mkdirSync(scopedAgentDir, { recursive: true });
 		await Bun.write(
-			path.join(scopedAgentDir, "models.yml"),
+			path.join(relativeDirectory, "models.yml"),
 			`providers:
   relative-provider:
     baseUrl: https://relative.example/v1
@@ -253,12 +255,18 @@ describe("ModelRegistry", () => {
       - id: relative-model
 `,
 		);
-		const registry = new ModelRegistry(authStorage, "models.yml", undefined, {
-			agentDir: scopedAgentDir,
-			automaticRefresh: false,
-		});
-		expect(registry.find("relative-provider", "relative-model")).toBeDefined();
-		registry.dispose();
+		const previousCwd = process.cwd();
+		process.chdir(relativeDirectory);
+		try {
+			const registry = new ModelRegistry(authStorage, "models.yml", undefined, {
+				agentDir: scopedAgentDir,
+				automaticRefresh: false,
+			});
+			expect(registry.find("relative-provider", "relative-model")).toBeDefined();
+			registry.dispose();
+		} finally {
+			process.chdir(previousCwd);
+		}
 	});
 
 	describe("provider base URL environment variables", () => {

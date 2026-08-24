@@ -566,6 +566,20 @@ describe("signed model preset registry", () => {
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(5);
 	});
 
+	test("rejects duplicate accepted revisions before selection", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.history.push(structuredClone(state.history[0]));
+		await Bun.write(statePath, JSON.stringify(state));
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).profiles.size).toBe(0);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({ cacheHealth: "corrupt" });
+		await expect(setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 })).rejects.toThrow(
+			/duplicate revision/i,
+		);
+	});
+
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
 		const data = await fixture();
 		expect(loadAcceptedModelPresetRegistry(data.agentDir).profiles.size).toBe(0);
