@@ -1835,7 +1835,19 @@ export class ModelRegistry {
 			const key = `${registryModel.provider}\u0000${registryModel.id}`;
 			const existingIndex = indexByKey.get(key);
 			if (existingIndex === undefined) {
-				merged.push(registryModel);
+				const transportTemplate = merged.find(
+					model => model.provider === registryModel.provider && model.api === registryModel.api,
+				);
+				if (!transportTemplate) continue;
+				merged.push({
+					...registryModel,
+					baseUrl: transportTemplate.baseUrl,
+					headers: transportTemplate.headers,
+					transport: transportTemplate.transport,
+					requestTransform: transportTemplate.requestTransform,
+					cacheRetention: transportTemplate.cacheRetention,
+					isOAuth: transportTemplate.isOAuth,
+				});
 				indexByKey.set(key, merged.length - 1);
 				continue;
 			}

@@ -77,12 +77,13 @@ function signedRegistry(
 	profileEntries = [registryProfile("remote")],
 	presetEntries = [registryPreset("remote-model")],
 	compatibility = { consumerContract: { minVersion: "1.0.0", maxVersion: "1.0.0" } },
+	dynamicProviders: string[] = [],
 ) {
 	const revisionId = String(revision).padStart(8, "0");
 	const profiles: ModelPresetRegistryProfiles = {
 		schemaVersion: "1.0.0",
 		revision: revisionId,
-		dynamicProviders: [],
+		dynamicProviders,
 		profiles: profileEntries,
 	};
 	const presets: ModelPresetRegistryPresets = {
@@ -204,6 +205,7 @@ describe("signed model preset registry", () => {
 			[
 				registryPreset("remote-model"),
 				{ ...registryPreset("MiniMax-M2.5", 12_345), provider: "alibaba-token-plan" },
+				{ ...registryPreset("registry-only-model", 24_680), provider: "alibaba-token-plan" },
 			],
 		);
 		expect(await accept(data, registry)).toMatchObject({ status: "updated", revision: 1, revisionId: "00000001" });
@@ -221,14 +223,19 @@ describe("signed model preset registry", () => {
 				automaticRefresh: false,
 			});
 			expect(modelRegistry.getModelProfile("remote")?.source).toBe("registry");
-			expect(modelRegistry.getAll()).toEqual(
-				expect.arrayContaining([expect.objectContaining({ provider: "provider", id: "remote-model" })]),
-			);
+			expect(
+				modelRegistry.getAll().find(model => model.provider === "provider" && model.id === "remote-model"),
+			).toBe(undefined);
 			expect(
 				modelRegistry
 					.getAll()
 					.find(model => model.provider === "alibaba-token-plan" && model.id === "MiniMax-M2.5"),
 			).toMatchObject({ contextWindow: 12_345, baseUrl: expect.stringContaining("https://") });
+			expect(
+				modelRegistry
+					.getAll()
+					.find(model => model.provider === "alibaba-token-plan" && model.id === "registry-only-model"),
+			).toMatchObject({ contextWindow: 24_680, baseUrl: expect.stringContaining("https://") });
 		} finally {
 			authStorage.close();
 		}
@@ -390,8 +397,13 @@ describe("signed model preset registry", () => {
 			signedRegistry(
 				data.privateKey,
 				1,
-				[registryProfile("retained", "provider/retained-model")],
+				[
+					registryProfile("retained", "provider/retained-model"),
+					registryProfile("retained-dynamic", "dynamic-provider/future-model"),
+				],
 				[registryPreset("retained-model")],
+				undefined,
+				["dynamic-provider"],
 			),
 		);
 		const second = signedRegistry(
@@ -411,7 +423,13 @@ describe("signed model preset registry", () => {
 		expect(calls).toBe(4);
 		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
 		expect(accepted.profiles.has("retained")).toBe(true);
+		expect(accepted.profiles.has("retained-dynamic")).toBe(true);
 		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "retained-model" })]));
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).cacheHealth).toBe(
+			"valid",
+		);
+		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
+		expect(state.history[0].retainedDynamicProviders).toEqual(["dynamic-provider"]);
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
@@ -462,6 +480,22 @@ describe("signed model preset registry", () => {
 			activeRevision: 1,
 			highestSeenRevision: 2,
 		});
+		await accept(data, signedRegistry(data.privateKey, 2));
+		expect(
+			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).activeRevision,
+		).toBe(1);
+		await expect(
+			refreshModelPresetRegistry({
+				agentDir: data.agentDir,
+				manifestUrl,
+				trustedKeys: data.trustedKeys,
+				allowTestUrls: true,
+				fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
+			}),
+		).resolves.toMatchObject({ status: "not_modified", revision: 2 });
+		expect(
+			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).activeRevision,
+		).toBe(1);
 		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(2);
 		await setModelPresetRegistryPin({ agentDir: data.agentDir });

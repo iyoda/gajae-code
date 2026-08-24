@@ -367,6 +367,7 @@ type AcceptedGeneration = {
 	etag?: string;
 	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
 	retainedPresets: ModelPresetRegistryPresets["presets"];
+	retainedDynamicProviders: string[];
 };
 
 type RegistryState = {
@@ -756,8 +757,10 @@ function validateGeneration(
 	if (manifestSha256 !== generation.manifestSha256) throw new Error("Cached registry manifest digest is invalid.");
 	assertSafeRegistryDocument(generation.retainedProfiles);
 	assertSafeRegistryDocument(generation.retainedPresets);
+	assertSafeRegistryDocument(generation.retainedDynamicProviders);
 	const effectiveProfiles = ModelPresetRegistryProfilesSchema.parse({
 		...profiles,
+		dynamicProviders: [...generation.retainedDynamicProviders, ...profiles.dynamicProviders],
 		profiles: [...generation.retainedProfiles, ...profiles.profiles],
 	});
 	const effectivePresets = ModelPresetRegistryPresetsSchema.parse({
@@ -808,6 +811,11 @@ function parseState(value: unknown): RegistryState {
 		const presets = ModelPresetRegistryPresetsSchema.safeParse(generation.presets);
 		const retainedProfiles = z.array(RegistryProfileSchema).max(4096).safeParse(generation.retainedProfiles);
 		const retainedPresets = z.array(RegistryPresetSchema).max(100_000).safeParse(generation.retainedPresets);
+		const retainedDynamicProviders = z
+			.array(z.string().min(1).max(128).regex(PROFILE_ID_PATTERN))
+			.max(128)
+			.refine(values => new Set(values).size === values.length)
+			.safeParse(generation.retainedDynamicProviders);
 		if (
 			!manifest.success ||
 			!snapshot.success ||
@@ -815,6 +823,7 @@ function parseState(value: unknown): RegistryState {
 			!presets.success ||
 			!retainedProfiles.success ||
 			!retainedPresets.success ||
+			!retainedDynamicProviders.success ||
 			typeof generation.manifestSha256 !== "string" ||
 			!SHA256_PATTERN.test(generation.manifestSha256) ||
 			typeof generation.acceptedAt !== "string" ||
@@ -832,6 +841,7 @@ function parseState(value: unknown): RegistryState {
 			etag: generation.etag,
 			retainedProfiles: retainedProfiles.data,
 			retainedPresets: retainedPresets.data,
+			retainedDynamicProviders: retainedDynamicProviders.data,
 		};
 	});
 	return { ...state, version: 1, history };
@@ -1107,18 +1117,24 @@ function retainRemoved(
 ): {
 	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
 	retainedPresets: ModelPresetRegistryPresets["presets"];
+	retainedDynamicProviders: string[];
 } {
-	if (!previous) return { retainedProfiles: [], retainedPresets: [] };
+	if (!previous) return { retainedProfiles: [], retainedPresets: [], retainedDynamicProviders: [] };
 	const nextProfiles = new Set(profiles.profiles.map(profile => profile.id));
 	const previousProfilesById = new Map(
 		[...previous.retainedProfiles, ...previous.profiles.profiles].map(profile => [profile.id, profile]),
 	);
 	const retainedProfiles = [...previousProfilesById.values()].filter(profile => !nextProfiles.has(profile.id));
 	const retainedSelectors = new Set<string>();
+	const retainedSelectorProviders = new Set<string>();
 	for (const profile of retainedProfiles) {
 		for (const binding of Object.values(profile.roleBindings)) {
-			for (const selector of Array.isArray(binding) ? binding : [binding])
-				retainedSelectors.add(selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, ""));
+			for (const selector of Array.isArray(binding) ? binding : [binding]) {
+				const base = selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, "");
+				retainedSelectors.add(base);
+				const slash = base.indexOf("/");
+				if (slash >= 0) retainedSelectorProviders.add(base.slice(0, slash));
+			}
 		}
 	}
 	const nextPresets = new Set(presets.presets.map(preset => `${preset.provider}\u0000${preset.id}`));
@@ -1130,6 +1146,9 @@ function retainRemoved(
 	);
 	return {
 		retainedProfiles,
+		retainedDynamicProviders: [
+			...new Set([...previous.retainedDynamicProviders, ...previous.profiles.dynamicProviders]),
+		].filter(provider => !profiles.dynamicProviders.includes(provider) && retainedSelectorProviders.has(provider)),
 		retainedPresets: [...previousPresetsByKey.entries()]
 			.filter(([key, preset]) => {
 				if (nextPresets.has(key)) return false;
@@ -1188,20 +1207,26 @@ async function refreshModelPresetRegistryInner(
 				const state = loadStateSync(agentDir);
 				const selectedRevision = control.pinnedRevision ?? state.activeRevision;
 				if (control.disabled || environmentDisabled()) return { status: "disabled", revision: selectedRevision };
-				const active = state.history.find(item => item.manifest.signed.registryRevision === selectedRevision);
+				const latest = state.history.reduce<AcceptedGeneration | undefined>(
+					(current, item) =>
+						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
+							? item
+							: current,
+					undefined,
+				);
 				const manifestUrl = assertHttpsUrl(effectiveManifestUrl(dependencies), "Registry manifest URL");
 				assertRegistryUrl(manifestUrl, manifestUrl, dependencies.allowTestUrls === true);
 				const manifestResponse = await boundedFetch(
 					manifestUrl,
 					dependencies.maxManifestBytes ?? MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES,
 					dependencies,
-					active?.etag ? { "If-None-Match": active.etag } : {},
+					latest?.etag ? { "If-None-Match": latest.etag } : {},
 				);
 				if (manifestResponse.response.status === 304) {
-					if (!active) throw new Error("Registry returned 304 without a verified cached generation.");
-					validateGeneration(active, effectiveTrustedKeys(dependencies));
+					if (!latest) throw new Error("Registry returned 304 without a verified cached generation.");
+					validateGeneration(latest, effectiveTrustedKeys(dependencies));
 					await writeAtomicJson(paths.state, { ...state, lastCheckedAt: now.toISOString(), lastError: undefined });
-					return { status: "not_modified", revision: active.manifest.signed.registryRevision };
+					return { status: "not_modified", revision: latest.manifest.signed.registryRevision };
 				}
 				const manifestBytes = manifestResponse.bytes ?? new Uint8Array();
 				const manifest = parseCanonicalDocument(
@@ -1266,7 +1291,7 @@ async function refreshModelPresetRegistryInner(
 				)
 					throw new Error("Registry preset identity is invalid.");
 				assertProfilePresetReferences(profiles, presets);
-				const retained = retainRemoved(active, profiles, presets);
+				const retained = retainRemoved(latest, profiles, presets);
 				const generation: AcceptedGeneration = {
 					manifest,
 					snapshot,
@@ -1277,6 +1302,7 @@ async function refreshModelPresetRegistryInner(
 					etag: manifestResponse.response.headers.get("etag") ?? undefined,
 					...retained,
 				};
+				validateGeneration(generation, effectiveTrustedKeys(dependencies));
 				const historyCandidates = [
 					generation,
 					...state.history.filter(
@@ -1301,7 +1327,13 @@ async function refreshModelPresetRegistryInner(
 				}
 				const nextState: RegistryState = {
 					version: 1,
-					activeRevision: control.pinnedRevision ?? manifest.signed.registryRevision,
+					activeRevision:
+						control.pinnedRevision ??
+						(state.activeRevision !== undefined &&
+						state.highestSeenRevision !== undefined &&
+						state.activeRevision < state.highestSeenRevision
+							? state.activeRevision
+							: manifest.signed.registryRevision),
 					highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
 					highestSeenManifestSha256: manifestSha256,
 					history,
