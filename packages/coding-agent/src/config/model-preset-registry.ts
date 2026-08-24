@@ -1161,6 +1161,7 @@ function retainRemoved(
 			}
 		}
 	}
+	for (const preset of previous.retainedPresets) retainedSelectors.add(`${preset.provider}/${preset.id}`);
 	const nextPresets = new Set(presets.presets.map(preset => `${preset.provider}\u0000${preset.id}`));
 	const previousPresetsByKey = new Map(
 		[...previous.retainedPresets, ...previous.presets.presets].map(preset => [

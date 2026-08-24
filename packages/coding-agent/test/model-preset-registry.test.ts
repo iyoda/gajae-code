@@ -494,6 +494,21 @@ describe("signed model preset registry", () => {
 		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "retained-model" })]));
 		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "old-changed-model" })]));
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).cacheHealth).toBe("valid");
+		await accept(
+			data,
+			signedRegistry(
+				data.privateKey,
+				3,
+				[
+					registryProfile("replacement", "provider/replacement-model"),
+					registryProfile("changed", "provider/newest-changed-model"),
+				],
+				[registryPreset("replacement-model"), registryPreset("newest-changed-model")],
+			),
+		);
+		const third = loadAcceptedModelPresetRegistry(data.agentDir, {});
+		expect(third.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "old-changed-model" })]));
+		expect(third.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "new-changed-model" })]));
 		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
 		expect(state.history[0].retainedDynamicProviders).toEqual(["dynamic-provider"]);
 		state.history[0].retainedProfiles[0].displayName = "Safe-shaped cache injection";
@@ -501,7 +516,7 @@ describe("signed model preset registry", () => {
 		const tampered = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(tampered.profiles.size).toBe(0);
 		expect(tampered.error).toMatch(/retained provenance content/i);
-		await expect(accept(data, signedRegistry(data.privateKey, 3))).rejects.toThrow(/retained provenance content/i);
+		await expect(accept(data, signedRegistry(data.privateKey, 4))).rejects.toThrow(/retained provenance content/i);
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
