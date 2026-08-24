@@ -1826,14 +1826,17 @@ export function refreshModelPresetRegistryInBackground(
 				.then(result => {
 					if (result.status === "updated") knownManifestSha256 = result.manifestSha256;
 					if (!cancelled) {
+						let shouldPublish = false;
 						try {
-							publishedFingerprint = publicationFingerprint(
+							const nextFingerprint = publicationFingerprint(
 								getModelPresetRegistryStatus({ ...dependencies, agentDir }),
 							);
+							shouldPublish = nextFingerprint !== publishedFingerprint;
+							publishedFingerprint = nextFingerprint;
 						} catch {
-							// The accepted callback still reloads through its fail-closed cache reader.
+							shouldPublish = result.status === "updated";
 						}
-						onAccepted?.();
+						if (shouldPublish) onAccepted?.();
 					}
 				})
 				.catch(() => undefined)

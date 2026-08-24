@@ -758,14 +758,18 @@ describe("signed model preset registry", () => {
 						refreshIntervalMs: 30,
 					}),
 			);
+			const catalogChanged = vi.fn();
+			modelRegistry.onCatalogChanged(catalogChanged);
 			expect(calls).toBe(0);
 			expect(modelRegistry.getModelProfile("background-profile")).toBeUndefined();
 			for (let attempt = 0; attempt < 50 && !modelRegistry.getModelProfile("background-profile"); attempt++)
 				await Bun.sleep(10);
 			expect(calls).toBe(4);
 			expect(modelRegistry.getModelProfile("background-profile")?.source).toBe("registry");
+			const publicationsAfterAcceptance = catalogChanged.mock.calls.length;
 			for (let attempt = 0; attempt < 20 && calls < 5; attempt++) await Bun.sleep(10);
 			expect(calls).toBeGreaterThanOrEqual(5);
+			expect(catalogChanged).toHaveBeenCalledTimes(publicationsAfterAcceptance);
 			await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
 			for (let attempt = 0; attempt < 20 && modelRegistry.getModelProfile("background-profile"); attempt++)
 				await Bun.sleep(10);
