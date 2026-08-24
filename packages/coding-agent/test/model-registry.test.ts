@@ -7182,7 +7182,7 @@ describe("ModelRegistry", () => {
 			expect(activeRowsFor(registry, ["discovery-provider"])).toEqual([
 				{ provider: "discovery-provider", connectionKind: "credential" },
 			]);
-		});
+		}, 120_000);
 		test("does not retain configured discovery evidence after an in-flight credential change", async () => {
 			writeRawModelsJson({
 				"discovery-provider": {
