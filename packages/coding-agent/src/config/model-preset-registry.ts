@@ -20,6 +20,8 @@ export const MODEL_PRESET_REGISTRY_MAX_SNAPSHOT_BYTES = 64 * 1024;
 export const MODEL_PRESET_REGISTRY_MAX_PROFILES_BYTES = 256 * 1024;
 export const MODEL_PRESET_REGISTRY_MAX_PRESETS_BYTES = 4 * 1024 * 1024;
 const MODEL_PRESET_REGISTRY_MAX_STATE_BYTES = 32 * 1024 * 1024;
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
+const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 const MODEL_PRESET_REGISTRY_MAX_HISTORY = 4;
 const MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES = 1024;
 const MODEL_PRESET_REGISTRY_FETCH_TIMEOUT_MS = 8_000;
@@ -900,7 +902,18 @@ async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 		await handle.close();
 	}
 	try {
-		await fs.rename(temporary, file);
+		for (let attempt = 0; ; attempt++) {
+			try {
+				await fs.rename(temporary, file);
+				break;
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+				if (process.platform !== "win32" || !code || !WINDOWS_RENAME_RETRY_CODES.has(code) || delay === undefined)
+					throw error;
+				await Bun.sleep(delay);
+			}
+		}
 		await syncDirectory(path.dirname(file));
 	} catch (error) {
 		await fs.rm(temporary, { force: true }).catch(() => undefined);
