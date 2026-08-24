@@ -1,8 +1,8 @@
 import * as path from "node:path";
 import { getAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
+import { loadEffectiveModelProfiles } from "../config/model-preset-registry";
 import { UnknownModelProfileError, validateModelProfileName } from "../config/model-profile-contract";
-import { mergeModelProfiles } from "../config/model-profiles";
 import { ModelsConfigSchema } from "../config/models-config-schema";
 
 export interface CoordinatorModelProfile {
@@ -10,7 +10,7 @@ export interface CoordinatorModelProfile {
 }
 
 /**
- * Loads the merged built-in + custom model-profile names from `models.yml`
+ * Loads the merged embedded + accepted registry + custom model-profile names
  * without loading the session-host model registry. The child still owns
  * profile activation; this validates the selection before session creation.
  */
@@ -34,23 +34,33 @@ export class CoordinatorModelProfileRegistryError extends Error {
 }
 
 function coordinatorModelProfiles(
-	profiles?: Parameters<typeof mergeModelProfiles>[0],
+	agentDir: string,
+	profiles?: Parameters<typeof loadEffectiveModelProfiles>[0],
 ): Map<string, CoordinatorModelProfile> {
-	return new Map([...mergeModelProfiles(profiles).keys()].map(name => [name, { name }]));
+	return new Map([...loadEffectiveModelProfiles(profiles, agentDir).keys()].map(name => [name, { name }]));
 }
 
-export const loadCoordinatorModelProfiles: CoordinatorModelProfileLoader = async () => {
-	const modelsFile = Bun.file(path.join(getAgentDir(), "models.yml"));
-	if (!(await modelsFile.exists())) return coordinatorModelProfiles();
+export function createCoordinatorModelProfileLoader(agentDir: string): CoordinatorModelProfileLoader {
+	return async () => loadCoordinatorModelProfilesFromAgentDir(agentDir);
+}
+
+async function loadCoordinatorModelProfilesFromAgentDir(
+	agentDir: string,
+): Promise<Map<string, CoordinatorModelProfile>> {
+	const modelsFile = Bun.file(path.join(agentDir, "models.yml"));
+	if (!(await modelsFile.exists())) return coordinatorModelProfiles(agentDir);
 	try {
 		const parsed = YAML.parse(await modelsFile.text());
 		const config = ModelsConfigSchema.safeParse(parsed);
 		if (!config.success) throw config.error;
-		return coordinatorModelProfiles(config.data.profiles);
+		return coordinatorModelProfiles(agentDir, config.data.profiles);
 	} catch (error) {
 		throw new CoordinatorModelProfileRegistryError(error);
 	}
-};
+}
+
+export const loadCoordinatorModelProfiles: CoordinatorModelProfileLoader = async () =>
+	loadCoordinatorModelProfilesFromAgentDir(getAgentDir());
 
 export type CoordinatorMpresetResolution =
 	| { ok: true; mpreset: string | null }

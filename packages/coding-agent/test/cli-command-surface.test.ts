@@ -28,9 +28,16 @@ describe("GJC public CLI command surface", () => {
 		expect(routeModelsAlias(["models", "deepseek"])).toEqual(["launch", "--list-models", "deepseek"]);
 		expect(routeModelsAlias(["models", "claude", "sonnet"])).toEqual(["launch", "--list-models", "claude sonnet"]);
 		expect(routeModelsAlias(["models", "--json"])).toEqual(["launch", "--list-models", "--json"]);
+		expect(routeModelsAlias(["models", "presets"])).toEqual(["model-presets"]);
+		expect(routeModelsAlias(["models", "presets", "refresh", "--json"])).toEqual([
+			"model-presets",
+			"refresh",
+			"--json",
+		]);
 		expect(routeModelsAlias(["stats"])).toBeUndefined();
 		expect(routeRootArgv(["models"])).toEqual(["launch", "--list-models"]);
 		expect(routeRootArgv(["models", "opus"])).toEqual(["launch", "--list-models", "opus"]);
+		expect(routeRootArgv(["models", "presets", "status"])).toEqual(["model-presets", "status"]);
 		// Ordinary free-form prompts still launch; only the bare `models` token is remapped.
 		expect(routeRootArgv(["list available models"])).toEqual(["launch", "list available models"]);
 	});
@@ -160,6 +167,7 @@ process.exitCode = await child.exited;`;
 			"daemon",
 			"web-search",
 			"local-provider",
+			"model-presets",
 			"mcp-serve",
 			"mcp",
 			"contribute-pr",

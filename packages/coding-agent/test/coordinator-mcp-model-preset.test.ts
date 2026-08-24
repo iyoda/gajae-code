@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	type CoordinatorModelProfile,
 	type CoordinatorModelProfileLoader,
 	CoordinatorModelProfileRegistryError,
+	createCoordinatorModelProfileLoader,
 	resolveCoordinatorMpreset,
 } from "../src/coordinator-mcp/model-preset";
 
@@ -18,6 +22,24 @@ function loaderWithProfiles(...profiles: CoordinatorModelProfile[]): Coordinator
 }
 
 describe("resolveCoordinatorMpreset", () => {
+	it("binds the default profile loader to the router agent directory", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-coordinator-profile-scope-"));
+		const first = path.join(root, "first");
+		const second = path.join(root, "second");
+		await fs.mkdir(first, { recursive: true });
+		await fs.mkdir(second, { recursive: true });
+		await Bun.write(
+			path.join(second, "models.yml"),
+			"profiles:\n  second-only:\n    required_providers: []\n    model_mapping:\n      default: gpt-5.6-luna\n",
+		);
+		try {
+			expect((await createCoordinatorModelProfileLoader(first)()).has("second-only")).toBe(false);
+			expect((await createCoordinatorModelProfileLoader(second)()).has("second-only")).toBe(true);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("treats absent and null values as a no-op selection", async () => {
 		for (const raw of [undefined, null]) {
 			await expect(resolveCoordinatorMpreset(raw, builtinLoader)).resolves.toEqual({ ok: true, mpreset: null });

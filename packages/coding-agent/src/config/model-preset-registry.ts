@@ -1,0 +1,1503 @@
+import * as crypto from "node:crypto";
+import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { Api, Model } from "@gajae-code/ai/core";
+import { getAgentDir, isEnoent } from "@gajae-code/utils";
+import * as z from "zod/v4";
+import { withFileLock } from "./file-lock";
+import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
+import type { ModelsConfig } from "./models-config-schema";
+
+export const MODEL_PRESET_REGISTRY_CONTRACT_VERSION = "1.0.0";
+export const DEFAULT_MODEL_PRESET_REGISTRY_URL =
+	"https://raw.githubusercontent.com/Yeachan-Heo/gajae-code-presets/dev/latest.json";
+export const MODEL_PRESET_REGISTRY_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const MODEL_PRESET_REGISTRY_STARTUP_DELAY_MS = 30_000;
+export const MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES = 64 * 1024;
+export const MODEL_PRESET_REGISTRY_MAX_SNAPSHOT_BYTES = 64 * 1024;
+export const MODEL_PRESET_REGISTRY_MAX_PROFILES_BYTES = 256 * 1024;
+export const MODEL_PRESET_REGISTRY_MAX_PRESETS_BYTES = 4 * 1024 * 1024;
+const MODEL_PRESET_REGISTRY_MAX_STATE_BYTES = 32 * 1024 * 1024;
+const MODEL_PRESET_REGISTRY_MAX_HISTORY = 4;
+const MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES = 1024;
+const MODEL_PRESET_REGISTRY_FETCH_TIMEOUT_MS = 8_000;
+const REVISION_PATTERN = /^[0-9]{8}$/;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const SEMVER_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+const SELECTOR_PATTERN = /^[^\s\p{Cc}]+$/u;
+const PRESET_IDENTIFIER_PATTERN = /^[^\s\p{Cc}]+$/u;
+const SAFE_TEXT_PATTERN = /^[^\p{Cc}]+$/u;
+const DESCRIPTOR_PATH_PATTERN = /^revisions\/[0-9]{8}\/[a-z]+\.json$/;
+const SOURCE_REPOSITORY = "https://github.com/Yeachan-Heo/gajae-code";
+const REGISTRY_RAW_PATH_PREFIX = "/Yeachan-Heo/gajae-code-presets/";
+const RESERVED_IDENTITY_PREFIXES = ["gjc-", "gajae-", "system-", "internal-", "__"];
+const IDENTITY_HOMOGLYPHS = new Map(
+	Object.entries({
+		а: "a",
+		е: "e",
+		о: "o",
+		р: "p",
+		с: "c",
+		х: "x",
+		у: "y",
+		і: "i",
+		ј: "j",
+		к: "k",
+		м: "m",
+		т: "t",
+		в: "b",
+		н: "h",
+		Α: "a",
+		Β: "b",
+		Ε: "e",
+		Ζ: "z",
+		Η: "h",
+		Ι: "i",
+		Κ: "k",
+		Μ: "m",
+		Ν: "n",
+		Ο: "o",
+		Ρ: "p",
+		Τ: "t",
+		Υ: "y",
+		Χ: "x",
+		α: "a",
+		β: "b",
+		ε: "e",
+		ι: "i",
+		κ: "k",
+		ν: "v",
+		ο: "o",
+		ρ: "p",
+		τ: "t",
+		υ: "y",
+		χ: "x",
+	}),
+);
+
+export interface ModelPresetRegistryTrustedKey {
+	keyId: string;
+	publicKeyPem: string;
+	validFrom: string;
+	revokedAt?: string;
+}
+
+/** Compiled trust roots only. Runtime configuration cannot replace these keys. */
+export const MODEL_PRESET_REGISTRY_TRUSTED_KEYS: ReadonlyMap<string, ModelPresetRegistryTrustedKey> = new Map([
+	[
+		"registry-root-2026-01",
+		{
+			keyId: "registry-root-2026-01",
+			publicKeyPem:
+				"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwDhA/c/hX++M+wcBddFEVSm5gB1tVSjKMZPtlMSlTSQ=\n-----END PUBLIC KEY-----\n",
+			validFrom: "2026-08-24T09:41:42.000Z",
+		},
+	],
+]);
+
+const SemverSchema = z.string().max(32).regex(SEMVER_PATTERN);
+const RevisionSchema = z.string().regex(REVISION_PATTERN);
+const Sha256Schema = z.string().regex(SHA256_PATTERN);
+const UtcTimestampSchema = z
+	.string()
+	.datetime({ offset: false })
+	.refine(value => value.endsWith("Z"));
+const DescriptorSchema = z
+	.object({
+		path: z.string().max(128).regex(DESCRIPTOR_PATH_PATTERN),
+		sha256: Sha256Schema,
+		bytes: z
+			.number()
+			.int()
+			.positive()
+			.max(16 * 1024 * 1024),
+		count: z.number().int().nonnegative().max(100_000),
+	})
+	.strict();
+const ConsumerCompatibilitySchema = z.object({ minVersion: SemverSchema, maxVersion: SemverSchema }).strict();
+const CompatibilitySchema = z.object({ consumerContract: ConsumerCompatibilitySchema }).strict();
+const ProvenanceSchema = z
+	.object({
+		sourceRepository: z.literal(SOURCE_REPOSITORY),
+		sourceRevision: z.string().regex(/^[a-f0-9]{40}$/),
+		sourcePaths: z
+			.array(
+				z
+					.string()
+					.max(256)
+					.regex(/^[A-Za-z0-9._/-]+$/),
+			)
+			.min(1)
+			.max(8)
+			.refine(values => new Set(values).size === values.length, "Expected unique source paths."),
+		generatedBy: z
+			.string()
+			.max(128)
+			.regex(/^[A-Za-z0-9._/@-]+$/),
+		generatedAt: UtcTimestampSchema,
+	})
+	.strict();
+const ContentsSchema = z.object({ presets: DescriptorSchema, profiles: DescriptorSchema }).strict();
+const ManifestSignedSchema = z
+	.object({
+		registryRevision: z.number().int().positive().max(99_999_999),
+		revision: RevisionSchema,
+		publishedAt: UtcTimestampSchema,
+		compatibility: CompatibilitySchema,
+		snapshot: DescriptorSchema,
+		contents: ContentsSchema,
+		provenance: ProvenanceSchema,
+	})
+	.strict();
+const SignatureSchema = z
+	.object({
+		algorithm: z.literal("Ed25519"),
+		keyId: z
+			.string()
+			.min(3)
+			.max(64)
+			.regex(/^[a-z0-9][a-z0-9._-]+$/),
+		value: z.string().regex(/^[A-Za-z0-9+/]{86}==$/),
+	})
+	.strict();
+
+export const ModelPresetRegistryManifestSchema = z
+	.object({ schemaVersion: z.literal("1.0.0"), signed: ManifestSignedSchema, signature: SignatureSchema })
+	.strict();
+export const ModelPresetRegistrySnapshotSchema = z
+	.object({
+		schemaVersion: z.literal("1.0.0"),
+		registryRevision: z.number().int().positive().max(99_999_999),
+		revision: RevisionSchema,
+		compatibility: CompatibilitySchema,
+		provenance: ProvenanceSchema,
+		contents: ContentsSchema,
+	})
+	.strict();
+
+const ProfileSelectorSchema = z.union([
+	z.string().min(1).max(256).regex(SELECTOR_PATTERN),
+	z
+		.array(z.string().min(1).max(256).regex(SELECTOR_PATTERN))
+		.min(1)
+		.max(8)
+		.refine(values => new Set(values).size === values.length, "Expected unique selectors."),
+]);
+const RoleBindingsSchema = z
+	.object({
+		default: ProfileSelectorSchema,
+		executor: ProfileSelectorSchema.optional(),
+		architect: ProfileSelectorSchema.optional(),
+		planner: ProfileSelectorSchema.optional(),
+		critic: ProfileSelectorSchema.optional(),
+	})
+	.strict();
+const RegistryProfileSchema = z
+	.object({
+		id: z.string().min(1).max(128).regex(PROFILE_ID_PATTERN),
+		displayName: z.string().min(1).max(160).regex(SAFE_TEXT_PATTERN),
+		providerGroup: z.string().min(1).max(160).regex(SAFE_TEXT_PATTERN),
+		requiredProviders: z
+			.array(z.string().min(1).max(128).regex(PROFILE_ID_PATTERN))
+			.max(32)
+			.refine(values => new Set(values).size === values.length, "Expected unique providers."),
+		alternativeProviderGroups: z
+			.array(
+				z
+					.array(z.string().min(1).max(128).regex(PROFILE_ID_PATTERN))
+					.min(2)
+					.max(16)
+					.refine(values => new Set(values).size === values.length, "Expected unique providers."),
+			)
+			.max(16)
+			.optional(),
+		roleBindings: RoleBindingsSchema,
+	})
+	.strict();
+export const ModelPresetRegistryProfilesSchema = z
+	.object({
+		schemaVersion: z.literal("1.0.0"),
+		revision: RevisionSchema,
+		dynamicProviders: z
+			.array(z.string().min(1).max(128).regex(PROFILE_ID_PATTERN))
+			.max(128)
+			.refine(values => new Set(values).size === values.length, "Expected unique dynamic providers."),
+		profiles: z.array(RegistryProfileSchema).max(4096),
+	})
+	.strict()
+	.superRefine((document, ctx) => {
+		const seen = new Set<string>();
+		for (const [index, profile] of document.profiles.entries()) {
+			if (seen.has(profile.id))
+				ctx.addIssue({ code: "custom", path: ["profiles", index, "id"], message: "Duplicate profile id." });
+			seen.add(profile.id);
+		}
+	});
+
+const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]);
+const CostSchema = z
+	.object({
+		input: z.number().nonnegative().finite(),
+		output: z.number().nonnegative().finite(),
+		cacheRead: z.number().nonnegative().finite(),
+		cacheWrite: z.number().nonnegative().finite(),
+	})
+	.strict();
+const CompatSchema = z
+	.object({
+		maxTokensField: z.literal("max_tokens").optional(),
+		reasoningContentField: z.literal("reasoning_content").optional(),
+		thinkingFormat: z.literal("zai").optional(),
+		reasoningEffortMap: z
+			.object({
+				minimal: EffortSchema.optional(),
+				low: EffortSchema.optional(),
+				medium: EffortSchema.optional(),
+				high: EffortSchema.optional(),
+				xhigh: EffortSchema.optional(),
+				max: EffortSchema.optional(),
+			})
+			.strict()
+			.refine(value => Object.keys(value).length > 0, "Expected at least one reasoning effort mapping.")
+			.optional(),
+		requiresAssistantContentForToolCalls: z.boolean().optional(),
+		requiresReasoningContentForToolCalls: z.boolean().optional(),
+		supportsDeveloperRole: z.boolean().optional(),
+		supportsMultipleSystemMessages: z.boolean().optional(),
+		supportsReasoningEffort: z.boolean().optional(),
+		supportsStore: z.boolean().optional(),
+		supportsToolChoice: z.boolean().optional(),
+		supportsUsageInStreaming: z.boolean().optional(),
+	})
+	.strict();
+const ThinkingSchema = z
+	.object({
+		mode: z.enum(["anthropic-adaptive", "anthropic-budget-effort", "budget", "effort", "google-level"]),
+		minLevel: EffortSchema.optional(),
+		maxLevel: EffortSchema.optional(),
+		defaultLevel: EffortSchema.optional(),
+		levels: z
+			.array(EffortSchema)
+			.min(1)
+			.max(6)
+			.refine(values => new Set(values).size === values.length, "Expected unique thinking levels.")
+			.optional(),
+	})
+	.strict();
+const LongContextPricingSchema = z.object({ threshold: z.number().int().positive(), cost: CostSchema }).strict();
+const RegistryPresetSchema = z
+	.object({
+		id: z.string().min(1).max(192).regex(PRESET_IDENTIFIER_PATTERN),
+		provider: z.string().min(1).max(192).regex(PRESET_IDENTIFIER_PATTERN),
+		name: z.string().min(1).max(256).regex(SAFE_TEXT_PATTERN),
+		api: z.enum([
+			"anthropic-messages",
+			"azure-openai-responses",
+			"bedrock-converse-stream",
+			"cursor-agent",
+			"google-gemini-cli",
+			"google-generative-ai",
+			"google-vertex",
+			"ollama-chat",
+			"openai-codex-responses",
+			"openai-completions",
+			"openai-responses",
+		]),
+		reasoning: z.boolean(),
+		input: z
+			.array(z.enum(["text", "image"]))
+			.min(1)
+			.max(2)
+			.refine(values => new Set(values).size === values.length, "Expected unique input modalities."),
+		output: z
+			.array(z.enum(["text", "image"]))
+			.min(1)
+			.max(2)
+			.refine(values => new Set(values).size === values.length, "Expected unique output modalities.")
+			.optional(),
+		cost: CostSchema,
+		contextWindow: z.number().int().positive(),
+		maxTokens: z.number().int().positive(),
+		compat: CompatSchema.optional(),
+		thinking: ThinkingSchema.optional(),
+		longContextPricing: LongContextPricingSchema.optional(),
+		applyPatchToolType: z.literal("freeform").optional(),
+		preferWebsockets: z.boolean().optional(),
+		premiumMultiplier: z.number().nonnegative().finite().optional(),
+		priority: z.number().int().nonnegative().optional(),
+		contextPromotionTarget: z
+			.string()
+			.min(3)
+			.max(256)
+			.regex(/^[^\s\p{Cc}]+\/[^\s\p{Cc}]+$/u)
+			.optional(),
+	})
+	.strict();
+export const ModelPresetRegistryPresetsSchema = z
+	.object({
+		schemaVersion: z.literal("1.0.0"),
+		revision: RevisionSchema,
+		presets: z.array(RegistryPresetSchema).max(100_000),
+	})
+	.strict()
+	.superRefine((document, ctx) => {
+		const seen = new Set<string>();
+		for (const [index, preset] of document.presets.entries()) {
+			const key = `${preset.provider}\u0000${preset.id}`;
+			if (seen.has(key))
+				ctx.addIssue({ code: "custom", path: ["presets", index], message: "Duplicate provider/model preset." });
+			seen.add(key);
+		}
+	});
+
+export type ModelPresetRegistryManifest = z.infer<typeof ModelPresetRegistryManifestSchema>;
+export type ModelPresetRegistrySnapshot = z.infer<typeof ModelPresetRegistrySnapshotSchema>;
+export type ModelPresetRegistryProfiles = z.infer<typeof ModelPresetRegistryProfilesSchema>;
+export type ModelPresetRegistryPresets = z.infer<typeof ModelPresetRegistryPresetsSchema>;
+
+type AcceptedGeneration = {
+	manifest: ModelPresetRegistryManifest;
+	snapshot: ModelPresetRegistrySnapshot;
+	profiles: ModelPresetRegistryProfiles;
+	presets: ModelPresetRegistryPresets;
+	manifestSha256: string;
+	acceptedAt: string;
+	etag?: string;
+	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
+	retainedPresets: ModelPresetRegistryPresets["presets"];
+};
+
+type RegistryState = {
+	version: 1;
+	activeRevision?: number;
+	highestSeenRevision?: number;
+	highestSeenManifestSha256?: string;
+	history: AcceptedGeneration[];
+	lastCheckedAt?: string;
+	lastError?: string;
+};
+
+type RegistryControl = { version: 1; disabled: boolean; pinnedRevision?: number };
+
+export interface ModelPresetRegistryDependencies {
+	agentDir?: string;
+	manifestUrl?: string;
+	trustedKeys?: ReadonlyMap<string, ModelPresetRegistryTrustedKey>;
+	fetch?: typeof fetch;
+	now?: () => Date;
+	timeoutMs?: number;
+	maxManifestBytes?: number;
+	maxSnapshotBytes?: number;
+	maxProfilesBytes?: number;
+	maxPresetsBytes?: number;
+	maxStateBytes?: number;
+	allowTestUrls?: boolean;
+	automaticRefresh?: boolean;
+	startupDelayMs?: number;
+	refreshIntervalMs?: number;
+}
+
+export interface AcceptedModelPresetRegistry {
+	profiles: Map<string, ModelProfileDefinition>;
+	presets: Model<Api>[];
+	revision?: number;
+	revisionId?: string;
+	manifestSha256?: string;
+	keyId?: string;
+	sourceRevision?: string;
+	retainedProfiles: string[];
+	retainedPresets: string[];
+	error?: string;
+	disabled: boolean;
+	pinnedRevision?: number;
+}
+
+export type ModelPresetRegistryRefreshResult =
+	| {
+			status: "updated";
+			revision: number;
+			revisionId: string;
+			manifestSha256: string;
+			retainedProfiles: string[];
+			retainedPresets: string[];
+	  }
+	| { status: "not_modified"; revision?: number }
+	| { status: "disabled"; revision?: number };
+
+export interface ModelPresetRegistryStatus {
+	contractVersion: string;
+	source: "embedded" | "registry";
+	cacheHealth: "empty" | "valid" | "corrupt";
+	activeRevision?: number;
+	activeRevisionId?: string;
+	highestSeenRevision?: number;
+	manifestSha256?: string;
+	snapshotSha256?: string;
+	profilesSha256?: string;
+	presetsSha256?: string;
+	keyId?: string;
+	sourceRevision?: string;
+	acceptedAt?: string;
+	publishedAt?: string;
+	lastCheckedAt?: string;
+	lastError?: string;
+	disabled: boolean;
+	pinnedRevision?: number;
+	retainedProfiles: string[];
+	retainedPresets: string[];
+	historyRevisions: number[];
+	profileCount: number;
+	presetCount: number;
+}
+
+function registryPaths(agentDir: string) {
+	const root = path.join(agentDir, "model-presets");
+	return {
+		root,
+		state: path.join(root, "state.json"),
+		control: path.join(root, "control.json"),
+		transaction: path.join(root, "transaction"),
+	};
+}
+
+function safeError(error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error);
+	if (!/^(?:Registry|Cached registry|Cannot pin|Cannot rollback|The preset registry)/.test(raw))
+		return "Registry refresh failed.";
+	const redacted = raw
+		.replace(/https?:\/\/[^\s]+/gi, "<registry-url>")
+		.replace(/(api[_-]?key|token|secret|authorization|cookie)\s*[:=]\s*[^\s,;]+/gi, "$1=<redacted>")
+		.replace(/[\p{Cc}\p{Cf}]+/gu, " ")
+		.trim();
+	if (Buffer.byteLength(redacted) <= MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES) return redacted;
+	let end = redacted.length;
+	while (end > 0 && Buffer.byteLength(redacted.slice(0, end)) > MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES) end--;
+	return redacted.slice(0, end);
+}
+
+function assertSafeRegistryDocument(value: unknown, location = "$"): void {
+	if (typeof value === "string") {
+		if (/https?:\/\//i.test(value) && value !== SOURCE_REPOSITORY)
+			throw new Error(`Registry document contains an unsafe URL at ${location}.`);
+		if (/(?:^|[^a-z])(sk-[A-Za-z0-9_-]{12,}|gh[opusr]_[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|Bearer\s+\S+)/i.test(value))
+			throw new Error(`Registry document contains possible secret material at ${location}.`);
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const [index, entry] of value.entries()) assertSafeRegistryDocument(entry, `${location}[${index}]`);
+		return;
+	}
+	for (const [key, entry] of Object.entries(value)) {
+		if (/^(?:headers?|api[_-]?key|base[_-]?url|secret|password|command|script|extraBody)$/i.test(key))
+			throw new Error(`Registry document contains unsafe field ${location}.${key}.`);
+		assertSafeRegistryDocument(entry, `${location}.${key}`);
+	}
+}
+
+function identitySkeleton(value: string): string {
+	return [...value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()]
+		.map(character => IDENTITY_HOMOGLYPHS.get(character) ?? character)
+		.join("");
+}
+
+function assertUniqueRegistryNames(values: readonly string[], label: string): void {
+	const exact = new Set<string>();
+	const folded = new Map<string, string>();
+	for (const value of values) {
+		if (exact.has(value)) throw new Error(`Registry document contains duplicate ${label}.`);
+		exact.add(value);
+		const skeleton = identitySkeleton(value);
+		const previous = folded.get(skeleton);
+		if (previous && previous !== value) throw new Error(`Registry document contains confusable ${label}.`);
+		folded.set(skeleton, value);
+		if (RESERVED_IDENTITY_PREFIXES.some(prefix => value.toLowerCase().startsWith(prefix)))
+			throw new Error(`Registry document uses a reserved ${label} namespace.`);
+	}
+}
+
+function assertRegistryIdentityPolicy(value: unknown): void {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return;
+	const document = value as Record<string, unknown>;
+	if (Array.isArray(document.profiles)) {
+		assertUniqueRegistryNames(
+			document.profiles.map(profile => String((profile as { id?: unknown }).id ?? "")),
+			"profile id",
+		);
+	}
+	if (Array.isArray(document.dynamicProviders))
+		assertUniqueRegistryNames(document.dynamicProviders.map(String), "dynamic provider id");
+	if (Array.isArray(document.presets)) {
+		assertUniqueRegistryNames(
+			document.presets.map(preset => {
+				const record = preset as { provider?: unknown; id?: unknown };
+				return `${String(record.provider ?? "")}/${String(record.id ?? "")}`;
+			}),
+			"preset selector",
+		);
+	}
+}
+
+function assertCanonicalUnicode(value: string): void {
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff)
+				throw new TypeError("Canonical JSON rejects lone high surrogates.");
+			index++;
+		} else if (code >= 0xdc00 && code <= 0xdfff) {
+			throw new TypeError("Canonical JSON rejects lone low surrogates.");
+		}
+	}
+}
+
+function serializeCanonicalJson(value: unknown, stack: Set<object>): string {
+	if (value === null) return "null";
+	if (typeof value === "boolean") return value ? "true" : "false";
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new TypeError("Canonical JSON rejects non-finite numbers.");
+		return JSON.stringify(Object.is(value, -0) ? 0 : value);
+	}
+	if (typeof value === "string") {
+		assertCanonicalUnicode(value);
+		return JSON.stringify(value);
+	}
+	if (typeof value !== "object") throw new TypeError(`Canonical JSON rejects ${typeof value}.`);
+	if (stack.has(value)) throw new TypeError("Canonical JSON rejects cycles.");
+	stack.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const entries: string[] = [];
+			for (let index = 0; index < value.length; index++) {
+				if (!Object.hasOwn(value, index)) throw new TypeError("Canonical JSON rejects sparse arrays.");
+				entries.push(serializeCanonicalJson(value[index], stack));
+			}
+			return `[${entries.join(",")}]`;
+		}
+		if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+			throw new TypeError("Canonical JSON accepts plain objects only.");
+		const record = value as Record<string, unknown>;
+		const entries: string[] = [];
+		for (const key of Object.keys(record).sort()) {
+			assertCanonicalUnicode(key);
+			entries.push(`${JSON.stringify(key)}:${serializeCanonicalJson(record[key], stack)}`);
+		}
+		return `{${entries.join(",")}}`;
+	} finally {
+		stack.delete(value);
+	}
+}
+
+export function canonicalModelPresetRegistryJson(value: unknown): string {
+	return serializeCanonicalJson(value, new Set());
+}
+
+function sha256(bytes: Uint8Array | string): string {
+	return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function parseCanonicalDocument<T>(bytes: Uint8Array, description: string, schema: z.ZodType<T>): T {
+	let text: string;
+	let value: unknown;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		value = JSON.parse(text);
+	} catch {
+		throw new Error(`${description} is not valid UTF-8 JSON.`);
+	}
+	const checked = schema.safeParse(value);
+	if (!checked.success)
+		throw new Error(`${description} schema rejected: ${checked.error.issues[0]?.message ?? "invalid"}.`);
+	assertSafeRegistryDocument(checked.data);
+	assertRegistryIdentityPolicy(checked.data);
+	if (text !== canonicalModelPresetRegistryJson(checked.data))
+		throw new Error(`${description} is not canonical JSON.`);
+	return checked.data;
+}
+
+function compareSemver(left: string, right: string): number {
+	const a = left.split(".").map(Number);
+	const b = right.split(".").map(Number);
+	for (let index = 0; index < 3; index++) {
+		if (a[index] !== b[index]) return (a[index] ?? 0) - (b[index] ?? 0);
+	}
+	return 0;
+}
+
+function assertCompatible(compatibility: z.infer<typeof CompatibilitySchema>): void {
+	const { minVersion, maxVersion } = compatibility.consumerContract;
+	if (compareSemver(minVersion, maxVersion) > 0) throw new Error("Registry compatibility bounds are inverted.");
+	if (
+		compareSemver(MODEL_PRESET_REGISTRY_CONTRACT_VERSION, minVersion) < 0 ||
+		compareSemver(MODEL_PRESET_REGISTRY_CONTRACT_VERSION, maxVersion) > 0
+	)
+		throw new Error("Registry manifest is incompatible with this GJC preset contract.");
+}
+
+function verifyManifest(
+	manifest: ModelPresetRegistryManifest,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): void {
+	assertCompatible(manifest.signed.compatibility);
+	if (manifest.signed.revision !== String(manifest.signed.registryRevision).padStart(8, "0"))
+		throw new Error("Registry revision identity is inconsistent.");
+	const key = trustedKeys.get(manifest.signature.keyId);
+	if (!key || key.keyId !== manifest.signature.keyId)
+		throw new Error(`Registry signature key id is not trusted: ${manifest.signature.keyId}.`);
+	const publishedAt = Date.parse(manifest.signed.publishedAt);
+	if (!Number.isFinite(publishedAt) || publishedAt < Date.parse(key.validFrom))
+		throw new Error("Registry manifest predates its signing key validity.");
+	if (key.revokedAt) throw new Error("Registry manifest signing key is revoked.");
+	const signature = Buffer.from(manifest.signature.value, "base64");
+	if (signature.length !== 64) throw new Error("Registry signature has an invalid length.");
+	if (
+		!crypto.verify(null, Buffer.from(canonicalModelPresetRegistryJson(manifest.signed)), key.publicKeyPem, signature)
+	)
+		throw new Error("Registry manifest signature verification failed.");
+}
+
+function assertDescriptorRevision(descriptor: z.infer<typeof DescriptorSchema>, revision: string): void {
+	if (!descriptor.path.startsWith(`revisions/${revision}/`))
+		throw new Error("Registry descriptor path does not match its revision.");
+}
+
+function assertManifestBindings(manifest: ModelPresetRegistryManifest): void {
+	for (const descriptor of [
+		manifest.signed.snapshot,
+		manifest.signed.contents.profiles,
+		manifest.signed.contents.presets,
+	])
+		assertDescriptorRevision(descriptor, manifest.signed.revision);
+}
+
+function assertSnapshotBindings(manifest: ModelPresetRegistryManifest, snapshot: ModelPresetRegistrySnapshot): void {
+	if (
+		snapshot.registryRevision !== manifest.signed.registryRevision ||
+		snapshot.revision !== manifest.signed.revision ||
+		canonicalModelPresetRegistryJson(snapshot.compatibility) !==
+			canonicalModelPresetRegistryJson(manifest.signed.compatibility) ||
+		canonicalModelPresetRegistryJson(snapshot.provenance) !==
+			canonicalModelPresetRegistryJson(manifest.signed.provenance) ||
+		canonicalModelPresetRegistryJson(snapshot.contents) !== canonicalModelPresetRegistryJson(manifest.signed.contents)
+	)
+		throw new Error("Registry snapshot does not match the signed manifest.");
+}
+
+function assertContentDescriptor(
+	bytes: Uint8Array,
+	descriptor: z.infer<typeof DescriptorSchema>,
+	description: string,
+): void {
+	if (bytes.byteLength !== descriptor.bytes) throw new Error(`${description} size mismatch.`);
+	if (sha256(bytes) !== descriptor.sha256) throw new Error(`${description} digest mismatch.`);
+}
+
+function assertProfilePresetReferences(
+	profiles: ModelPresetRegistryProfiles,
+	presets: ModelPresetRegistryPresets,
+): void {
+	const exact = new Set(presets.presets.map(preset => `${preset.provider}/${preset.id}`));
+	const bare = new Set(presets.presets.map(preset => preset.id));
+	const dynamic = new Set(profiles.dynamicProviders);
+	for (const profile of profiles.profiles) {
+		for (const binding of Object.values(profile.roleBindings)) {
+			for (const selector of Array.isArray(binding) ? binding : [binding]) {
+				const base = selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, "");
+				const slash = base.indexOf("/");
+				if (slash >= 0) {
+					if (!exact.has(base) && !dynamic.has(base.slice(0, slash)))
+						throw new Error(`Registry profile ${profile.id} references an unknown model.`);
+				} else if (!bare.has(base)) {
+					throw new Error(`Registry profile ${profile.id} references an unknown model alias.`);
+				}
+			}
+		}
+	}
+}
+
+function validateGeneration(
+	generation: AcceptedGeneration,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): AcceptedGeneration {
+	const manifest = ModelPresetRegistryManifestSchema.parse(generation.manifest);
+	assertSafeRegistryDocument(manifest);
+	verifyManifest(manifest, trustedKeys);
+	assertManifestBindings(manifest);
+	const snapshotBytes = new TextEncoder().encode(canonicalModelPresetRegistryJson(generation.snapshot));
+	assertContentDescriptor(snapshotBytes, manifest.signed.snapshot, "Cached registry snapshot");
+	const snapshot = ModelPresetRegistrySnapshotSchema.parse(generation.snapshot);
+	assertSafeRegistryDocument(snapshot);
+	assertSnapshotBindings(manifest, snapshot);
+	const profileBytes = new TextEncoder().encode(canonicalModelPresetRegistryJson(generation.profiles));
+	assertContentDescriptor(profileBytes, manifest.signed.contents.profiles, "Cached registry profiles");
+	const profiles = ModelPresetRegistryProfilesSchema.parse(generation.profiles);
+	assertSafeRegistryDocument(profiles);
+	assertRegistryIdentityPolicy(profiles);
+	if (
+		profiles.revision !== manifest.signed.revision ||
+		profiles.profiles.length !== manifest.signed.contents.profiles.count
+	)
+		throw new Error("Cached registry profile identity is invalid.");
+	const presetBytes = new TextEncoder().encode(canonicalModelPresetRegistryJson(generation.presets));
+	assertContentDescriptor(presetBytes, manifest.signed.contents.presets, "Cached registry presets");
+	const presets = ModelPresetRegistryPresetsSchema.parse(generation.presets);
+	assertSafeRegistryDocument(presets);
+	assertRegistryIdentityPolicy(presets);
+	if (
+		presets.revision !== manifest.signed.revision ||
+		presets.presets.length !== manifest.signed.contents.presets.count
+	)
+		throw new Error("Cached registry preset identity is invalid.");
+	assertProfilePresetReferences(profiles, presets);
+	const manifestSha256 = sha256(canonicalModelPresetRegistryJson(manifest));
+	if (manifestSha256 !== generation.manifestSha256) throw new Error("Cached registry manifest digest is invalid.");
+	assertSafeRegistryDocument(generation.retainedProfiles);
+	assertSafeRegistryDocument(generation.retainedPresets);
+	const effectiveProfiles = ModelPresetRegistryProfilesSchema.parse({
+		...profiles,
+		profiles: [...generation.retainedProfiles, ...profiles.profiles],
+	});
+	const effectivePresets = ModelPresetRegistryPresetsSchema.parse({
+		...presets,
+		presets: [...generation.retainedPresets, ...presets.presets],
+	});
+	assertRegistryIdentityPolicy(effectiveProfiles);
+	assertRegistryIdentityPolicy(effectivePresets);
+	assertProfilePresetReferences(effectiveProfiles, effectivePresets);
+	return { ...generation, manifest, snapshot, profiles, presets, manifestSha256 };
+}
+
+function readJsonSync(file: string): unknown | undefined {
+	try {
+		const stat = fsSync.lstatSync(file);
+		if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Registry cache path is not a regular file.");
+		if (stat.size > MODEL_PRESET_REGISTRY_MAX_STATE_BYTES) throw new Error("Registry cache is oversized.");
+		return JSON.parse(fsSync.readFileSync(file, "utf8"));
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+function parseState(value: unknown): RegistryState {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Registry cache state is invalid.");
+	const state = value as Partial<RegistryState>;
+	if (state.version !== 1 || !Array.isArray(state.history))
+		throw new Error("Registry cache state version is invalid.");
+	for (const field of ["activeRevision", "highestSeenRevision"] as const) {
+		const entry = state[field];
+		if (entry !== undefined && (!Number.isSafeInteger(entry) || entry <= 0))
+			throw new Error(`Registry cache ${field} is invalid.`);
+	}
+	if (state.highestSeenManifestSha256 !== undefined && !SHA256_PATTERN.test(state.highestSeenManifestSha256))
+		throw new Error("Registry cache highest manifest digest is invalid.");
+	if (state.lastCheckedAt !== undefined && !Number.isFinite(Date.parse(state.lastCheckedAt)))
+		throw new Error("Registry cache check timestamp is invalid.");
+	if (state.lastError !== undefined && typeof state.lastError !== "string")
+		throw new Error("Registry cache error state is invalid.");
+	const history = state.history.map((entry, index): AcceptedGeneration => {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry))
+			throw new Error(`Registry cache generation ${index} is invalid.`);
+		const generation = entry as Partial<AcceptedGeneration>;
+		const manifest = ModelPresetRegistryManifestSchema.safeParse(generation.manifest);
+		const snapshot = ModelPresetRegistrySnapshotSchema.safeParse(generation.snapshot);
+		const profiles = ModelPresetRegistryProfilesSchema.safeParse(generation.profiles);
+		const presets = ModelPresetRegistryPresetsSchema.safeParse(generation.presets);
+		const retainedProfiles = z.array(RegistryProfileSchema).max(4096).safeParse(generation.retainedProfiles);
+		const retainedPresets = z.array(RegistryPresetSchema).max(100_000).safeParse(generation.retainedPresets);
+		if (
+			!manifest.success ||
+			!snapshot.success ||
+			!profiles.success ||
+			!presets.success ||
+			!retainedProfiles.success ||
+			!retainedPresets.success ||
+			typeof generation.manifestSha256 !== "string" ||
+			!SHA256_PATTERN.test(generation.manifestSha256) ||
+			typeof generation.acceptedAt !== "string" ||
+			!Number.isFinite(Date.parse(generation.acceptedAt)) ||
+			(generation.etag !== undefined && typeof generation.etag !== "string")
+		)
+			throw new Error(`Registry cache generation ${index} is invalid.`);
+		return {
+			manifest: manifest.data,
+			snapshot: snapshot.data,
+			profiles: profiles.data,
+			presets: presets.data,
+			manifestSha256: generation.manifestSha256,
+			acceptedAt: generation.acceptedAt,
+			etag: generation.etag,
+			retainedProfiles: retainedProfiles.data,
+			retainedPresets: retainedPresets.data,
+		};
+	});
+	return { ...state, version: 1, history };
+}
+
+function loadStateSync(agentDir: string): RegistryState {
+	const value = readJsonSync(registryPaths(agentDir).state);
+	return value === undefined ? { version: 1, history: [] } : parseState(value);
+}
+
+function loadControlSync(agentDir: string): RegistryControl {
+	const value = readJsonSync(registryPaths(agentDir).control);
+	if (value === undefined) return { version: 1, disabled: false };
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new Error("Registry control state is invalid.");
+	const control = value as Partial<RegistryControl>;
+	if (control.version !== 1 || typeof control.disabled !== "boolean")
+		throw new Error("Registry control version is invalid.");
+	if (
+		control.pinnedRevision !== undefined &&
+		(!Number.isSafeInteger(control.pinnedRevision) || control.pinnedRevision <= 0)
+	)
+		throw new Error("Registry pin is invalid.");
+	return { version: 1, disabled: control.disabled, pinnedRevision: control.pinnedRevision };
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+	if (process.platform === "win32") return;
+	const handle = await fs.open(directory, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+async function writeAtomicJson(file: string, value: unknown): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+	const serialized = `${JSON.stringify(value)}\n`;
+	if (path.basename(file) === "state.json" && Buffer.byteLength(serialized) > MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
+		throw new Error("Registry cache state exceeds its durable size limit.");
+	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	const handle = await fs.open(temporary, "wx", 0o600);
+	try {
+		await handle.writeFile(serialized, "utf8");
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	try {
+		await fs.rename(temporary, file);
+		await syncDirectory(path.dirname(file));
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+function effectiveAgentDir(dependencies: ModelPresetRegistryDependencies): string {
+	return dependencies.agentDir ?? getAgentDir();
+}
+function effectiveTrustedKeys(dependencies: ModelPresetRegistryDependencies) {
+	return dependencies.trustedKeys ?? MODEL_PRESET_REGISTRY_TRUSTED_KEYS;
+}
+function effectiveManifestUrl(dependencies: ModelPresetRegistryDependencies): string {
+	return dependencies.manifestUrl ?? process.env.GJC_MODEL_PRESET_REGISTRY_URL ?? DEFAULT_MODEL_PRESET_REGISTRY_URL;
+}
+function environmentDisabled(): boolean {
+	return /^(?:1|true|yes|on)$/i.test(process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED ?? "");
+}
+function assertHttpsUrl(raw: string, description: string): URL {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		throw new Error(`${description} is invalid.`);
+	}
+	if (url.protocol !== "https:" || url.username || url.password)
+		throw new Error(`${description} must use credential-free HTTPS.`);
+	return url;
+}
+function assertRegistryUrl(url: URL, manifestUrl: URL, allowTestUrls: boolean): void {
+	if (allowTestUrls) {
+		if (url.origin !== manifestUrl.origin) throw new Error("Registry content URL changed origin.");
+		return;
+	}
+	if (
+		url.hostname !== "raw.githubusercontent.com" ||
+		url.port ||
+		url.search ||
+		url.hash ||
+		!url.pathname.startsWith(REGISTRY_RAW_PATH_PREFIX) ||
+		url.origin !== manifestUrl.origin
+	)
+		throw new Error("Registry content URL is outside the approved immutable registry namespace.");
+}
+function descriptorUrl(descriptor: z.infer<typeof DescriptorSchema>, manifestUrl: URL, allowTestUrls: boolean): URL {
+	const url = new URL(descriptor.path, manifestUrl);
+	assertRegistryUrl(url, manifestUrl, allowTestUrls);
+	return url;
+}
+
+function generationProfiles(generation: AcceptedGeneration): Map<string, ModelProfileDefinition> {
+	const definitions = [...generation.retainedProfiles, ...generation.profiles.profiles];
+	return new Map(
+		definitions.map(profile => [
+			profile.id,
+			{
+				name: profile.id,
+				displayName: profile.displayName,
+				providerGroup: profile.providerGroup,
+				requiredProviders: [...profile.requiredProviders],
+				alternativeProviderGroups: profile.alternativeProviderGroups?.map(group => [...group]),
+				modelMapping: { ...profile.roleBindings } as Partial<Record<ModelProfileRole, string | string[]>>,
+				source: "registry" as const,
+			},
+		]),
+	);
+}
+function generationPresets(generation: AcceptedGeneration): Model<Api>[] {
+	return [...generation.retainedPresets, ...generation.presets.presets].map(preset => ({ ...preset }) as Model<Api>);
+}
+
+export function loadAcceptedModelPresetRegistry(
+	agentDir = getAgentDir(),
+	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
+): AcceptedModelPresetRegistry {
+	let control: RegistryControl;
+	try {
+		control = loadControlSync(agentDir);
+	} catch (error) {
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			error: safeError(error),
+			disabled: environmentDisabled(),
+		};
+	}
+	const disabled = control.disabled || environmentDisabled();
+	if (disabled)
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			disabled: true,
+			pinnedRevision: control.pinnedRevision,
+		};
+	try {
+		const state = loadStateSync(agentDir);
+		const revision = control.pinnedRevision ?? state.activeRevision;
+		const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
+		if (revision !== undefined && !generation)
+			throw new Error(`Registry selected revision ${revision} is missing from accepted history.`);
+		if (!generation)
+			return {
+				profiles: new Map(),
+				presets: [],
+				retainedProfiles: [],
+				retainedPresets: [],
+				disabled: false,
+				pinnedRevision: control.pinnedRevision,
+			};
+		const valid = validateGeneration(generation, effectiveTrustedKeys(dependencies));
+		return {
+			profiles: generationProfiles(valid),
+			presets: generationPresets(valid),
+			revision: valid.manifest.signed.registryRevision,
+			revisionId: valid.manifest.signed.revision,
+			manifestSha256: valid.manifestSha256,
+			keyId: valid.manifest.signature.keyId,
+			sourceRevision: valid.manifest.signed.provenance.sourceRevision,
+			retainedProfiles: valid.retainedProfiles.map(profile => profile.id),
+			retainedPresets: valid.retainedPresets.map(preset => `${preset.provider}/${preset.id}`),
+			disabled: false,
+			pinnedRevision: control.pinnedRevision,
+		};
+	} catch (error) {
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			error: safeError(error),
+			disabled: false,
+			pinnedRevision: control.pinnedRevision,
+		};
+	}
+}
+
+export function loadAcceptedModelPresetProfiles(
+	agentDir = getAgentDir(),
+	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
+): AcceptedModelPresetRegistry {
+	return loadAcceptedModelPresetRegistry(agentDir, dependencies);
+}
+
+export function loadEffectiveModelProfiles(
+	userProfiles: ModelsConfig["profiles"] | undefined,
+	agentDir = getAgentDir(),
+	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
+): Map<string, ModelProfileDefinition> {
+	const accepted = loadAcceptedModelPresetRegistry(agentDir, dependencies);
+	return mergeModelProfiles(userProfiles, accepted.profiles);
+}
+
+async function readBoundedResponse(response: Response, maxBytes: number, description: string): Promise<Uint8Array> {
+	const declaredLength = response.headers.get("content-length");
+	if (declaredLength !== null && Number(declaredLength) > maxBytes)
+		throw new Error(`${description} exceeds the byte limit.`);
+	if (!response.body) return new Uint8Array();
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > maxBytes) {
+			await reader.cancel();
+			throw new Error(`${description} exceeds the byte limit.`);
+		}
+		chunks.push(value);
+	}
+	const result = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		result.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return result;
+}
+
+async function boundedFetch(
+	url: URL,
+	maxBytes: number,
+	dependencies: ModelPresetRegistryDependencies,
+	headers: Record<string, string> = {},
+): Promise<{ response: Response; bytes?: Uint8Array }> {
+	assertHttpsUrl(url.href, "Registry URL");
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(new Error("Registry request timed out.")),
+		dependencies.timeoutMs ?? MODEL_PRESET_REGISTRY_FETCH_TIMEOUT_MS,
+	);
+	try {
+		const response = await (dependencies.fetch ?? fetch)(url.href, {
+			method: "GET",
+			headers,
+			redirect: "error",
+			credentials: "omit",
+			signal: controller.signal,
+		});
+		if (response.url && assertHttpsUrl(response.url, "Registry response URL").href !== url.href)
+			throw new Error("Registry response URL changed unexpectedly.");
+		if (response.status === 304) return { response };
+		if (!response.ok) throw new Error(`Registry request failed with HTTP ${response.status}.`);
+		return { response, bytes: await readBoundedResponse(response, maxBytes, descriptionForUrl(url)) };
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+function descriptionForUrl(url: URL): string {
+	return `Registry ${path.posix.basename(url.pathname) || "response"}`;
+}
+
+function retainRemoved(
+	previous: AcceptedGeneration | undefined,
+	profiles: ModelPresetRegistryProfiles,
+	presets: ModelPresetRegistryPresets,
+): {
+	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
+	retainedPresets: ModelPresetRegistryPresets["presets"];
+} {
+	if (!previous) return { retainedProfiles: [], retainedPresets: [] };
+	const nextProfiles = new Set(profiles.profiles.map(profile => profile.id));
+	const previousProfilesById = new Map(
+		[...previous.retainedProfiles, ...previous.profiles.profiles].map(profile => [profile.id, profile]),
+	);
+	const retainedProfiles = [...previousProfilesById.values()].filter(profile => !nextProfiles.has(profile.id));
+	const retainedSelectors = new Set<string>();
+	for (const profile of retainedProfiles) {
+		for (const binding of Object.values(profile.roleBindings)) {
+			for (const selector of Array.isArray(binding) ? binding : [binding])
+				retainedSelectors.add(selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, ""));
+		}
+	}
+	const nextPresets = new Set(presets.presets.map(preset => `${preset.provider}\u0000${preset.id}`));
+	const previousPresetsByKey = new Map(
+		[...previous.retainedPresets, ...previous.presets.presets].map(preset => [
+			`${preset.provider}\u0000${preset.id}`,
+			preset,
+		]),
+	);
+	return {
+		retainedProfiles,
+		retainedPresets: [...previousPresetsByKey.entries()]
+			.filter(([key, preset]) => {
+				if (nextPresets.has(key)) return false;
+				return retainedSelectors.has(`${preset.provider}/${preset.id}`) || retainedSelectors.has(preset.id);
+			})
+			.map(([, preset]) => preset),
+	};
+}
+
+async function recordFailure(agentDir: string, error: unknown, now: Date): Promise<void> {
+	const paths = registryPaths(agentDir);
+	await withFileLock(
+		paths.transaction,
+		async () => {
+			let state: RegistryState;
+			try {
+				state = loadStateSync(agentDir);
+			} catch {
+				state = { version: 1, history: [] };
+			}
+			await writeAtomicJson(paths.state, {
+				...state,
+				lastCheckedAt: now.toISOString(),
+				lastError: safeError(error),
+			});
+		},
+		{ retries: 20, retryDelayMs: 50, staleMs: 30_000 },
+	);
+}
+
+const refreshSingleFlight = new Map<string, Promise<ModelPresetRegistryRefreshResult>>();
+export async function refreshModelPresetRegistry(
+	dependencies: ModelPresetRegistryDependencies = {},
+): Promise<ModelPresetRegistryRefreshResult> {
+	const agentDir = effectiveAgentDir(dependencies);
+	const existing = refreshSingleFlight.get(agentDir);
+	if (existing) return existing;
+	const promise = refreshModelPresetRegistryInner({ ...dependencies, agentDir }).finally(() => {
+		if (refreshSingleFlight.get(agentDir) === promise) refreshSingleFlight.delete(agentDir);
+	});
+	refreshSingleFlight.set(agentDir, promise);
+	return promise;
+}
+
+async function refreshModelPresetRegistryInner(
+	dependencies: ModelPresetRegistryDependencies & { agentDir: string },
+): Promise<ModelPresetRegistryRefreshResult> {
+	const { agentDir } = dependencies;
+	const paths = registryPaths(agentDir);
+	const now = (dependencies.now ?? (() => new Date()))();
+	try {
+		return await withFileLock(
+			paths.transaction,
+			async () => {
+				const control = loadControlSync(agentDir);
+				const state = loadStateSync(agentDir);
+				const selectedRevision = control.pinnedRevision ?? state.activeRevision;
+				if (control.disabled || environmentDisabled()) return { status: "disabled", revision: selectedRevision };
+				const active = state.history.find(item => item.manifest.signed.registryRevision === selectedRevision);
+				const manifestUrl = assertHttpsUrl(effectiveManifestUrl(dependencies), "Registry manifest URL");
+				assertRegistryUrl(manifestUrl, manifestUrl, dependencies.allowTestUrls === true);
+				const manifestResponse = await boundedFetch(
+					manifestUrl,
+					dependencies.maxManifestBytes ?? MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES,
+					dependencies,
+					active?.etag ? { "If-None-Match": active.etag } : {},
+				);
+				if (manifestResponse.response.status === 304) {
+					if (!active) throw new Error("Registry returned 304 without a verified cached generation.");
+					validateGeneration(active, effectiveTrustedKeys(dependencies));
+					await writeAtomicJson(paths.state, { ...state, lastCheckedAt: now.toISOString(), lastError: undefined });
+					return { status: "not_modified", revision: active.manifest.signed.registryRevision };
+				}
+				const manifestBytes = manifestResponse.bytes ?? new Uint8Array();
+				const manifest = parseCanonicalDocument(
+					manifestBytes,
+					"Registry manifest",
+					ModelPresetRegistryManifestSchema,
+				);
+				verifyManifest(manifest, effectiveTrustedKeys(dependencies));
+				assertManifestBindings(manifest);
+				const manifestSha256 = sha256(manifestBytes);
+				if (state.highestSeenRevision !== undefined) {
+					if (manifest.signed.registryRevision < state.highestSeenRevision)
+						throw new Error("Registry revision downgrade rejected.");
+					if (
+						manifest.signed.registryRevision === state.highestSeenRevision &&
+						state.highestSeenManifestSha256 !== undefined &&
+						manifestSha256 !== state.highestSeenManifestSha256
+					)
+						throw new Error("Registry revision equivocation rejected.");
+				}
+				const snapshotResponse = await boundedFetch(
+					descriptorUrl(manifest.signed.snapshot, manifestUrl, dependencies.allowTestUrls === true),
+					dependencies.maxSnapshotBytes ?? MODEL_PRESET_REGISTRY_MAX_SNAPSHOT_BYTES,
+					dependencies,
+				);
+				const snapshotBytes = snapshotResponse.bytes ?? new Uint8Array();
+				assertContentDescriptor(snapshotBytes, manifest.signed.snapshot, "Registry snapshot");
+				const snapshot = parseCanonicalDocument(
+					snapshotBytes,
+					"Registry snapshot",
+					ModelPresetRegistrySnapshotSchema,
+				);
+				assertSnapshotBindings(manifest, snapshot);
+				const profilesResponse = await boundedFetch(
+					descriptorUrl(manifest.signed.contents.profiles, manifestUrl, dependencies.allowTestUrls === true),
+					dependencies.maxProfilesBytes ?? MODEL_PRESET_REGISTRY_MAX_PROFILES_BYTES,
+					dependencies,
+				);
+				const profileBytes = profilesResponse.bytes ?? new Uint8Array();
+				assertContentDescriptor(profileBytes, manifest.signed.contents.profiles, "Registry profiles");
+				const profiles = parseCanonicalDocument(
+					profileBytes,
+					"Registry profiles",
+					ModelPresetRegistryProfilesSchema,
+				);
+				if (
+					profiles.revision !== manifest.signed.revision ||
+					profiles.profiles.length !== manifest.signed.contents.profiles.count
+				)
+					throw new Error("Registry profile identity is invalid.");
+				const presetsResponse = await boundedFetch(
+					descriptorUrl(manifest.signed.contents.presets, manifestUrl, dependencies.allowTestUrls === true),
+					dependencies.maxPresetsBytes ?? MODEL_PRESET_REGISTRY_MAX_PRESETS_BYTES,
+					dependencies,
+				);
+				const presetBytes = presetsResponse.bytes ?? new Uint8Array();
+				assertContentDescriptor(presetBytes, manifest.signed.contents.presets, "Registry presets");
+				const presets = parseCanonicalDocument(presetBytes, "Registry presets", ModelPresetRegistryPresetsSchema);
+				if (
+					presets.revision !== manifest.signed.revision ||
+					presets.presets.length !== manifest.signed.contents.presets.count
+				)
+					throw new Error("Registry preset identity is invalid.");
+				assertProfilePresetReferences(profiles, presets);
+				const retained = retainRemoved(active, profiles, presets);
+				const generation: AcceptedGeneration = {
+					manifest,
+					snapshot,
+					profiles,
+					presets,
+					manifestSha256,
+					acceptedAt: now.toISOString(),
+					etag: manifestResponse.response.headers.get("etag") ?? undefined,
+					...retained,
+				};
+				const historyCandidates = [
+					generation,
+					...state.history.filter(
+						item => item.manifest.signed.registryRevision !== manifest.signed.registryRevision,
+					),
+				].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
+				const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
+				const protectedRevisions = new Set(
+					[control.pinnedRevision, state.activeRevision].filter(
+						(revision): revision is number => revision !== undefined,
+					),
+				);
+				for (const protectedRevision of protectedRevisions) {
+					const protectedGeneration = historyCandidates.find(
+						item => item.manifest.signed.registryRevision === protectedRevision,
+					);
+					if (
+						protectedGeneration &&
+						!history.some(item => item.manifest.signed.registryRevision === protectedRevision)
+					)
+						history.push(protectedGeneration);
+				}
+				const nextState: RegistryState = {
+					version: 1,
+					activeRevision: control.pinnedRevision ?? manifest.signed.registryRevision,
+					highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
+					highestSeenManifestSha256: manifestSha256,
+					history,
+					lastCheckedAt: now.toISOString(),
+					lastError: undefined,
+				};
+				if (
+					Buffer.byteLength(JSON.stringify(nextState)) >
+					(dependencies.maxStateBytes ?? MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
+				)
+					throw new Error("Registry cache state exceeds its durable size limit.");
+				await writeAtomicJson(paths.state, nextState);
+				return {
+					status: "updated",
+					revision: manifest.signed.registryRevision,
+					revisionId: manifest.signed.revision,
+					manifestSha256,
+					retainedProfiles: retained.retainedProfiles.map(profile => profile.id),
+					retainedPresets: retained.retainedPresets.map(preset => `${preset.provider}/${preset.id}`),
+				};
+			},
+			{ retries: 20, retryDelayMs: 50, staleMs: 30_000 },
+		);
+	} catch (error) {
+		const redacted = new Error(safeError(error));
+		await recordFailure(agentDir, redacted, now).catch(() => undefined);
+		throw redacted;
+	}
+}
+
+export async function setModelPresetRegistryDisabled(
+	options: ModelPresetRegistryDependencies & { disabled: boolean },
+): Promise<void> {
+	const { disabled } = options;
+	const agentDir = effectiveAgentDir(options);
+	const paths = registryPaths(agentDir);
+	await withFileLock(paths.transaction, async () => {
+		const current = loadControlSync(agentDir);
+		await writeAtomicJson(paths.control, { ...current, disabled });
+	});
+}
+
+export async function setModelPresetRegistryPin(
+	options: ModelPresetRegistryDependencies & { revision?: number },
+): Promise<void> {
+	const { revision } = options;
+	const agentDir = effectiveAgentDir(options);
+	const paths = registryPaths(agentDir);
+	await withFileLock(paths.transaction, async () => {
+		if (revision === undefined) {
+			const state = loadStateSync(agentDir);
+			const highest = state.history.reduce(
+				(value, item) => Math.max(value, item.manifest.signed.registryRevision),
+				0,
+			);
+			await writeAtomicJson(paths.state, { ...state, activeRevision: highest || state.activeRevision });
+		}
+		const state = loadStateSync(agentDir);
+		if (revision !== undefined && !state.history.some(item => item.manifest.signed.registryRevision === revision))
+			throw new Error(`Cannot pin unaccepted registry revision ${revision}.`);
+		const current = loadControlSync(agentDir);
+		await writeAtomicJson(paths.control, { ...current, pinnedRevision: revision });
+	});
+}
+
+export async function rollbackModelPresetRegistry(
+	options: ModelPresetRegistryDependencies & { revision?: number },
+): Promise<void> {
+	const agentDir = effectiveAgentDir(options);
+	const paths = registryPaths(agentDir);
+	await withFileLock(paths.transaction, async () => {
+		const state = loadStateSync(agentDir);
+		const activeRevision = loadControlSync(agentDir).pinnedRevision ?? state.activeRevision;
+		const revision =
+			options.revision ??
+			state.history
+				.map(item => item.manifest.signed.registryRevision)
+				.filter(candidate => activeRevision === undefined || candidate < activeRevision)
+				.sort((left, right) => right - left)[0];
+		if (revision === undefined) throw new Error("Registry accepted history has no previous revision.");
+		const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
+		if (!generation) throw new Error(`Registry revision ${revision} is not in accepted history.`);
+		validateGeneration(generation, effectiveTrustedKeys(options));
+		await writeAtomicJson(paths.state, { ...state, activeRevision: revision, lastError: undefined });
+	});
+}
+
+export function getModelPresetRegistryStatus(
+	dependencies: ModelPresetRegistryDependencies = {},
+): ModelPresetRegistryStatus {
+	const agentDir = effectiveAgentDir(dependencies);
+	let control: RegistryControl = { version: 1, disabled: false };
+	let state: RegistryState = { version: 1, history: [] };
+	let cacheHealth: ModelPresetRegistryStatus["cacheHealth"] = "empty";
+	let loadError: string | undefined;
+	try {
+		control = loadControlSync(agentDir);
+		state = loadStateSync(agentDir);
+		cacheHealth = state.history.length > 0 ? "valid" : "empty";
+	} catch (error) {
+		cacheHealth = "corrupt";
+		loadError = safeError(error);
+	}
+	const disabled = control.disabled || environmentDisabled();
+	const revision = control.pinnedRevision ?? state.activeRevision;
+	const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
+	let valid: AcceptedGeneration | undefined;
+	if (revision !== undefined && !generation) {
+		cacheHealth = "corrupt";
+		loadError = `Registry selected revision ${revision} is missing from accepted history.`;
+	}
+	if (generation && !disabled) {
+		try {
+			valid = validateGeneration(generation, effectiveTrustedKeys(dependencies));
+		} catch (error) {
+			cacheHealth = "corrupt";
+			loadError = safeError(error);
+		}
+	}
+	return {
+		contractVersion: MODEL_PRESET_REGISTRY_CONTRACT_VERSION,
+		source: valid ? "registry" : "embedded",
+		cacheHealth,
+		activeRevision: valid?.manifest.signed.registryRevision,
+		activeRevisionId: valid?.manifest.signed.revision,
+		highestSeenRevision: state.highestSeenRevision,
+		manifestSha256: valid?.manifestSha256,
+		snapshotSha256: valid?.manifest.signed.snapshot.sha256,
+		profilesSha256: valid?.manifest.signed.contents.profiles.sha256,
+		presetsSha256: valid?.manifest.signed.contents.presets.sha256,
+		keyId: valid?.manifest.signature.keyId,
+		sourceRevision: valid?.manifest.signed.provenance.sourceRevision,
+		acceptedAt: valid?.acceptedAt,
+		publishedAt: valid?.manifest.signed.publishedAt,
+		lastCheckedAt: state.lastCheckedAt,
+		lastError: loadError ?? state.lastError,
+		disabled,
+		pinnedRevision: control.pinnedRevision,
+		retainedProfiles: valid?.retainedProfiles.map(profile => profile.id) ?? [],
+		retainedPresets: valid?.retainedPresets.map(preset => `${preset.provider}/${preset.id}`) ?? [],
+		historyRevisions: state.history
+			.map(item => item.manifest.signed.registryRevision)
+			.sort((left, right) => right - left),
+		profileCount: valid ? valid.profiles.profiles.length + valid.retainedProfiles.length : 0,
+		presetCount: valid ? valid.presets.presets.length + valid.retainedPresets.length : 0,
+	};
+}
+
+export function refreshModelPresetRegistryInBackground(
+	dependencies: ModelPresetRegistryDependencies = {},
+	onAccepted?: (result: Extract<ModelPresetRegistryRefreshResult, { status: "updated" }>) => void,
+): () => void {
+	if (dependencies.automaticRefresh === false) return () => {};
+	const agentDir = effectiveAgentDir(dependencies);
+	let status: ModelPresetRegistryStatus;
+	try {
+		status = getModelPresetRegistryStatus({ ...dependencies, agentDir });
+	} catch {
+		status = {
+			contractVersion: MODEL_PRESET_REGISTRY_CONTRACT_VERSION,
+			source: "embedded",
+			cacheHealth: "corrupt",
+			disabled: false,
+			retainedProfiles: [],
+			retainedPresets: [],
+			historyRevisions: [],
+			profileCount: 0,
+			presetCount: 0,
+		};
+	}
+	const lastChecked = status.lastCheckedAt ? Date.parse(status.lastCheckedAt) : 0;
+	const now = (dependencies.now ?? (() => new Date()))().getTime();
+	const refreshIntervalMs = dependencies.refreshIntervalMs ?? MODEL_PRESET_REGISTRY_REFRESH_INTERVAL_MS;
+	const recentAge = Number.isFinite(lastChecked) ? Math.max(0, now - lastChecked) : Number.POSITIVE_INFINITY;
+	const initialDelay = status.disabled
+		? refreshIntervalMs
+		: recentAge < refreshIntervalMs
+			? refreshIntervalMs - recentAge
+			: (dependencies.startupDelayMs ?? MODEL_PRESET_REGISTRY_STARTUP_DELAY_MS);
+	let cancelled = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const schedule = (delayMs: number): void => {
+		if (cancelled) return;
+		timer = setTimeout(() => {
+			void refreshModelPresetRegistry({ ...dependencies, agentDir })
+				.then(result => {
+					if (result.status === "updated") onAccepted?.(result);
+				})
+				.catch(() => undefined)
+				.finally(() => schedule(refreshIntervalMs));
+		}, delayMs);
+		timer.unref?.();
+	};
+	schedule(initialDelay);
+	return () => {
+		cancelled = true;
+		if (timer) clearTimeout(timer);
+	};
+}

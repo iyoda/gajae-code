@@ -90,6 +90,29 @@ describe("model profile capability contract", () => {
 		expect(catalog.some(item => Object.hasOwn(item, "description"))).toBe(false);
 	});
 
+	it("projects accepted registry provenance distinctly from embedded and user profiles", () => {
+		const profiles = mergeModelProfiles(
+			undefined,
+			new Map([
+				[
+					"registry-profile",
+					{
+						name: "registry-profile",
+						displayName: "Registry Profile",
+						requiredProviders: ["provider-a"],
+						modelMapping: { default: "provider-a/model" },
+						source: "registry" as const,
+					},
+				],
+			]),
+		);
+		expect(projectModelProfileCatalog(profiles).find(item => item.id === "registry-profile")).toEqual({
+			id: "registry-profile",
+			displayName: "Registry Profile",
+			source: "registry",
+		});
+	});
+
 	it("classifies strict and alternative provider requirements for clients", () => {
 		const [strict] = [...mergeModelProfiles().values()].filter(profile => profile.name === "codex-medium");
 		expect(strict).toBeDefined();

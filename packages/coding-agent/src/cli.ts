@@ -54,6 +54,7 @@ export const commands: CommandEntry[] = [
 	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
 	{ name: "local-provider", load: () => import("./commands/local-provider").then(m => m.default) },
+	{ name: "model-presets", load: () => import("./commands/model-presets").then(m => m.default) },
 	{ name: "mcp-serve", load: () => import("./commands/mcp-serve").then(m => m.default) },
 	{ name: "mcp", load: () => import("./commands/mcp").then(m => m.default) },
 	{
@@ -364,6 +365,7 @@ function routeLegacyRootArgv(argv: readonly string[]): string[] | undefined {
 export function routeModelsAlias(argv: readonly string[]): string[] | undefined {
 	if (argv[0] !== "models") return undefined;
 	const rest = argv.slice(1);
+	if (rest[0] === "presets") return ["model-presets", ...rest.slice(1)];
 	if (rest.length === 0) return ["launch", "--list-models"];
 	// Pure search tokens become a single fuzzy pattern (matches --list-models).
 	if (rest.every(token => !token.startsWith("-") && !token.startsWith("@"))) {
@@ -461,7 +463,9 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 	const normalizedArgv = normalizeResumeAlias(argv);
 	const legacyArgv = routeLegacyRootArgv(normalizedArgv);
-	if (!legacyArgv && hasRootHelpFlag(normalizedArgv)) {
+	const modelPresetsArgv =
+		normalizedArgv[0] === "models" && normalizedArgv[1] === "presets" ? routeModelsAlias(normalizedArgv) : undefined;
+	if (!legacyArgv && !modelPresetsArgv && hasRootHelpFlag(normalizedArgv)) {
 		const { renderRootHelp } = await import("@gajae-code/utils/cli");
 		const { getExtraHelpText } = await import("./cli/fast-help");
 		renderRootHelp({ bin: APP_NAME, version: VERSION, commands: new Map([["launch", RootHelpCommand]]) });
@@ -475,7 +479,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(`${APP_NAME}/${VERSION}\n`);
 		return;
 	}
-	const runArgv = legacyArgv ?? routeRootArgv(normalizedArgv);
+	const runArgv = legacyArgv ?? modelPresetsArgv ?? routeRootArgv(normalizedArgv);
 	if (isStatsHelpFastPath(runArgv)) {
 		showStatsFastHelp();
 		return;

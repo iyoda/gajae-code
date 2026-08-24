@@ -461,6 +461,8 @@ Extra conditional behavior:
 | `GJC_SMOL_MODEL`              | Ephemeral model-role override for `smol` (CLI `--smol` takes precedence)                           |
 | `GJC_SLOW_MODEL`              | Ephemeral model-role override for `slow` (CLI `--slow` takes precedence)                           |
 | `GJC_PLAN_MODEL`              | Ephemeral model-role override for `plan` (CLI `--plan` takes precedence)                           |
+| `GJC_MODEL_PRESET_REGISTRY_URL` | HTTPS URL for the signed preset registry `latest.json`. Defaults to the public `Yeachan-Heo/gajae-code-presets` `dev` pointer. Redirects, credentials, non-HTTPS URLs, untrusted keys, and off-namespace content are rejected. |
+| `GJC_MODEL_PRESET_REGISTRY_DISABLED` | `1`, `true`, `yes`, or `on` disables registry network refresh and excludes cached registry data without deleting accepted history. Embedded presets and user `models.yml` remain available. |
 | `GJC_NO_TITLE`                | If set (any non-empty value), disables auto session title generation on first user message         |
 | `GJC_NO_CMUX_RENAME`         | If set (any non-empty value), disables renaming the containing cmux workspace to the current session name |
 | `NULL_PROMPT`                | If `true`, system prompt builder returns empty string                                              |

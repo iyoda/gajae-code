@@ -69,7 +69,7 @@ import {
 } from "./event-webhook";
 import {
 	type CoordinatorModelProfileLoader,
-	loadCoordinatorModelProfiles,
+	createCoordinatorModelProfileLoader,
 	resolveCoordinatorMpreset,
 } from "./model-preset";
 import {
@@ -3211,7 +3211,7 @@ export function createCoordinatorMcpServer(options: CoordinatorMcpServerOptions 
 		await routerReady;
 	}
 	const platform = options.platform ?? process.platform;
-	const loadModelProfiles = services.resolveModelProfiles ?? loadCoordinatorModelProfiles;
+	const loadModelProfiles = services.resolveModelProfiles ?? createCoordinatorModelProfileLoader(routerAgentDir);
 	// Every authoritative projection is scoped by the collision-resistant namespace identity.
 	const namespaceDir = coordinatorNamespacePath(config);
 	// The prior human-readable directory is migration input only; it is never authority.

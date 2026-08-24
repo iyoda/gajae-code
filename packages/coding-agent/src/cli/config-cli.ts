@@ -16,8 +16,8 @@ import {
 	validateAutoroutingProvenance,
 	validateAutoroutingSetup,
 } from "../config/autorouting-contract";
+import { loadEffectiveModelProfiles } from "../config/model-preset-registry";
 import { resolveModelProfileName } from "../config/model-profile-contract";
-import { mergeModelProfiles } from "../config/model-profiles";
 import { ModelsConfigFile } from "../config/model-registry";
 import {
 	getDefault,
@@ -548,7 +548,7 @@ function handlePath(): void {
  */
 export function collectConfigAdvisories(): string[] {
 	const profileName = settings.get("modelProfile.default");
-	const profiles = mergeModelProfiles(ModelsConfigFile.load()?.profiles);
+	const profiles = loadEffectiveModelProfiles(ModelsConfigFile.load()?.profiles);
 	const resolvedProfileName = profileName ? resolveModelProfileName(profileName, profiles) : undefined;
 	const delegation = resolveEagerTaskDelegation({
 		settings,

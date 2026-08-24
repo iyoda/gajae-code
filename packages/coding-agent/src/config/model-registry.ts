@@ -49,7 +49,7 @@ function isVllmNoAuthToken(provider: string, apiKey: string | undefined): boolea
 
 import { registerOAuthProvider, unregisterOAuthProviders } from "@gajae-code/ai/utils/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@gajae-code/ai/utils/oauth/types";
-import { $pickCredentialEnv, $rotatingCredentialEnv, isRecord, logger } from "@gajae-code/utils";
+import { $pickCredentialEnv, $rotatingCredentialEnv, getAgentDir, isRecord, logger } from "@gajae-code/utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
 import {
@@ -63,6 +63,11 @@ import { type ConfigError, ConfigFile } from "./config-file";
 import { isAuthenticated, kNoAuth } from "./model-auth";
 import { type ConfiguredModelBindings, ModelBindingsApplier } from "./model-bindings-applier";
 import { ModelDiscoveryManager, type ProviderDiscoveryState } from "./model-discovery-manager";
+import {
+	loadAcceptedModelPresetProfiles,
+	type ModelPresetRegistryDependencies,
+	refreshModelPresetRegistryInBackground,
+} from "./model-preset-registry";
 
 export type { ProviderDiscoveryState, ProviderDiscoveryStatus } from "./model-discovery-manager";
 
@@ -1406,6 +1411,10 @@ export class ModelRegistry {
 	#settings: Pick<Settings, "get" | "getGlobal">;
 	#lastStaticLoadMtime: number | null = null;
 	#lastStaticLoadEnvironmentFingerprint: string | undefined;
+	#lastModelPresetRegistryFingerprint: string | undefined;
+	#modelPresetRegistryAgentDir: string;
+	#modelPresetRegistryDependencies: Omit<ModelPresetRegistryDependencies, "agentDir">;
+	#cancelModelPresetRegistryRefresh: (() => void) | undefined;
 	#staticModelsLoaded = false;
 	#lastDisabledProviderKey: string | undefined;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1432,9 +1441,12 @@ export class ModelRegistry {
 		readonly authStorage: AuthStorage,
 		modelsPath?: string,
 		registrySettings?: Pick<Settings, "get" | "getGlobal">,
+		modelPresetRegistryDependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
 	) {
 		this.#settings = registrySettings ?? settings;
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
+		this.#modelPresetRegistryAgentDir = modelsPath ? path.dirname(modelsPath) : getAgentDir();
+		this.#modelPresetRegistryDependencies = modelPresetRegistryDependencies;
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
@@ -1444,6 +1456,21 @@ export class ModelRegistry {
 		this.authStorage.onGenerationChanged(() => this.#invalidateAvailableModels());
 		// Load models synchronously in constructor
 		this.#loadModels();
+		this.#cancelModelPresetRegistryRefresh = refreshModelPresetRegistryInBackground(
+			{
+				...this.#modelPresetRegistryDependencies,
+				agentDir: this.#modelPresetRegistryAgentDir,
+			},
+			() => {
+				this.#reloadStaticModels();
+				this.#notifyCatalogChanged();
+			},
+		);
+	}
+
+	dispose(): void {
+		this.#cancelModelPresetRegistryRefresh?.();
+		this.#cancelModelPresetRegistryRefresh = undefined;
 	}
 
 	onCatalogChanged(listener: () => void): () => void {
@@ -1459,7 +1486,7 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Reload models from disk (built-in + custom from models.json).
+	 * Reload models from disk (embedded + accepted registry + custom from models.yml).
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#suspendRebuild();
@@ -1592,11 +1619,22 @@ export class ModelRegistry {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const disabledProviderKey = [...getDisabledProviderIdsFromSettings(this.#settings)].sort().join("\u0000");
 		const environmentFingerprint = this.#getStaticLoadEnvironmentFingerprint();
+		const acceptedPresets = loadAcceptedModelPresetProfiles(
+			this.#modelPresetRegistryAgentDir,
+			this.#modelPresetRegistryDependencies,
+		);
+		const modelPresetRegistryFingerprint = JSON.stringify({
+			revision: acceptedPresets.revision,
+			manifestSha256: acceptedPresets.manifestSha256,
+			disabled: acceptedPresets.disabled,
+			error: acceptedPresets.error,
+		});
 		if (
 			this.#staticModelsLoaded &&
 			currentMtime === this.#lastStaticLoadMtime &&
 			disabledProviderKey === this.#lastDisabledProviderKey &&
-			environmentFingerprint === this.#lastStaticLoadEnvironmentFingerprint
+			environmentFingerprint === this.#lastStaticLoadEnvironmentFingerprint &&
+			modelPresetRegistryFingerprint === this.#lastModelPresetRegistryFingerprint
 		) {
 			// models.json and settings-derived implicit provider state are unchanged.
 			return;
@@ -1665,16 +1703,22 @@ export class ModelRegistry {
 		this.#codexContextWindowOverrides = this.#collectCodexContextWindowOverrides();
 		this.#equivalenceConfig = equivalence;
 		this.#modelBindingsApplier.setBindings(modelBindings);
-		this.#modelProfiles = mergeModelProfiles(profiles);
+		const acceptedPresets = loadAcceptedModelPresetProfiles(
+			this.#modelPresetRegistryAgentDir,
+			this.#modelPresetRegistryDependencies,
+		);
+		this.#modelProfiles = mergeModelProfiles(profiles, acceptedPresets.profiles);
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
+		const registryModels = this.#applyHardcodedModelPolicies(acceptedPresets.presets);
 		const cachedStandardModels = this.#applyHardcodedModelPolicies(this.#loadCachedStandardProviderModels());
 		const cachedDiscoveries = this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels());
-		const resolvedDefaults = this.#mergeResolvedModels(
+		const resolvedProviderCatalog = this.#mergeResolvedModels(
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
 			cachedDiscoveries,
 		);
+		const resolvedDefaults = this.#mergeRegistryModelMetadata(resolvedProviderCatalog, registryModels);
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
 		// Merge runtime extension models so they survive refresh() cycles
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
@@ -1684,6 +1728,12 @@ export class ModelRegistry {
 		this.#rebuildCanonicalIndex();
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 		this.#lastStaticLoadEnvironmentFingerprint = this.#getStaticLoadEnvironmentFingerprint();
+		this.#lastModelPresetRegistryFingerprint = JSON.stringify({
+			revision: acceptedPresets.revision,
+			manifestSha256: acceptedPresets.manifestSha256,
+			disabled: acceptedPresets.disabled,
+			error: acceptedPresets.error,
+		});
 		this.#staticModelsLoaded = true;
 	}
 
@@ -1774,6 +1824,28 @@ export class ModelRegistry {
 				merged.push(replacementModel);
 				indexByKey.set(key, merged.length - 1);
 			}
+		}
+		return merged;
+	}
+
+	#mergeRegistryModelMetadata(baseModels: Model<Api>[], registryModels: Model<Api>[]): Model<Api>[] {
+		const merged = [...baseModels];
+		const indexByKey = new Map(merged.map((model, index) => [`${model.provider}\u0000${model.id}`, index]));
+		for (const registryModel of registryModels) {
+			const key = `${registryModel.provider}\u0000${registryModel.id}`;
+			const existingIndex = indexByKey.get(key);
+			if (existingIndex === undefined) {
+				merged.push(registryModel);
+				indexByKey.set(key, merged.length - 1);
+				continue;
+			}
+			const existing = merged[existingIndex]!;
+			merged[existingIndex] = {
+				...existing,
+				...registryModel,
+				compat:
+					existing.compat || registryModel.compat ? { ...existing.compat, ...registryModel.compat } : undefined,
+			};
 		}
 		return merged;
 	}
@@ -2254,7 +2326,7 @@ export class ModelRegistry {
 			);
 		}
 		const current = loaded.value ?? this.#modelsConfigFile.createDefault();
-		if (mergeModelProfiles(current.profiles).has(normalizedName)) {
+		if (current.profiles?.[normalizedName] !== undefined) {
 			throw new Error(`Custom model profile already exists: ${normalizedName}. Choose a unique preset id.`);
 		}
 		const next: ModelsConfig = {
@@ -3818,8 +3890,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get all models (built-in + custom).
-	 * If models.json had errors, returns only built-in models.
+	 * Get all models (embedded + accepted registry + custom).
+	 * If models.yml had errors, returns embedded plus accepted registry models.
 	 */
 	getAll(): Model<Api>[] {
 		return this.#models;

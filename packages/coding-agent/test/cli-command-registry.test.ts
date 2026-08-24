@@ -2,6 +2,14 @@ import { describe, expect, it } from "bun:test";
 import { commands, routeRootArgv } from "../src/cli";
 
 describe("CLI command registry", () => {
+	it("registers the model preset registry control command", async () => {
+		const entry = commands.find(c => c.name === "model-presets");
+		expect(entry).toBeDefined();
+		expect(routeRootArgv(["model-presets", "status"])).toEqual(["model-presets", "status"]);
+		const cmd = (await entry?.load()) as { description?: string } | undefined;
+		expect(cmd?.description ?? "").toMatch(/preset registry/i);
+	});
+
 	it("registers the `plugin` command so `gjc plugin …` resolves instead of routing to launch", () => {
 		// Regression: `src/commands/plugin.ts` existed (and was unit-tested in
 		// isolation) but was never added to the `commands` registry in cli.ts.

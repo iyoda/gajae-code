@@ -524,6 +524,12 @@ export class ModelSelectorComponent extends Container {
 		if (typeof this.#modelRegistry.onCatalogChanged === "function") {
 			this.#unsubscribeCatalogChanged = this.#modelRegistry.onCatalogChanged(() => {
 				if (this.#disposed) return;
+				if (this.#viewMode === "presets") {
+					this.#clampPresetCursor();
+					this.#renderPresetLanding();
+					this.#tui.requestRender();
+					return;
+				}
 				if (this.#refreshCatalogView()) this.#tui.requestRender();
 			});
 		}

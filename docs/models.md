@@ -6,7 +6,7 @@ This document describes how the coding-agent currently loads models, applies ove
 
 Primary implementation files:
 
-- `src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
+- `src/config/model-registry.ts` — loads embedded + signed-registry + custom models, provider overrides, runtime discovery, auth integration
 - `src/config/model-resolver.ts` — parses model patterns and selects models for the default and agent roles
 - `src/config/settings-schema.ts` — model-related settings (`modelRoles`, provider transport preferences)
 - `src/session/auth-storage.ts` — API key + OAuth resolution order
@@ -212,6 +212,34 @@ The same presets are available inside the TUI:
 ```
 
 Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, `ZAI_API_KEY`, `ALIBABA_TOKEN_PLAN_API_KEY`, `CLINE_API_KEY`, or `CMD_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider. The Alibaba Token Plan preset (aliases: `alibaba`, `token-plan`) writes an OpenAI-compatible custom provider named `alibaba-token-plan` with per-model API routing. The ClinePass preset (aliases: `clinepass`, `cline`) does not hardcode models: Cline's inference API has no working `/models` route, so GJC follows Cline's own catalog-generation source and fetches the live `cline-pass` provider catalog from `https://models.dev/api.json`. The Command Code GOAT preset (aliases: `commandcode`, `command-code`, `goat`) fetches its live `/provider/v1/models` catalog, routes every current or future `claude-*` model through Anthropic Messages, and routes other models through Chat Completions. Create the corresponding API key in the provider dashboard before inference; plan entitlement is enforced by the provider.
+
+## Signed remote preset registry
+
+GJC ships its embedded model metadata and profiles as an immutable bootstrap fallback, then overlays a separately published signed registry before applying local configuration:
+
+1. embedded model presets and profiles
+2. the last accepted `Yeachan-Heo/gajae-code-presets` registry snapshot
+3. user `~/.gjc/agent/models.yml` entries and overrides
+
+Local user configuration always wins. Registry refresh never writes `models.yml`, and a failed, partial, oversized, incompatible, downgraded, equivocated, digest-mismatched, or untrusted update never replaces the active snapshot. Startup reads only the verified local cache and does not wait for network I/O; a delayed best-effort refresh runs at a bounded cadence. Offline cold starts use embedded data, while offline warm starts use the last-known-good accepted snapshot.
+
+The registry manifest is canonical JSON signed with a compiled Ed25519 trust root. It binds the monotonic revision, consumer-contract compatibility, immutable revision paths, exact byte counts, SHA-256 digests, source commit provenance, snapshot, profile data, and credential-free model metadata. GJC sends no cookies, authorization headers, API keys, or provider credentials when fetching it. Registry schemas do not permit endpoints, request headers, credentials, environment references, commands, scripts, or arbitrary executable content.
+
+Administrative commands:
+
+```sh
+gjc models presets status [--json]
+gjc models presets refresh [--json]
+gjc models presets rollback <accepted-revision> [--json]
+gjc models presets pin <accepted-revision> [--json]
+gjc models presets unpin [--json]
+gjc models presets disable [--json]
+gjc models presets enable [--json]
+```
+
+`status` reports deterministic, credential-free provenance: active and highest-seen revisions, manifest/snapshot/profile/preset digests, signature key id, source GJC commit, accepted/published/check timestamps, retained removed entries, cache health, history, and pin/disable state. Rollback and pin can select only previously verified retained revisions; neither lowers the highest-seen anti-rollback floor, and selected generations are protected from bounded-history eviction. When a registry revision removes a profile, GJC retains that profile plus only the removed model metadata it references so an existing default/current selection remains usable without unboundedly copying the whole prior catalog.
+
+The cache and control files live under `~/.gjc/agent/model-presets/` (respecting `GJC_CODING_AGENT_DIR`). Writes use an interprocess lock, file fsync, atomic rename, and a directory durability barrier. `GJC_MODEL_PRESET_REGISTRY_URL` may override the manifest URL only with credential-free HTTPS; the trust root cannot be replaced at runtime. `GJC_MODEL_PRESET_REGISTRY_DISABLED=1` provides a non-destructive environment disable.
 
 ## Model profiles (`--mpreset`)
 

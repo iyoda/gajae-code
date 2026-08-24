@@ -321,18 +321,20 @@ describe("custom model preset creation", () => {
 		expect(parsed.profiles["my-fast"]?.model_mapping.default).toBe("my-oai/original");
 	});
 
-	it("rejects custom preset ids that shadow built-in presets", async () => {
+	it("allows user presets to override embedded or registry preset ids", async () => {
 		const modelsPath = path.join(tempDir, "models.yml");
 		const registry = new ModelRegistry(authStorage, modelsPath);
 
-		await expect(
-			registry.saveCustomModelProfile("codex-medium", {
-				display_name: "Shadow Codex",
-				required_providers: ["my-oai"],
-				model_mapping: { default: "my-oai/gpt-custom:low" },
-			}),
-		).rejects.toThrow("Custom model profile already exists: codex-medium");
-		await expect(Bun.file(modelsPath).exists()).resolves.toBe(false);
+		await registry.saveCustomModelProfile("codex-medium", {
+			display_name: "Shadow Codex",
+			required_providers: ["my-oai"],
+			model_mapping: { default: "my-oai/gpt-custom:low" },
+		});
+		expect(registry.getModelProfile("codex-medium")).toMatchObject({
+			displayName: "Shadow Codex",
+			source: "user",
+			modelMapping: { default: "my-oai/gpt-custom:low" },
+		});
 	});
 
 	it("rejects invalid profile mappings before persistence without changing existing profiles", async () => {

@@ -1345,12 +1345,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const startupAuthConfig = hasInjectedAuth
 		? undefined
 		: (options.startupAuthConfig ?? (await resolveStartupAuthConfig(agentDir)));
+	const ownsModelRegistry = options.modelRegistry === undefined;
 	const ownsAuthStorage = options.modelRegistry === undefined && options.authStorage === undefined;
 	const modelRegistry =
 		options.modelRegistry ??
 		new ModelRegistry(
 			options.authStorage ??
 				(await logger.time("discoverModels", () => discoverAuthStorage(agentDir, startupAuthConfig))),
+			path.join(agentDir, "models.yml"),
 		);
 	const authStorage = modelRegistry.authStorage;
 	if (options.authStorage && options.authStorage !== authStorage) {
@@ -1391,6 +1393,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let credentialScopeLeased = false;
 	let closeOwnedSettings: () => Promise<void> = async () => {};
 	const closeOwnedAuthStorage = (): void => {
+		if (ownsModelRegistry) modelRegistry.dispose();
 		if (!hasSession && credentialScopeLeased && credentialScopeId) {
 			authStorage.releaseCredentialScope(credentialScopeId);
 			credentialScopeLeased = false;
@@ -1426,6 +1429,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 		const ownsScopedSettings = options.settings === undefined;
 		const settings = options.settings ?? (await logger.time("settings", Settings.loadForScope, { cwd, agentDir }));
+		if (ownsModelRegistry) modelRegistry.setScopedSettings(settings);
 		const autoroutingInactive =
 			settings.get("task.autorouting.enabled") === true && !settings.getEffectiveAutorouting().active;
 		closeOwnedSettings = async (): Promise<void> => {

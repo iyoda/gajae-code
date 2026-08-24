@@ -166,6 +166,37 @@ async function selectFirstProfile(controller: SelectorController, setDefault = f
 }
 
 describe("model selector profiles", () => {
+	test("catalog changes rebuild the active preset landing instead of switching to model view", async () => {
+		installTestTheme();
+		const profiles = new Map<string, ModelProfileDefinition>([[profile.name, profile]]);
+		let catalogChanged: (() => void) | undefined;
+		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+			onCatalogChanged: (listener: () => void) => () => void;
+		};
+		registry.getModelProfiles = () => new Map(profiles);
+		registry.getModelProfile = (name: string) => profiles.get(name);
+		registry.getAvailableModelProfileNames = () => [...profiles.keys()];
+		registry.onCatalogChanged = listener => {
+			catalogChanged = listener;
+			return () => {};
+		};
+		const selector = createSelector(() => {}, { registry });
+		await Bun.sleep(0);
+		profiles.set("registry-live", {
+			name: "registry-live",
+			displayName: "Registry Live",
+			providerGroup: "REGISTRY LIVE",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry",
+		});
+		catalogChanged?.();
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Model presets");
+		expect(rendered).toContain("REGISTRY LIVE");
+		expect(rendered).not.toContain("Models (all)");
+	});
+
 	beforeAll(async () => {
 		testTheme = await getThemeByName("red-claw");
 		installTestTheme();

@@ -9,6 +9,7 @@ export function getExtraHelpText(): string {
   ${APP_NAME} state                - Inspect or manage persisted GJC state
   ${APP_NAME} auth-broker         - Manage the auth-broker (credential vault)
   ${APP_NAME} accounts             - List, check, pin, and remove stored OAuth accounts
+  ${APP_NAME} models presets       - Inspect, refresh, pin, rollback, or disable the signed model preset registry
   ${APP_NAME} auth-gateway        - Run an auth-gateway forward proxy
   ${APP_NAME} harness              - Run harness control-plane commands
   ${APP_NAME} coordinator          - Manage coordinator/runtime coordination helpers
@@ -82,6 +83,8 @@ Environment Variables:
   GJC_SMOL_MODEL              - Override smol/fast model (see --smol)
   GJC_SLOW_MODEL              - Override slow/reasoning model (see --slow)
   GJC_PLAN_MODEL              - Override planning model (see --plan)
+  GJC_MODEL_PRESET_REGISTRY_URL - HTTPS latest.json override for the signed preset registry
+  GJC_MODEL_PRESET_REGISTRY_DISABLED - Disable registry fetch/use (1/true/yes/on)
   GJC_NO_PTY                  - Disable PTY-based interactive bash execution
   --tmux                       - Launch interactive startup inside a fresh tmux session
   gjc session                  - List, inspect, create, remove, or attach tagged GJC-managed tmux sessions

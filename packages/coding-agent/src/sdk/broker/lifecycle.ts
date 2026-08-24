@@ -14,13 +14,12 @@ function nativeLifecycle(): typeof import("@gajae-code/natives") {
 }
 
 import { $credentialEnv, logger, resolveEquivalentPath } from "@gajae-code/utils";
-
+import { loadEffectiveModelProfiles } from "../../config/model-preset-registry";
 import {
 	isModelProfileError,
 	type ModelProfileErrorDetails,
 	validateModelProfileName,
 } from "../../config/model-profile-contract";
-import { mergeModelProfiles } from "../../config/model-profiles";
 import { ModelsConfigFile } from "../../config/model-registry";
 import {
 	ensureLaunchWorktree,
@@ -613,7 +612,7 @@ function validateBrokerModelPreset(agentDir: string, requestedProfile: string): 
 	const modelsConfigFile = ModelsConfigFile.relocate(path.join(agentDir, "models.yml"));
 	modelsConfigFile.invalidate();
 	const loaded = modelsConfigFile.tryLoad();
-	const profiles = mergeModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined);
+	const profiles = loadEffectiveModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined, agentDir);
 	try {
 		return validateModelProfileName(requestedProfile, profiles, loaded.status === "error" ? loaded.error : undefined);
 	} catch (error) {

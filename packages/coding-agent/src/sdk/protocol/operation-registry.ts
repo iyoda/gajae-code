@@ -164,7 +164,10 @@ const queries = [
 	["artifact.read", "Read a bounded artifact range."],
 	["runtime.jobs.list", "List managed jobs."],
 	["turn.result", "Read the authoritative durable result of a submitted turn by command/turn IDs or clientRef."],
-	["models.profiles.list", "List the effective built-in and configured model profiles for this session."],
+	[
+		"models.profiles.list",
+		"List the effective embedded, signed-registry, and configured model profiles for this session.",
+	],
 	["providers.list/active", "List active providers."],
 	["session.checkpoint", "Resolve a durable transcript checkpoint into a connection-owned replay cursor."],
 	["turn.steer_status", "Read the durable acknowledgement status of a correlated steer by clientRef."],
