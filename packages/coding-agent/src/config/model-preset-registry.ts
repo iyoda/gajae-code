@@ -948,7 +948,9 @@ function assertHttpsUrl(raw: string, description: string): URL {
 	return url;
 }
 function assertRegistryUrl(url: URL, manifestUrl: URL, allowTestUrls: boolean): void {
-	if (allowTestUrls) {
+	if (allowTestUrls || manifestUrl.href !== DEFAULT_MODEL_PRESET_REGISTRY_URL) {
+		if (url.protocol !== "https:" || url.username || url.password)
+			throw new Error("Registry content URL must use credential-free HTTPS.");
 		if (url.origin !== manifestUrl.origin) throw new Error("Registry content URL changed origin.");
 		return;
 	}

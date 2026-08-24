@@ -230,6 +230,20 @@ describe("signed model preset registry", () => {
 		expect(getModelPresetRegistryStatus({ agentDir })).toMatchObject({ cacheHealth: "empty", source: "embedded" });
 	});
 
+	test("accepts a credential-free HTTPS manifest override with same-origin signed content", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(data.privateKey, 1);
+		await expect(
+			data.run(() =>
+				refreshModelPresetRegistryImpl({
+					agentDir: data.agentDir,
+					manifestUrl: "https://registry.example.test/latest.json",
+					fetch: registryFetch(registry),
+				}),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+	});
+
 	test("accepts the exact signed manifest/snapshot/content contract and merges embedded < registry < user", async () => {
 		const data = await fixture();
 		const registry = signedRegistry(
