@@ -7,6 +7,7 @@ import {
 	canonicalModelPresetRegistryJson,
 	getModelPresetRegistryStatus as getModelPresetRegistryStatusImpl,
 	loadAcceptedModelPresetRegistry as loadAcceptedModelPresetRegistryImpl,
+	type ModelPresetRegistryDependencies,
 	type ModelPresetRegistryManifest,
 	type ModelPresetRegistryPresets,
 	type ModelPresetRegistryProfiles,
@@ -205,9 +206,15 @@ function registryFetch(registry: SignedRegistryFixture, observedHeaders?: Header
 		return new Response(registry.presetsBody);
 	}) as typeof fetch;
 }
-async function accept(data: RegistryFixture, registry: SignedRegistryFixture, fetchImpl = registryFetch(registry)) {
+async function accept(
+	data: RegistryFixture,
+	registry: SignedRegistryFixture,
+	fetchImpl = registryFetch(registry),
+	overrides: ModelPresetRegistryDependencies = {},
+) {
 	return data.run(() =>
 		refreshModelPresetRegistry({
+			...overrides,
 			agentDir: data.agentDir,
 			manifestUrl,
 			fetch: fetchImpl,
@@ -727,11 +734,74 @@ describe("signed model preset registry", () => {
 				await Bun.sleep(10);
 			expect(modelRegistry.getModelProfile("background-profile")?.source).toBe("registry");
 			modelRegistry.dispose();
+			await Bun.sleep(50);
 			const callsAfterDispose = calls;
 			await Bun.sleep(50);
 			expect(calls).toBe(callsAfterDispose);
 		} finally {
 			modelRegistry?.dispose();
+			authStorage.close();
+		}
+	});
+
+	test("publishes offline pin and malformed-cache disable changes to live consumers", async () => {
+		const data = await fixture();
+		await accept(
+			data,
+			signedRegistry(
+				data.privateKey,
+				1,
+				[registryProfile("selected", "provider/model-1")],
+				[registryPreset("model-1")],
+			),
+		);
+		await accept(
+			data,
+			signedRegistry(
+				data.privateKey,
+				2,
+				[registryProfile("selected", "provider/model-2")],
+				[registryPreset("model-2")],
+			),
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "offline-controls-auth.db"));
+		const modelRegistry = data.run(
+			() =>
+				new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+					allowTestUrls: true,
+					manifestUrl,
+					startupDelayMs: 20,
+					refreshIntervalMs: 30,
+					fetch: (async () => {
+						throw new Error("offline");
+					}) as unknown as typeof fetch,
+				}),
+		);
+		try {
+			expect(modelRegistry.getModelProfile("selected")?.modelMapping.default).toBe("provider/model-2");
+			await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+			for (
+				let attempt = 0;
+				attempt < 20 && modelRegistry.getModelProfile("selected")?.modelMapping.default !== "provider/model-1";
+				attempt++
+			)
+				await Bun.sleep(10);
+			expect(modelRegistry.getModelProfile("selected")?.modelMapping.default).toBe("provider/model-1");
+			await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: undefined });
+			for (
+				let attempt = 0;
+				attempt < 20 && modelRegistry.getModelProfile("selected")?.modelMapping.default !== "provider/model-2";
+				attempt++
+			)
+				await Bun.sleep(10);
+			expect(modelRegistry.getModelProfile("selected")?.modelMapping.default).toBe("provider/model-2");
+			await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), "{");
+			await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
+			for (let attempt = 0; attempt < 20 && modelRegistry.getModelProfile("selected"); attempt++)
+				await Bun.sleep(10);
+			expect(modelRegistry.getModelProfile("selected")).toBeUndefined();
+		} finally {
+			modelRegistry.dispose();
 			authStorage.close();
 		}
 	});
@@ -851,6 +921,31 @@ describe("signed model preset registry", () => {
 		});
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: false });
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).highestSeenRevision).toBe(2);
+	});
+
+	test("compacts retained provenance before the durable byte budget is exceeded", async () => {
+		const data = await fixture();
+		const first = signedRegistry(
+			data.privateKey,
+			1,
+			[registryProfile("changing", "provider/model-1")],
+			[{ ...registryPreset("model-1"), name: "x".repeat(240) }],
+		);
+		await accept(data, first);
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const firstBytes = (await fs.stat(statePath)).size;
+		const maxStateBytes = firstBytes * 4;
+		for (let revision = 2; revision <= 12; revision++) {
+			const registry = signedRegistry(
+				data.privateKey,
+				revision,
+				[registryProfile("changing", `provider/model-${revision}`)],
+				[{ ...registryPreset(`model-${revision}`), name: "x".repeat(240) }],
+			);
+			await accept(data, registry, registryFetch(registry), { maxStateBytes });
+		}
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(12);
+		expect((await fs.stat(statePath)).size).toBeLessThanOrEqual(maxStateBytes);
 	});
 
 	test("bounds retained provenance ancestry without replacing the LKG", async () => {

@@ -1139,15 +1139,22 @@ function descriptionForUrl(url: URL): string {
 	return `Registry ${path.posix.basename(url.pathname) || "response"}`;
 }
 
+interface RetainedRegistryEntries {
+	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
+	retainedPresets: ModelPresetRegistryPresets["presets"];
+	retainedDynamicProviders: string[];
+}
+
+interface RegistryStateCandidate {
+	retained: RetainedRegistryEntries;
+	nextState: RegistryState;
+}
+
 function retainRemoved(
 	previous: AcceptedGeneration | undefined,
 	profiles: ModelPresetRegistryProfiles,
 	presets: ModelPresetRegistryPresets,
-): {
-	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
-	retainedPresets: ModelPresetRegistryPresets["presets"];
-	retainedDynamicProviders: string[];
-} {
+): RetainedRegistryEntries {
 	if (!previous) return { retainedProfiles: [], retainedPresets: [], retainedDynamicProviders: [] };
 	const nextProfiles = new Set(profiles.profiles.map(profile => profile.id));
 	const previousProfilesById = new Map(
@@ -1355,6 +1362,8 @@ async function refreshModelPresetRegistryInner(
 			paths.transaction,
 			async () => {
 				const control = loadControlSync(agentDir);
+				if (control.disabled || environmentDisabled())
+					return { status: "disabled", revision: control.pinnedRevision };
 				const state = loadStateSync(agentDir);
 				let stateIsVerified = true;
 				try {
@@ -1366,8 +1375,6 @@ async function refreshModelPresetRegistryInner(
 					? state
 					: { ...state, activeRevision: undefined, history: [] };
 				const effectivePinnedRevision = stateIsVerified ? control.pinnedRevision : undefined;
-				const selectedRevision = effectivePinnedRevision ?? usableState.activeRevision;
-				if (control.disabled || environmentDisabled()) return { status: "disabled", revision: selectedRevision };
 				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
 						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
@@ -1479,85 +1486,101 @@ async function refreshModelPresetRegistryInner(
 				)
 					throw new Error("Registry preset identity is invalid.");
 				assertProfilePresetReferences(profiles, presets);
-				const compactRetention =
+				let compactRetention =
 					latest !== undefined &&
 					manifest.signed.registryRevision > latest.manifest.signed.registryRevision &&
 					retainedAncestryDepth(latest, usableState) >= MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY;
-				const retentionSource = compactRetention && latest ? withoutRetainedEntries(latest) : latest;
-				const retained = retainRemoved(retentionSource, profiles, presets);
-				const hasRetained =
-					retained.retainedProfiles.length > 0 ||
-					retained.retainedPresets.length > 0 ||
-					retained.retainedDynamicProviders.length > 0;
 				const latestRevision = latest?.manifest.signed.registryRevision;
-				const generation: AcceptedGeneration = {
-					manifest,
-					snapshot,
-					profiles,
-					presets,
-					manifestSha256,
-					acceptedAt: now.toISOString(),
-					etag: manifestResponse.response.headers.get("etag") ?? undefined,
-					...retained,
-					retainedFromRevision: hasRetained
-						? latestRevision === manifest.signed.registryRevision
-							? latest?.retainedFromRevision
-							: latestRevision
-						: undefined,
-				};
-				const priorHistory = compactRetention ? [retentionSource!] : usableState.history;
-				const historyCandidates = [
-					generation,
-					...priorHistory.filter(
-						item => item.manifest.signed.registryRevision !== manifest.signed.registryRevision,
-					),
-				].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
-				const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
-				const protectedRevisions = new Set(
-					[effectivePinnedRevision, usableState.activeRevision, generation.retainedFromRevision].filter(
-						(revision): revision is number => revision !== undefined,
-					),
-				);
-				const pendingProtectedRevisions = [...protectedRevisions];
-				for (let index = 0; index < pendingProtectedRevisions.length; index++) {
-					const protectedRevision = pendingProtectedRevisions[index]!;
-					const protectedGeneration = historyCandidates.find(
-						item => item.manifest.signed.registryRevision === protectedRevision,
+				const buildCandidate = (compact: boolean): RegistryStateCandidate => {
+					const retentionSource = compact && latest ? withoutRetainedEntries(latest) : latest;
+					const retained = retainRemoved(retentionSource, profiles, presets);
+					const hasRetained =
+						retained.retainedProfiles.length > 0 ||
+						retained.retainedPresets.length > 0 ||
+						retained.retainedDynamicProviders.length > 0;
+					const generation: AcceptedGeneration = {
+						manifest,
+						snapshot,
+						profiles,
+						presets,
+						manifestSha256,
+						acceptedAt: now.toISOString(),
+						etag: manifestResponse.response.headers.get("etag") ?? undefined,
+						...retained,
+						retainedFromRevision: hasRetained
+							? latestRevision === manifest.signed.registryRevision
+								? latest?.retainedFromRevision
+								: latestRevision
+							: undefined,
+					};
+					const priorHistory = compact ? [retentionSource!] : usableState.history;
+					const historyCandidates = [
+						generation,
+						...priorHistory.filter(
+							item => item.manifest.signed.registryRevision !== manifest.signed.registryRevision,
+						),
+					].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
+					const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
+					const protectedRevisions = new Set(
+						[effectivePinnedRevision, usableState.activeRevision, generation.retainedFromRevision].filter(
+							(revision): revision is number => revision !== undefined,
+						),
 					);
-					if (
-						protectedGeneration &&
-						!history.some(item => item.manifest.signed.registryRevision === protectedRevision)
-					)
-						history.push(protectedGeneration);
-					if (
-						protectedGeneration?.retainedFromRevision !== undefined &&
-						!protectedRevisions.has(protectedGeneration.retainedFromRevision)
-					) {
-						protectedRevisions.add(protectedGeneration.retainedFromRevision);
-						pendingProtectedRevisions.push(protectedGeneration.retainedFromRevision);
+					const pendingProtectedRevisions = [...protectedRevisions];
+					for (let index = 0; index < pendingProtectedRevisions.length; index++) {
+						const protectedRevision = pendingProtectedRevisions[index]!;
+						const protectedGeneration = historyCandidates.find(
+							item => item.manifest.signed.registryRevision === protectedRevision,
+						);
+						if (
+							protectedGeneration &&
+							!history.some(item => item.manifest.signed.registryRevision === protectedRevision)
+						)
+							history.push(protectedGeneration);
+						if (
+							protectedGeneration?.retainedFromRevision !== undefined &&
+							!protectedRevisions.has(protectedGeneration.retainedFromRevision)
+						) {
+							protectedRevisions.add(protectedGeneration.retainedFromRevision);
+							pendingProtectedRevisions.push(protectedGeneration.retainedFromRevision);
+						}
 					}
-				}
-				const nextState: RegistryState = {
-					version: 1,
-					activeRevision:
-						effectivePinnedRevision ??
-						(usableState.activeRevision !== undefined &&
-						state.highestSeenRevision !== undefined &&
-						usableState.activeRevision < state.highestSeenRevision
-							? usableState.activeRevision
-							: manifest.signed.registryRevision),
-					highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
-					highestSeenManifestSha256: manifestSha256,
-					history,
-					lastCheckedAt: now.toISOString(),
-					lastError: undefined,
+					return {
+						retained,
+						nextState: {
+							version: 1,
+							activeRevision:
+								effectivePinnedRevision ??
+								(usableState.activeRevision !== undefined &&
+								state.highestSeenRevision !== undefined &&
+								usableState.activeRevision < state.highestSeenRevision
+									? usableState.activeRevision
+									: manifest.signed.registryRevision),
+							highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
+							highestSeenManifestSha256: manifestSha256,
+							history,
+							lastCheckedAt: now.toISOString(),
+							lastError: undefined,
+						},
+					};
 				};
-				validateStateGenerations(nextState, effectiveTrustedKeys(dependencies));
+				const maxStateBytes = dependencies.maxStateBytes ?? MODEL_PRESET_REGISTRY_MAX_STATE_BYTES;
+				let candidate = buildCandidate(compactRetention);
+				validateStateGenerations(candidate.nextState, effectiveTrustedKeys(dependencies));
 				if (
-					Buffer.byteLength(JSON.stringify(nextState)) >
-					(dependencies.maxStateBytes ?? MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
-				)
+					Buffer.byteLength(JSON.stringify(candidate.nextState)) > maxStateBytes &&
+					!compactRetention &&
+					latest !== undefined &&
+					effectivePinnedRevision === undefined &&
+					(usableState.activeRevision === undefined || usableState.activeRevision === latestRevision)
+				) {
+					compactRetention = true;
+					candidate = buildCandidate(true);
+					validateStateGenerations(candidate.nextState, effectiveTrustedKeys(dependencies));
+				}
+				if (Buffer.byteLength(JSON.stringify(candidate.nextState)) > maxStateBytes)
 					throw new Error("Registry cache state exceeds its durable size limit.");
+				const { nextState, retained } = candidate;
 				if (!stateIsVerified && control.pinnedRevision !== undefined)
 					await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 				await writeAtomicJson(paths.state, nextState);
@@ -1705,7 +1728,7 @@ export function getModelPresetRegistryStatus(
 
 export function refreshModelPresetRegistryInBackground(
 	dependencies: ModelPresetRegistryDependencies = {},
-	onAccepted?: (result: ModelPresetRegistryRefreshResult) => void,
+	onAccepted?: () => void,
 ): () => void {
 	if (dependencies.automaticRefresh === false) return () => {};
 	const agentDir = effectiveAgentDir(dependencies);
@@ -1736,14 +1759,42 @@ export function refreshModelPresetRegistryInBackground(
 			: (dependencies.startupDelayMs ?? MODEL_PRESET_REGISTRY_STARTUP_DELAY_MS);
 	let cancelled = false;
 	let knownManifestSha256 = dependencies.knownManifestSha256 ?? status.manifestSha256;
+	const publicationFingerprint = (current: ModelPresetRegistryStatus): string =>
+		JSON.stringify({
+			disabled: current.disabled,
+			pinnedRevision: current.pinnedRevision,
+			activeRevision: current.activeRevision,
+			manifestSha256: current.manifestSha256,
+			cacheHealth: current.cacheHealth,
+		});
+	let publishedFingerprint = publicationFingerprint(status);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const schedule = (delayMs: number): void => {
 		if (cancelled) return;
 		timer = setTimeout(() => {
+			try {
+				const currentStatus = getModelPresetRegistryStatus({ ...dependencies, agentDir });
+				const currentFingerprint = publicationFingerprint(currentStatus);
+				if (currentFingerprint !== publishedFingerprint) {
+					publishedFingerprint = currentFingerprint;
+					onAccepted?.();
+				}
+			} catch {
+				// The origin refresh below records bounded diagnostics; local publication remains best-effort.
+			}
 			void refreshModelPresetRegistry({ ...dependencies, agentDir, knownManifestSha256 })
 				.then(result => {
 					if (result.status === "updated") knownManifestSha256 = result.manifestSha256;
-					if (!cancelled) onAccepted?.(result);
+					if (!cancelled) {
+						try {
+							publishedFingerprint = publicationFingerprint(
+								getModelPresetRegistryStatus({ ...dependencies, agentDir }),
+							);
+						} catch {
+							// The accepted callback still reloads through its fail-closed cache reader.
+						}
+						onAccepted?.();
+					}
 				})
 				.catch(() => undefined)
 				.finally(() => schedule(refreshIntervalMs));
