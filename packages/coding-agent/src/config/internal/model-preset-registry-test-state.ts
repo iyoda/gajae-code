@@ -15,6 +15,10 @@ export function getModelPresetRegistryTestTrustedKeys(
 	return context?.agentDir === agentDir ? context.trustedKeys : undefined;
 }
 
+export function modelPresetRegistryTestUrlsAllowed(agentDir: string): boolean {
+	return testTrustContext.getStore()?.agentDir === agentDir;
+}
+
 export function runWithModelPresetRegistryTestTrust<T>(
 	agentDir: string,
 	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,

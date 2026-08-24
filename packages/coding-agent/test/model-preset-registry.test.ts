@@ -218,7 +218,6 @@ async function accept(
 			agentDir: data.agentDir,
 			manifestUrl,
 			fetch: fetchImpl,
-			allowTestUrls: true,
 		}),
 	);
 }
@@ -261,9 +260,9 @@ describe("signed model preset registry", () => {
 			if (calls === 2) return new Response(productionSnapshotV1);
 			return new Response("");
 		}) as unknown as typeof fetch;
-		await expect(
-			refreshModelPresetRegistry({ agentDir, manifestUrl, fetch: fetchImpl, allowTestUrls: true }),
-		).rejects.toThrow(/profiles size mismatch/i);
+		await expect(refreshModelPresetRegistry({ agentDir, manifestUrl, fetch: fetchImpl })).rejects.toThrow(
+			/profiles size mismatch/i,
+		);
 		expect(calls).toBe(3);
 		expect(getModelPresetRegistryStatus({ agentDir })).toMatchObject({ cacheHealth: "empty", source: "embedded" });
 	});
@@ -349,7 +348,6 @@ describe("signed model preset registry", () => {
 			const modelRegistry = data.run(
 				() =>
 					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-						allowTestUrls: true,
 						automaticRefresh: false,
 					}),
 			);
@@ -453,7 +451,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				maxManifestBytes: 4,
 				fetch: (async () => new Response("oversized")) as unknown as typeof fetch,
 			}),
@@ -464,7 +461,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				fetch: (async () => redirectedResponse) as unknown as typeof fetch,
 			}),
 		).rejects.toThrow(/URL changed/i);
@@ -472,7 +468,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				timeoutMs: 5,
 				fetch: ((_input, init) =>
 					new Promise((_resolve, reject) =>
@@ -484,7 +479,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				fetch: (async () => {
 					throw new Error("token=SUPERSECRET https://private.example/path");
 				}) as unknown as typeof fetch,
@@ -559,7 +553,6 @@ describe("signed model preset registry", () => {
 				refreshModelPresetRegistryImpl({
 					agentDir: data.agentDir,
 					manifestUrl,
-					allowTestUrls: true,
 					knownManifestSha256: sha256(registry.manifestBody),
 					fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
 				}),
@@ -601,7 +594,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				fetch: (async () => {
 					throw new Error("offline");
 				}) as unknown as typeof fetch,
@@ -746,7 +738,6 @@ describe("signed model preset registry", () => {
 			modelRegistry = data.run(
 				() =>
 					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-						allowTestUrls: true,
 						manifestUrl,
 						fetch: countingFetch,
 						startupDelayMs: 20,
@@ -806,7 +797,6 @@ describe("signed model preset registry", () => {
 		const modelRegistry = data.run(
 			() =>
 				new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-					allowTestUrls: true,
 					manifestUrl,
 					startupDelayMs: 20,
 					refreshIntervalMs: 30,
@@ -862,7 +852,6 @@ describe("signed model preset registry", () => {
 		const modelRegistry = data.run(
 			() =>
 				new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-					allowTestUrls: true,
 					manifestUrl,
 					fetch: fetchImpl,
 					startupDelayMs: 0,
@@ -920,8 +909,10 @@ describe("signed model preset registry", () => {
 		try {
 			expect(modelRegistry.getDiscoverableProviders()).toContain("ollama");
 			modelRegistry.setScopedSettings(scopedSettings);
-			scopedSettings.override("disabledProviders", []);
 			expect(modelRegistry.getDiscoverableProviders()).not.toContain("ollama");
+			scopedSettings.override("disabledProviders", []);
+			modelRegistry.setScopedSettings(scopedSettings);
+			expect(modelRegistry.getDiscoverableProviders()).toContain("ollama");
 		} finally {
 			modelRegistry.dispose();
 			authStorage.close();
@@ -987,7 +978,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				allowTestUrls: true,
 				fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
 			}),
 		).resolves.toMatchObject({ status: "not_modified", revision: 2 });
@@ -1094,7 +1084,6 @@ describe("signed model preset registry", () => {
 			agentDir: data.agentDir,
 			manifestUrl,
 			fetch: fetchImpl,
-			allowTestUrls: true,
 		});
 		await entered.promise;
 		const pin = setModelPresetRegistryPin({
@@ -1120,7 +1109,6 @@ describe("signed model preset registry", () => {
 				agentDir: data.agentDir,
 				manifestUrl,
 				fetch: registryFetch(second),
-				allowTestUrls: true,
 				maxStateBytes: 100,
 			}),
 		).rejects.toThrow(/durable size limit/i);

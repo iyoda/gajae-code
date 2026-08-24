@@ -7,7 +7,10 @@ import { exactReplacePath, type NativeExactFileIdentity } from "@gajae-code/nati
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { withFileLock } from "./file-lock";
-import { getModelPresetRegistryTestTrustedKeys } from "./internal/model-preset-registry-test-state";
+import {
+	getModelPresetRegistryTestTrustedKeys,
+	modelPresetRegistryTestUrlsAllowed,
+} from "./internal/model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
 
@@ -398,7 +401,6 @@ export interface ModelPresetRegistryDependencies {
 	maxProfilesBytes?: number;
 	maxPresetsBytes?: number;
 	maxStateBytes?: number;
-	allowTestUrls?: boolean;
 	automaticRefresh?: boolean;
 	startupDelayMs?: number;
 	refreshIntervalMs?: number;
@@ -1359,7 +1361,7 @@ function refreshSingleFlightKey(dependencies: ModelPresetRegistryDependencies, a
 		refreshDependencyId((dependencies.fetch ?? fetch) as object),
 		refreshDependencyId(trustedKeys as object),
 		dependencies.now ? refreshDependencyId(dependencies.now) : 0,
-		dependencies.allowTestUrls === true ? 1 : 0,
+		modelPresetRegistryTestUrlsAllowed(agentDir) ? 1 : 0,
 		dependencies.timeoutMs ?? "",
 		dependencies.maxManifestBytes ?? "",
 		dependencies.maxSnapshotBytes ?? "",
@@ -1394,6 +1396,7 @@ async function refreshModelPresetRegistryInner(
 		return await withFileLock(
 			paths.transaction,
 			async () => {
+				const allowTestUrls = modelPresetRegistryTestUrlsAllowed(agentDir);
 				const control = loadControlSync(agentDir);
 				if (control.disabled || environmentDisabled())
 					return { status: "disabled", revision: control.pinnedRevision };
@@ -1416,7 +1419,7 @@ async function refreshModelPresetRegistryInner(
 					undefined,
 				);
 				const manifestUrl = assertHttpsUrl(effectiveManifestUrl(dependencies), "Registry manifest URL");
-				assertRegistryUrl(manifestUrl, manifestUrl, dependencies.allowTestUrls === true);
+				assertRegistryUrl(manifestUrl, manifestUrl, allowTestUrls);
 				const manifestResponse = await boundedFetch(
 					manifestUrl,
 					dependencies.maxManifestBytes ?? MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES,
@@ -1476,7 +1479,7 @@ async function refreshModelPresetRegistryInner(
 						throw new Error("Registry revision equivocation rejected.");
 				}
 				const snapshotResponse = await boundedFetch(
-					descriptorUrl(manifest.signed.snapshot, manifestUrl, dependencies.allowTestUrls === true),
+					descriptorUrl(manifest.signed.snapshot, manifestUrl, allowTestUrls),
 					dependencies.maxSnapshotBytes ?? MODEL_PRESET_REGISTRY_MAX_SNAPSHOT_BYTES,
 					dependencies,
 				);
@@ -1489,7 +1492,7 @@ async function refreshModelPresetRegistryInner(
 				);
 				assertSnapshotBindings(manifest, snapshot);
 				const profilesResponse = await boundedFetch(
-					descriptorUrl(manifest.signed.contents.profiles, manifestUrl, dependencies.allowTestUrls === true),
+					descriptorUrl(manifest.signed.contents.profiles, manifestUrl, allowTestUrls),
 					dependencies.maxProfilesBytes ?? MODEL_PRESET_REGISTRY_MAX_PROFILES_BYTES,
 					dependencies,
 				);
@@ -1506,7 +1509,7 @@ async function refreshModelPresetRegistryInner(
 				)
 					throw new Error("Registry profile identity is invalid.");
 				const presetsResponse = await boundedFetch(
-					descriptorUrl(manifest.signed.contents.presets, manifestUrl, dependencies.allowTestUrls === true),
+					descriptorUrl(manifest.signed.contents.presets, manifestUrl, allowTestUrls),
 					dependencies.maxPresetsBytes ?? MODEL_PRESET_REGISTRY_MAX_PRESETS_BYTES,
 					dependencies,
 				);
