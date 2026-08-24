@@ -1705,7 +1705,7 @@ export function getModelPresetRegistryStatus(
 
 export function refreshModelPresetRegistryInBackground(
 	dependencies: ModelPresetRegistryDependencies = {},
-	onAccepted?: (result: Extract<ModelPresetRegistryRefreshResult, { status: "updated" }>) => void,
+	onAccepted?: (result: ModelPresetRegistryRefreshResult) => void,
 ): () => void {
 	if (dependencies.automaticRefresh === false) return () => {};
 	const agentDir = effectiveAgentDir(dependencies);
@@ -1742,10 +1742,8 @@ export function refreshModelPresetRegistryInBackground(
 		timer = setTimeout(() => {
 			void refreshModelPresetRegistry({ ...dependencies, agentDir, knownManifestSha256 })
 				.then(result => {
-					if (!cancelled && result.status === "updated") {
-						knownManifestSha256 = result.manifestSha256;
-						onAccepted?.(result);
-					}
+					if (result.status === "updated") knownManifestSha256 = result.manifestSha256;
+					if (!cancelled) onAccepted?.(result);
 				})
 				.catch(() => undefined)
 				.finally(() => schedule(refreshIntervalMs));

@@ -718,6 +718,14 @@ describe("signed model preset registry", () => {
 			expect(modelRegistry.getModelProfile("background-profile")?.source).toBe("registry");
 			for (let attempt = 0; attempt < 20 && calls < 5; attempt++) await Bun.sleep(10);
 			expect(calls).toBeGreaterThanOrEqual(5);
+			await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
+			for (let attempt = 0; attempt < 20 && modelRegistry.getModelProfile("background-profile"); attempt++)
+				await Bun.sleep(10);
+			expect(modelRegistry.getModelProfile("background-profile")).toBeUndefined();
+			await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: false });
+			for (let attempt = 0; attempt < 20 && !modelRegistry.getModelProfile("background-profile"); attempt++)
+				await Bun.sleep(10);
+			expect(modelRegistry.getModelProfile("background-profile")?.source).toBe("registry");
 			modelRegistry.dispose();
 			const callsAfterDispose = calls;
 			await Bun.sleep(50);
