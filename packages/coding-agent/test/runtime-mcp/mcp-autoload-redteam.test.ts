@@ -293,6 +293,7 @@ describe("red-team: conventional MCP autoload", () => {
 				expect(session.getAllToolNames()).toContain("mcp__domain_docs_lookup");
 				expect(session.getAllToolNames()).toContain("mcp__solo_hello");
 				// Plugin presence seals the connection set (fixed session lifetime).
+				for (let attempt = 0; attempt < 50 && !mcpManager?.isConnectionSetSealed(); attempt++) await Bun.sleep(10);
 				expect(mcpManager?.isConnectionSetSealed()).toBe(true);
 			} finally {
 				await session.dispose();
