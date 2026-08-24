@@ -1708,8 +1708,8 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 				? undefined
 				: new ModelRegistry(
 						options.authStorage ?? (await awaitAbortable(discoverAuthStorage())),
-						undefined,
-						undefined,
+						path.join(settings.getAgentDir(), "models.yml"),
+						settings,
 						{
 							automaticRefresh: false,
 						},

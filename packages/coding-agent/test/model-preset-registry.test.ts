@@ -272,6 +272,7 @@ describe("signed model preset registry", () => {
 				{ ...registryPreset("registry-only-model", 24_680), provider: "alibaba-token-plan" },
 				{ ...registryPreset("configured-model", 32_000), provider: "configured-provider" },
 				{ ...registryPreset("mismatched-model", 32_000), provider: "mismatched-provider" },
+				{ ...registryPreset("gpt-4o-mini", 64_000), provider: "openai" },
 			],
 		);
 		expect(await accept(data, registry)).toMatchObject({ status: "updated", revision: 1, revisionId: "00000001" });
@@ -294,6 +295,10 @@ describe("signed model preset registry", () => {
     baseUrl: https://mismatched.example/v1
     api: anthropic-messages
     auth: none
+  openai:
+    baseUrl: https://configured-openai.example/v1
+    api: anthropic-messages
+    auth: none
 `,
 		);
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
@@ -314,6 +319,13 @@ describe("signed model preset registry", () => {
 					.getAll()
 					.find(model => model.provider === "alibaba-token-plan" && model.id === "MiniMax-M2.5"),
 			).toMatchObject({ contextWindow: 12_345, baseUrl: expect.stringContaining("https://") });
+			expect(
+				modelRegistry.getAll().find(model => model.provider === "openai" && model.id === "gpt-4o-mini"),
+			).toMatchObject({
+				contextWindow: 64_000,
+				baseUrl: "https://configured-openai.example/v1",
+				api: "anthropic-messages",
+			});
 			expect(
 				modelRegistry
 					.getAll()
@@ -454,6 +466,7 @@ describe("signed model preset registry", () => {
 	test("recovers from a revoked cached generation through a newer trusted key", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
 		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
 		const rotated = crypto.generateKeyPairSync("ed25519");
 		data.trustedKeys.set("rotated-key", {
@@ -465,6 +478,7 @@ describe("signed model preset registry", () => {
 			accept(data, signedRegistry(rotated.privateKey, 2, undefined, undefined, undefined, undefined, "rotated-key")),
 		).resolves.toMatchObject({ status: "updated", revision: 2 });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
 	});
 
 	test("uses ETag 304 only with a verified warm cache", async () => {
@@ -485,6 +499,27 @@ describe("signed model preset registry", () => {
 		expect(
 			(await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json()).externalWriterMarker,
 		).toBe("preserve-me");
+		const externalAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-preset-registry-external-"));
+		directories.push(externalAgentDir);
+		const externalRun = <T>(operation: () => T): T =>
+			withModelPresetRegistryTestTrust(externalAgentDir, data.trustedKeys, operation);
+		testTrustRunners.set(externalAgentDir, externalRun);
+		const externalData: RegistryFixture = { ...data, agentDir: externalAgentDir, run: externalRun };
+		await accept(externalData, signedRegistry(data.privateKey, 2));
+		const externalState = await Bun.file(path.join(externalAgentDir, "model-presets", "state.json")).text();
+		await expect(
+			data.run(() =>
+				refreshModelPresetRegistryImpl({
+					agentDir: data.agentDir,
+					manifestUrl,
+					allowTestUrls: true,
+					fetch: (async () => {
+						await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), externalState);
+						return new Response(null, { status: 304 });
+					}) as unknown as typeof fetch,
+				}),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 2 });
 	});
 
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
@@ -574,6 +609,50 @@ describe("signed model preset registry", () => {
 			revision: 4,
 		});
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(4);
+	});
+
+	test("does not coalesce refreshes with different request dependencies", async () => {
+		const data = await fixture();
+		const first = signedRegistry(data.privateKey, 1);
+		const second = signedRegistry(data.privateKey, 2);
+		let firstCalls = 0;
+		let secondCalls = 0;
+		const firstFetchBase = registryFetch(first);
+		const secondFetchBase = registryFetch(second);
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const firstFetch = (async (input, init) => {
+			firstCalls++;
+			if (firstCalls === 1) {
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			}
+			return firstFetchBase(input, init);
+		}) as typeof fetch;
+		const secondFetch = (async (input, init) => {
+			secondCalls++;
+			return secondFetchBase(input, init);
+		}) as typeof fetch;
+		const firstRefresh = data.run(() =>
+			refreshModelPresetRegistryImpl({
+				agentDir: data.agentDir,
+				manifestUrl: "https://first.registry.example/latest.json",
+				fetch: firstFetch,
+			}),
+		);
+		await firstEntered.promise;
+		const secondRefresh = data.run(() =>
+			refreshModelPresetRegistryImpl({
+				agentDir: data.agentDir,
+				manifestUrl: "https://second.registry.example/latest.json",
+				fetch: secondFetch,
+			}),
+		);
+		releaseFirst.resolve();
+		await expect(firstRefresh).resolves.toMatchObject({ revision: 1 });
+		await expect(secondRefresh).resolves.toMatchObject({ revision: 2 });
+		expect(firstCalls).toBe(4);
+		expect(secondCalls).toBe(4);
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {

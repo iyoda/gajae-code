@@ -1267,16 +1267,46 @@ async function recordFailure(agentDir: string, error: unknown, now: Date): Promi
 }
 
 const refreshSingleFlight = new Map<string, Promise<ModelPresetRegistryRefreshResult>>();
+const refreshDependencyIds = new WeakMap<object, number>();
+let nextRefreshDependencyId = 1;
+
+function refreshDependencyId(value: object): number {
+	const existing = refreshDependencyIds.get(value);
+	if (existing !== undefined) return existing;
+	const id = nextRefreshDependencyId++;
+	refreshDependencyIds.set(value, id);
+	return id;
+}
+
+function refreshSingleFlightKey(dependencies: ModelPresetRegistryDependencies, agentDir: string): string {
+	const trustedKeys = getModelPresetRegistryTestTrustedKeys(agentDir) ?? MODEL_PRESET_REGISTRY_TRUSTED_KEYS;
+	return [
+		agentDir,
+		effectiveManifestUrl(dependencies),
+		refreshDependencyId((dependencies.fetch ?? fetch) as object),
+		refreshDependencyId(trustedKeys as object),
+		dependencies.now ? refreshDependencyId(dependencies.now) : 0,
+		dependencies.allowTestUrls === true ? 1 : 0,
+		dependencies.timeoutMs ?? "",
+		dependencies.maxManifestBytes ?? "",
+		dependencies.maxSnapshotBytes ?? "",
+		dependencies.maxProfilesBytes ?? "",
+		dependencies.maxPresetsBytes ?? "",
+		dependencies.maxStateBytes ?? "",
+	].join("\u0000");
+}
+
 export async function refreshModelPresetRegistry(
 	dependencies: ModelPresetRegistryDependencies = {},
 ): Promise<ModelPresetRegistryRefreshResult> {
 	const agentDir = effectiveAgentDir(dependencies);
-	const existing = refreshSingleFlight.get(agentDir);
+	const flightKey = refreshSingleFlightKey(dependencies, agentDir);
+	const existing = refreshSingleFlight.get(flightKey);
 	if (existing) return existing;
 	const promise = refreshModelPresetRegistryInner({ ...dependencies, agentDir }).finally(() => {
-		if (refreshSingleFlight.get(agentDir) === promise) refreshSingleFlight.delete(agentDir);
+		if (refreshSingleFlight.get(flightKey) === promise) refreshSingleFlight.delete(flightKey);
 	});
-	refreshSingleFlight.set(agentDir, promise);
+	refreshSingleFlight.set(flightKey, promise);
 	return promise;
 }
 
@@ -1335,6 +1365,19 @@ async function refreshModelPresetRegistryInner(
 						lastCheckedAt: now.toISOString(),
 						lastError: undefined,
 					});
+					if (
+						!latest ||
+						currentLatest.manifest.signed.registryRevision !== latest.manifest.signed.registryRevision ||
+						currentLatest.manifestSha256 !== latest.manifestSha256
+					)
+						return {
+							status: "updated",
+							revision: currentLatest.manifest.signed.registryRevision,
+							revisionId: currentLatest.manifest.signed.revision,
+							manifestSha256: currentLatest.manifestSha256,
+							retainedProfiles: currentLatest.retainedProfiles.map(profile => profile.id),
+							retainedPresets: currentLatest.retainedPresets.map(preset => `${preset.provider}/${preset.id}`),
+						};
 					return { status: "not_modified", revision: currentLatest.manifest.signed.registryRevision };
 				}
 				const manifestBytes = manifestResponse.bytes ?? new Uint8Array();
@@ -1473,9 +1516,9 @@ async function refreshModelPresetRegistryInner(
 					(dependencies.maxStateBytes ?? MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
 				)
 					throw new Error("Registry cache state exceeds its durable size limit.");
-				await writeAtomicJson(paths.state, nextState);
 				if (!stateIsVerified && control.pinnedRevision !== undefined)
 					await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
+				await writeAtomicJson(paths.state, nextState);
 				return {
 					status: "updated",
 					revision: manifest.signed.registryRevision,
