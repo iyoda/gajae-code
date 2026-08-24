@@ -23,6 +23,7 @@ const MODEL_PRESET_REGISTRY_MAX_STATE_BYTES = 32 * 1024 * 1024;
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 const MODEL_PRESET_REGISTRY_MAX_HISTORY = 4;
+const MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY = 64;
 const MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES = 1024;
 const MODEL_PRESET_REGISTRY_FETCH_TIMEOUT_MS = 8_000;
 const REVISION_PATTERN = /^[0-9]{8}$/;
@@ -1207,7 +1208,9 @@ function validateStateGenerations(
 	);
 	const validated = new Set<number>();
 	const visiting = new Set<number>();
-	const visit = (generation: AcceptedGeneration): void => {
+	const visit = (generation: AcceptedGeneration, ancestryDepth = 0): void => {
+		if (ancestryDepth > MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY)
+			throw new Error("Registry retained provenance ancestry exceeds its bound.");
 		const revision = generation.manifest.signed.registryRevision;
 		if (validated.has(revision)) return;
 		if (visiting.has(revision)) throw new Error("Registry retained provenance contains a cycle.");
@@ -1224,7 +1227,7 @@ function validateStateGenerations(
 			if (!source) throw new Error("Registry retained provenance source is missing.");
 			if (source.manifest.signed.registryRevision >= revision)
 				throw new Error("Registry retained provenance source is not older than its consumer.");
-			visit(source);
+			visit(source, ancestryDepth + 1);
 			const expected = retainRemoved(source, generation.profiles, generation.presets);
 			if (
 				canonicalModelPresetRegistryJson(expected.retainedProfiles) !==
@@ -1289,10 +1292,19 @@ async function refreshModelPresetRegistryInner(
 			async () => {
 				const control = loadControlSync(agentDir);
 				const state = loadStateSync(agentDir);
-				validateStateGenerations(state, effectiveTrustedKeys(dependencies));
-				const selectedRevision = control.pinnedRevision ?? state.activeRevision;
+				let stateIsVerified = true;
+				try {
+					validateStateGenerations(state, effectiveTrustedKeys(dependencies));
+				} catch {
+					stateIsVerified = false;
+				}
+				const usableState: RegistryState = stateIsVerified
+					? state
+					: { ...state, activeRevision: undefined, history: [] };
+				const effectivePinnedRevision = stateIsVerified ? control.pinnedRevision : undefined;
+				const selectedRevision = effectivePinnedRevision ?? usableState.activeRevision;
 				if (control.disabled || environmentDisabled()) return { status: "disabled", revision: selectedRevision };
-				const latest = state.history.reduce<AcceptedGeneration | undefined>(
+				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
 						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
 							? item
@@ -1308,10 +1320,22 @@ async function refreshModelPresetRegistryInner(
 					latest?.etag ? { "If-None-Match": latest.etag } : {},
 				);
 				if (manifestResponse.response.status === 304) {
-					if (!latest) throw new Error("Registry returned 304 without a verified cached generation.");
-					validateGeneration(latest, effectiveTrustedKeys(dependencies));
-					await writeAtomicJson(paths.state, { ...state, lastCheckedAt: now.toISOString(), lastError: undefined });
-					return { status: "not_modified", revision: latest.manifest.signed.registryRevision };
+					const currentState = loadStateSync(agentDir);
+					validateStateGenerations(currentState, effectiveTrustedKeys(dependencies));
+					const currentLatest = currentState.history.reduce<AcceptedGeneration | undefined>(
+						(current, item) =>
+							!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
+								? item
+								: current,
+						undefined,
+					);
+					if (!currentLatest) throw new Error("Registry returned 304 without a verified cached generation.");
+					await writeAtomicJson(paths.state, {
+						...currentState,
+						lastCheckedAt: now.toISOString(),
+						lastError: undefined,
+					});
+					return { status: "not_modified", revision: currentLatest.manifest.signed.registryRevision };
 				}
 				const manifestBytes = manifestResponse.bytes ?? new Uint8Array();
 				const manifest = parseCanonicalDocument(
@@ -1399,13 +1423,13 @@ async function refreshModelPresetRegistryInner(
 				};
 				const historyCandidates = [
 					generation,
-					...state.history.filter(
+					...usableState.history.filter(
 						item => item.manifest.signed.registryRevision !== manifest.signed.registryRevision,
 					),
 				].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
 				const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
 				const protectedRevisions = new Set(
-					[control.pinnedRevision, state.activeRevision, generation.retainedFromRevision].filter(
+					[effectivePinnedRevision, usableState.activeRevision, generation.retainedFromRevision].filter(
 						(revision): revision is number => revision !== undefined,
 					),
 				);
@@ -1431,11 +1455,11 @@ async function refreshModelPresetRegistryInner(
 				const nextState: RegistryState = {
 					version: 1,
 					activeRevision:
-						control.pinnedRevision ??
-						(state.activeRevision !== undefined &&
+						effectivePinnedRevision ??
+						(usableState.activeRevision !== undefined &&
 						state.highestSeenRevision !== undefined &&
-						state.activeRevision < state.highestSeenRevision
-							? state.activeRevision
+						usableState.activeRevision < state.highestSeenRevision
+							? usableState.activeRevision
 							: manifest.signed.registryRevision),
 					highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
 					highestSeenManifestSha256: manifestSha256,
@@ -1450,6 +1474,8 @@ async function refreshModelPresetRegistryInner(
 				)
 					throw new Error("Registry cache state exceeds its durable size limit.");
 				await writeAtomicJson(paths.state, nextState);
+				if (!stateIsVerified && control.pinnedRevision !== undefined)
+					await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 				return {
 					status: "updated",
 					revision: manifest.signed.registryRevision,

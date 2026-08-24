@@ -88,7 +88,26 @@ function registryPreset(id: string, contextWindow = 8192) {
 		maxTokens: 2048,
 	};
 }
-async function fixture() {
+
+interface RegistryFixture {
+	agentDir: string;
+	privateKey: crypto.KeyObject;
+	trustedKeys: Map<string, ModelPresetRegistryTrustedKey>;
+	run<T>(operation: () => T): T;
+}
+
+interface SignedRegistryFixture {
+	manifest: ModelPresetRegistryManifest;
+	manifestBody: string;
+	snapshot: ModelPresetRegistrySnapshot;
+	snapshotBody: string;
+	profiles: ModelPresetRegistryProfiles;
+	profilesBody: string;
+	presets: ModelPresetRegistryPresets;
+	presetsBody: string;
+}
+
+async function fixture(): Promise<RegistryFixture> {
 	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-preset-registry-"));
 	directories.push(agentDir);
 	const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -110,7 +129,8 @@ function signedRegistry(
 	presetEntries = [registryPreset("remote-model")],
 	compatibility = { consumerContract: { minVersion: "1.0.0", maxVersion: "1.0.0" } },
 	dynamicProviders: string[] = [],
-) {
+	keyId = "test-key",
+): SignedRegistryFixture {
 	const revisionId = String(revision).padStart(8, "0");
 	const profiles: ModelPresetRegistryProfiles = {
 		schemaVersion: "1.0.0",
@@ -160,7 +180,7 @@ function signedRegistry(
 	const manifest: ModelPresetRegistryManifest = {
 		schemaVersion: "1.0.0",
 		signed,
-		signature: { algorithm: "Ed25519", keyId: "test-key", value: signature },
+		signature: { algorithm: "Ed25519", keyId, value: signature },
 	};
 	return {
 		manifest,
@@ -174,7 +194,7 @@ function signedRegistry(
 	};
 }
 
-function registryFetch(registry: ReturnType<typeof signedRegistry>, observedHeaders?: Headers[]): typeof fetch {
+function registryFetch(registry: SignedRegistryFixture, observedHeaders?: Headers[]): typeof fetch {
 	let calls = 0;
 	return (async (_input, init) => {
 		calls++;
@@ -185,11 +205,7 @@ function registryFetch(registry: ReturnType<typeof signedRegistry>, observedHead
 		return new Response(registry.presetsBody);
 	}) as typeof fetch;
 }
-async function accept(
-	data: Awaited<ReturnType<typeof fixture>>,
-	registry: ReturnType<typeof signedRegistry>,
-	fetchImpl = registryFetch(registry),
-) {
+async function accept(data: RegistryFixture, registry: SignedRegistryFixture, fetchImpl = registryFetch(registry)) {
 	return data.run(() =>
 		refreshModelPresetRegistry({
 			agentDir: data.agentDir,
@@ -435,6 +451,22 @@ describe("signed model preset registry", () => {
 		await expect(accept(data, signedRegistry(data.privateKey, 1))).rejects.toThrow(/revoked/i);
 	});
 
+	test("recovers from a revoked cached generation through a newer trusted key", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const rotated = crypto.generateKeyPairSync("ed25519");
+		data.trustedKeys.set("rotated-key", {
+			keyId: "rotated-key",
+			publicKeyPem: rotated.publicKey.export({ type: "spki", format: "pem" }).toString(),
+			validFrom: "2026-01-01T00:00:00.000Z",
+		});
+		await expect(
+			accept(data, signedRegistry(rotated.privateKey, 2, undefined, undefined, undefined, undefined, "rotated-key")),
+		).resolves.toMatchObject({ status: "updated", revision: 2 });
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
+	});
+
 	test("uses ETag 304 only with a verified warm cache", async () => {
 		const data = await fixture();
 		const registry = signedRegistry(data.privateKey, 1);
@@ -442,10 +474,17 @@ describe("signed model preset registry", () => {
 		let ifNoneMatch: string | null = null;
 		const fetch304 = (async (_input, init) => {
 			ifNoneMatch = new Headers(init?.headers).get("if-none-match");
+			const statePath = path.join(data.agentDir, "model-presets", "state.json");
+			const externallyUpdated = await Bun.file(statePath).json();
+			externallyUpdated.externalWriterMarker = "preserve-me";
+			await Bun.write(statePath, JSON.stringify(externallyUpdated));
 			return new Response(null, { status: 304 });
 		}) as typeof fetch;
 		expect(await accept(data, registry, fetch304)).toEqual({ status: "not_modified", revision: 1 });
 		expect(ifNoneMatch as string | null).toBe('"revision"');
+		expect(
+			(await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json()).externalWriterMarker,
+		).toBe("preserve-me");
 	});
 
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
@@ -530,7 +569,11 @@ describe("signed model preset registry", () => {
 		const tampered = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(tampered.profiles.size).toBe(0);
 		expect(tampered.error).toMatch(/retained provenance content/i);
-		await expect(accept(data, signedRegistry(data.privateKey, 4))).rejects.toThrow(/retained provenance content/i);
+		await expect(accept(data, signedRegistry(data.privateKey, 4))).resolves.toMatchObject({
+			status: "updated",
+			revision: 4,
+		});
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(4);
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
@@ -689,6 +732,33 @@ describe("signed model preset registry", () => {
 		});
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: false });
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).highestSeenRevision).toBe(2);
+	});
+
+	test("bounds retained provenance ancestry without replacing the LKG", async () => {
+		const data = await fixture();
+		for (let revision = 1; revision <= 65; revision++) {
+			await accept(
+				data,
+				signedRegistry(
+					data.privateKey,
+					revision,
+					[registryProfile("changing", `provider/model-${revision}`)],
+					[registryPreset(`model-${revision}`)],
+				),
+			);
+		}
+		await expect(
+			accept(
+				data,
+				signedRegistry(
+					data.privateKey,
+					66,
+					[registryProfile("changing", "provider/model-66")],
+					[registryPreset("model-66")],
+				),
+			),
+		).rejects.toThrow(/ancestry exceeds its bound/i);
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(65);
 	});
 
 	test("never evicts a selected pinned generation when bounded history advances", async () => {
