@@ -439,6 +439,10 @@ describe("signed model preset registry", () => {
 		await expect(accept(data, duplicates)).rejects.toThrow(/duplicate|schema rejected/i);
 		const reserved = signedRegistry(data.privateKey, 1, [registryProfile("system-shadow")]);
 		await expect(accept(data, reserved)).rejects.toThrow(/reserved profile id namespace/i);
+		const formatControl = signedRegistry(data.privateKey, 1, [
+			{ ...registryProfile("format-control"), displayName: "trusted\u202Eliame" },
+		]);
+		await expect(accept(data, formatControl)).rejects.toThrow(/schema rejected/i);
 		const confusable = signedRegistry(data.privateKey, 1, undefined, [
 			{ ...registryPreset("model"), provider: "scope" },
 			{ ...registryPreset("mоdel"), provider: "scope" },
