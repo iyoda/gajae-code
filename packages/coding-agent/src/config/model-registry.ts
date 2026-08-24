@@ -1423,7 +1423,11 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
-	#catalogMutationTail: Promise<void> = Promise.resolve();
+	#catalogPublicationTail: Promise<void> = Promise.resolve();
+	#pendingCatalogPublications = 0;
+	#activeCatalogRefreshes = 0;
+	#catalogRefreshIdle: Promise<void> = Promise.resolve();
+	#resolveCatalogRefreshIdle: (() => void) | undefined;
 	#disposed = false;
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
@@ -1467,7 +1471,7 @@ export class ModelRegistry {
 				agentDir: this.#modelPresetRegistryAgentDir,
 			},
 			() => {
-				void this.#enqueueCatalogMutation(() => {
+				void this.#enqueueCatalogPublication(() => {
 					if (this.#disposed) return;
 					this.#reloadStaticModels();
 					this.#modelBindingsApplier.apply();
@@ -1485,10 +1489,37 @@ export class ModelRegistry {
 		this.#unsubscribeAuthGeneration = undefined;
 	}
 
-	#enqueueCatalogMutation(operation: () => void | Promise<void>): Promise<void> {
-		const run = this.#catalogMutationTail.then(operation, operation);
-		this.#catalogMutationTail = run.catch(() => undefined);
+	#enqueueCatalogPublication(operation: () => void | Promise<void>): Promise<void> {
+		this.#pendingCatalogPublications++;
+		const run = this.#catalogPublicationTail
+			.then(async () => {
+				await this.#catalogRefreshIdle;
+				await operation();
+			})
+			.finally(() => {
+				this.#pendingCatalogPublications--;
+			});
+		this.#catalogPublicationTail = run.catch(() => undefined);
 		return run;
+	}
+
+	async #runCatalogRefresh(operation: () => Promise<void>): Promise<void> {
+		if (this.#pendingCatalogPublications > 0) await this.#catalogPublicationTail;
+		if (this.#activeCatalogRefreshes === 0) {
+			const idle = Promise.withResolvers<void>();
+			this.#catalogRefreshIdle = idle.promise;
+			this.#resolveCatalogRefreshIdle = idle.resolve;
+		}
+		this.#activeCatalogRefreshes++;
+		try {
+			await operation();
+		} finally {
+			this.#activeCatalogRefreshes--;
+			if (this.#activeCatalogRefreshes === 0) {
+				this.#resolveCatalogRefreshIdle?.();
+				this.#resolveCatalogRefreshIdle = undefined;
+			}
+		}
 	}
 
 	onCatalogChanged(listener: () => void): () => void {
@@ -1510,7 +1541,7 @@ export class ModelRegistry {
 	 * Reload models from disk (embedded + accepted registry + custom from models.yml).
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
-		await this.#enqueueCatalogMutation(async () => {
+		await this.#runCatalogRefresh(async () => {
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
@@ -1542,7 +1573,7 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		await this.#enqueueCatalogMutation(async () => {
+		await this.#runCatalogRefresh(async () => {
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
