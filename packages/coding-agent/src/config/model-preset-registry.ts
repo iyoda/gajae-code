@@ -93,7 +93,7 @@ const MODEL_PRESET_REGISTRY_TRUSTED_KEYS: ReadonlyMap<string, ModelPresetRegistr
 			keyId: "registry-root-2026-01",
 			publicKeyPem:
 				"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwDhA/c/hX++M+wcBddFEVSm5gB1tVSjKMZPtlMSlTSQ=\n-----END PUBLIC KEY-----\n",
-			validFrom: "2026-08-24T09:41:42.000Z",
+			validFrom: "2026-01-01T00:00:00.000Z",
 		},
 	],
 ]);
