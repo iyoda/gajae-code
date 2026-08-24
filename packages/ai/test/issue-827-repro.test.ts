@@ -162,11 +162,11 @@ describe("issue #827 lineage — kimi reasoning models avoid incompatible forced
 			api: "openai-completions",
 			id: "gpt-5-mini",
 			reasoning: true,
-		compat: {
-			...getBundledModel("openai", "gpt-4o-mini").compat,
-			disableReasoningOnForcedToolChoice: false,
-			supportsReasoningEffort: true,
-		},
+			compat: {
+				...getBundledModel("openai", "gpt-4o-mini").compat,
+				disableReasoningOnForcedToolChoice: false,
+				supportsReasoningEffort: true,
+			},
 		};
 
 		const body = (await captureBody(model, {
