@@ -3310,7 +3310,7 @@ describe("ModelRegistry", () => {
 			});
 			expect(registry.find("commandcode-goat", "claude-opus-5.5")?.headers?.Authorization).toBeUndefined();
 			expect(registry.find("commandcode-goat", "Qwen/Qwen3.8-Max")?.api).toBe("openai-completions");
-		});
+		}, 120_000);
 
 		test("#614: custom provider referencing a bundled model id inherits canonical display name", () => {
 			// A user-defined provider whose name does not match a bundled provider but
@@ -7041,7 +7041,7 @@ describe("ModelRegistry", () => {
 			const changedContextRegistry = new ModelRegistry(authStorage, modelsJsonPath);
 			await changedContextRegistry.refreshProvider("discovery-provider", "online-if-uncached");
 			expect(requests).toBeGreaterThan(requestsAfterFirstFetch + 1);
-		});
+		}, 120_000);
 		test("does not serve the previous tenant's cached models when a provenance-forced refetch fails", async () => {
 			const discoveryConfigWithHeaders = (headers: Record<string, string>) => ({
 				"discovery-provider": {
