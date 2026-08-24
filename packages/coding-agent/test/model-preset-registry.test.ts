@@ -392,6 +392,9 @@ describe("signed model preset registry", () => {
 					.getAll()
 					.find(model => model.provider === "mismatched-provider" && model.id === "mismatched-model"),
 			).toBeUndefined();
+			expect(modelRegistry.getActiveProviders().some(provider => provider.provider === "mismatched-provider")).toBe(
+				false,
+			);
 		} finally {
 			authStorage.close();
 		}

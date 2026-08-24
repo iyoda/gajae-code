@@ -1769,7 +1769,7 @@ export class ModelRegistry {
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
 		const registryModels = this.#applyHardcodedModelPolicies(acceptedPresets.presets);
-		this.#registryModelKeys = new Set(registryModels.map(model => `${model.provider}\u0000${model.id}`));
+		const acceptedRegistryModelKeys = new Set(registryModels.map(model => `${model.provider}\u0000${model.id}`));
 		const cachedStandardModels = this.#applyHardcodedModelPolicies(this.#loadCachedStandardProviderModels());
 		const cachedDiscoveries = this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels());
 		const resolvedProviderCatalog = this.#mergeResolvedModels(
@@ -1777,6 +1777,11 @@ export class ModelRegistry {
 			cachedDiscoveries,
 		);
 		const resolvedDefaults = this.#mergeRegistryModelMetadata(resolvedProviderCatalog, registryModels, overrides);
+		this.#registryModelKeys = new Set(
+			resolvedDefaults
+				.map(model => `${model.provider}\u0000${model.id}`)
+				.filter(key => acceptedRegistryModelKeys.has(key)),
+		);
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
 		// Merge runtime extension models so they survive refresh() cycles
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
