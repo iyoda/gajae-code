@@ -1413,6 +1413,7 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	#lastStaticLoadEnvironmentFingerprint: string | undefined;
 	#lastModelPresetRegistryFingerprint: string | undefined;
+	#loadedModelPresetRegistryManifestSha256: string | undefined;
 	#modelPresetRegistryAgentDir: string;
 	#modelPresetRegistryDependencies: Omit<ModelPresetRegistryDependencies, "agentDir">;
 	#cancelModelPresetRegistryRefresh: (() => void) | undefined;
@@ -1470,6 +1471,7 @@ export class ModelRegistry {
 			{
 				...this.#modelPresetRegistryDependencies,
 				agentDir: this.#modelPresetRegistryAgentDir,
+				knownManifestSha256: this.#loadedModelPresetRegistryManifestSha256,
 			},
 			() => {
 				void this.#enqueueCatalogPublication(() => {
@@ -1548,7 +1550,7 @@ export class ModelRegistry {
 			try {
 				this.#reloadStaticModels();
 				this.#suppressedSelectors.clear();
-				await this.#refreshRuntimeDiscoveries(strategy);
+				await this.#refreshRuntimeDiscoveries(strategy, undefined, refreshGeneration);
 				if (refreshGeneration === this.#catalogRefreshGeneration) this.#modelBindingsApplier.apply();
 			} finally {
 				this.#resumeRebuild();
@@ -1585,7 +1587,7 @@ export class ModelRegistry {
 						this.#suppressedSelectors.delete(selector);
 					}
 				}
-				await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
+				await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]), refreshGeneration);
 				if (refreshGeneration === this.#catalogRefreshGeneration) this.#modelBindingsApplier.apply();
 			} finally {
 				this.#resumeRebuild();
@@ -1794,6 +1796,7 @@ export class ModelRegistry {
 			disabled: acceptedPresets.disabled,
 			error: acceptedPresets.error,
 		});
+		this.#loadedModelPresetRegistryManifestSha256 = acceptedPresets.manifestSha256;
 		this.#staticModelsLoaded = true;
 	}
 
@@ -1934,7 +1937,7 @@ export class ModelRegistry {
 			merged[existingIndex] = {
 				...existing,
 				...registryModel,
-				api: explicitTransport?.api ?? registryModel.api,
+				api: explicitTransport?.api ?? existing.api,
 				baseUrl: existing.baseUrl,
 				headers: existing.headers,
 				transport: existing.transport,
@@ -2554,6 +2557,7 @@ export class ModelRegistry {
 	async #refreshRuntimeDiscoveries(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
+		refreshGeneration = this.#catalogRefreshGeneration,
 	): Promise<void> {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
@@ -2571,6 +2575,7 @@ export class ModelRegistry {
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
+		if (refreshGeneration !== this.#catalogRefreshGeneration) return;
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.map(result => {
 			const providerConfig = selectedDiscoverableProviders.find(provider => provider.provider === result.provider);
 			const current =

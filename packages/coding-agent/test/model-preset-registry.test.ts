@@ -222,6 +222,15 @@ afterEach(async () => {
 });
 
 describe("signed model preset registry", () => {
+	test("does not expose test trust support through package exports", () => {
+		expect(() =>
+			Bun.resolveSync("@gajae-code/coding-agent/config/model-preset-registry-test-support", import.meta.dir),
+		).toThrow();
+		expect(() =>
+			Bun.resolveSync("@gajae-code/coding-agent/config/model-preset-registry-test-state", import.meta.dir),
+		).toThrow();
+	});
+
 	test("matches producer canonical JSON ordering and rejects lone surrogates", () => {
 		expect(canonicalModelPresetRegistryJson({ "\ue000": 1, 𐀀: 2, negativeZero: -0 })).toBe(
 			'{"negativeZero":0,"𐀀":2,"":1}',
@@ -273,6 +282,7 @@ describe("signed model preset registry", () => {
 				{ ...registryPreset("configured-model", 32_000), provider: "configured-provider" },
 				{ ...registryPreset("mismatched-model", 32_000), provider: "mismatched-provider" },
 				{ ...registryPreset("gpt-4o-mini", 64_000), provider: "openai" },
+				{ ...registryPreset("claude-sonnet-4-5", 72_000), provider: "anthropic" },
 			],
 		);
 		expect(await accept(data, registry)).toMatchObject({ status: "updated", revision: 1, revisionId: "00000001" });
@@ -326,6 +336,9 @@ describe("signed model preset registry", () => {
 				baseUrl: "https://configured-openai.example/v1",
 				api: "anthropic-messages",
 			});
+			expect(
+				modelRegistry.getAll().find(model => model.provider === "anthropic" && model.id === "claude-sonnet-4-5"),
+			).toMatchObject({ contextWindow: 72_000, api: "anthropic-messages" });
 			expect(
 				modelRegistry
 					.getAll()
@@ -507,16 +520,15 @@ describe("signed model preset registry", () => {
 		const externalData: RegistryFixture = { ...data, agentDir: externalAgentDir, run: externalRun };
 		await accept(externalData, signedRegistry(data.privateKey, 2));
 		const externalState = await Bun.file(path.join(externalAgentDir, "model-presets", "state.json")).text();
+		await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), externalState);
 		await expect(
 			data.run(() =>
 				refreshModelPresetRegistryImpl({
 					agentDir: data.agentDir,
 					manifestUrl,
 					allowTestUrls: true,
-					fetch: (async () => {
-						await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), externalState);
-						return new Response(null, { status: 304 });
-					}) as unknown as typeof fetch,
+					knownManifestSha256: sha256(registry.manifestBody),
+					fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
 				}),
 			),
 		).resolves.toMatchObject({ status: "updated", revision: 2 });
@@ -539,6 +551,26 @@ describe("signed model preset registry", () => {
 		const corrupted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(corrupted.profiles.size).toBe(0);
 		expect(corrupted.error).not.toContain("DO-NOT-LOG");
+	});
+
+	test("clears a pin when failed refresh replaces unreadable state", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+		await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), "{");
+		await expect(
+			refreshModelPresetRegistry({
+				agentDir: data.agentDir,
+				manifestUrl,
+				allowTestUrls: true,
+				fetch: (async () => {
+					throw new Error("offline");
+				}) as unknown as typeof fetch,
+			}),
+		).rejects.toThrow("Registry refresh failed.");
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
+		await accept(data, signedRegistry(data.privateKey, 2));
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
 	});
 
 	test("single-flights concurrent refresh and retains disappeared profiles and presets", async () => {
@@ -836,8 +868,13 @@ describe("signed model preset registry", () => {
 					[registryPreset("model-66")],
 				),
 			),
-		).rejects.toThrow(/ancestry exceeds its bound/i);
-		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(65);
+		).resolves.toMatchObject({ revision: 66 });
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
+		expect(accepted.revision).toBe(66);
+		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "model-65" })]));
+		expect(accepted.presets.some(preset => preset.id === "model-1")).toBe(false);
+		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
+		expect(state.history.length).toBeLessThanOrEqual(4);
 	});
 
 	test("never evicts a selected pinned generation when bounded history advances", async () => {

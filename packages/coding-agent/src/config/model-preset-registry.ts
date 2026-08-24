@@ -402,6 +402,7 @@ export interface ModelPresetRegistryDependencies {
 	automaticRefresh?: boolean;
 	startupDelayMs?: number;
 	refreshIntervalMs?: number;
+	knownManifestSha256?: string;
 }
 
 export interface AcceptedModelPresetRegistry {
@@ -1245,16 +1246,48 @@ function validateStateGenerations(
 	for (const generation of state.history) visit(generation);
 }
 
+function retainedAncestryDepth(generation: AcceptedGeneration | undefined, state: RegistryState): number {
+	if (!generation) return 0;
+	const byRevision = new Map(state.history.map(candidate => [candidate.manifest.signed.registryRevision, candidate]));
+	let depth = 0;
+	let current: AcceptedGeneration | undefined = generation;
+	const seen = new Set<number>();
+	while (current?.retainedFromRevision !== undefined) {
+		if (seen.has(current.retainedFromRevision)) return MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY + 1;
+		seen.add(current.retainedFromRevision);
+		depth++;
+		current = byRevision.get(current.retainedFromRevision);
+	}
+	return depth;
+}
+
+function withoutRetainedEntries(generation: AcceptedGeneration): AcceptedGeneration {
+	return {
+		...generation,
+		retainedProfiles: [],
+		retainedPresets: [],
+		retainedDynamicProviders: [],
+		retainedFromRevision: undefined,
+	};
+}
+
 async function recordFailure(agentDir: string, error: unknown, now: Date): Promise<void> {
 	const paths = registryPaths(agentDir);
 	await withFileLock(
 		paths.transaction,
 		async () => {
 			let state: RegistryState;
+			let replacedUnreadableState = false;
 			try {
 				state = loadStateSync(agentDir);
 			} catch {
 				state = { version: 1, history: [] };
+				replacedUnreadableState = true;
+			}
+			if (replacedUnreadableState) {
+				const control = loadControlSync(agentDir);
+				if (control.pinnedRevision !== undefined)
+					await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 			}
 			await writeAtomicJson(paths.state, {
 				...state,
@@ -1293,6 +1326,7 @@ function refreshSingleFlightKey(dependencies: ModelPresetRegistryDependencies, a
 		dependencies.maxProfilesBytes ?? "",
 		dependencies.maxPresetsBytes ?? "",
 		dependencies.maxStateBytes ?? "",
+		dependencies.knownManifestSha256 ?? "",
 	].join("\u0000");
 }
 
@@ -1368,7 +1402,9 @@ async function refreshModelPresetRegistryInner(
 					if (
 						!latest ||
 						currentLatest.manifest.signed.registryRevision !== latest.manifest.signed.registryRevision ||
-						currentLatest.manifestSha256 !== latest.manifestSha256
+						currentLatest.manifestSha256 !== latest.manifestSha256 ||
+						(dependencies.knownManifestSha256 !== undefined &&
+							currentLatest.manifestSha256 !== dependencies.knownManifestSha256)
 					)
 						return {
 							status: "updated",
@@ -1443,7 +1479,12 @@ async function refreshModelPresetRegistryInner(
 				)
 					throw new Error("Registry preset identity is invalid.");
 				assertProfilePresetReferences(profiles, presets);
-				const retained = retainRemoved(latest, profiles, presets);
+				const compactRetention =
+					latest !== undefined &&
+					manifest.signed.registryRevision > latest.manifest.signed.registryRevision &&
+					retainedAncestryDepth(latest, usableState) >= MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY;
+				const retentionSource = compactRetention && latest ? withoutRetainedEntries(latest) : latest;
+				const retained = retainRemoved(retentionSource, profiles, presets);
 				const hasRetained =
 					retained.retainedProfiles.length > 0 ||
 					retained.retainedPresets.length > 0 ||
@@ -1464,9 +1505,10 @@ async function refreshModelPresetRegistryInner(
 							: latestRevision
 						: undefined,
 				};
+				const priorHistory = compactRetention ? [retentionSource!] : usableState.history;
 				const historyCandidates = [
 					generation,
-					...usableState.history.filter(
+					...priorHistory.filter(
 						item => item.manifest.signed.registryRevision !== manifest.signed.registryRevision,
 					),
 				].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
@@ -1693,13 +1735,17 @@ export function refreshModelPresetRegistryInBackground(
 			? refreshIntervalMs - recentAge
 			: (dependencies.startupDelayMs ?? MODEL_PRESET_REGISTRY_STARTUP_DELAY_MS);
 	let cancelled = false;
+	let knownManifestSha256 = dependencies.knownManifestSha256 ?? status.manifestSha256;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const schedule = (delayMs: number): void => {
 		if (cancelled) return;
 		timer = setTimeout(() => {
-			void refreshModelPresetRegistry({ ...dependencies, agentDir })
+			void refreshModelPresetRegistry({ ...dependencies, agentDir, knownManifestSha256 })
 				.then(result => {
-					if (!cancelled && result.status === "updated") onAccepted?.(result);
+					if (!cancelled && result.status === "updated") {
+						knownManifestSha256 = result.manifestSha256;
+						onAccepted?.(result);
+					}
 				})
 				.catch(() => undefined)
 				.finally(() => schedule(refreshIntervalMs));
