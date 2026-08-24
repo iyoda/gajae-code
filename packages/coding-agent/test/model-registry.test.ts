@@ -239,6 +239,28 @@ describe("ModelRegistry", () => {
 		});
 	}
 
+	test("resolves a relative models path under the configured agent directory", async () => {
+		const scopedAgentDir = path.join(tempDir, "relative-agent-dir");
+		fs.mkdirSync(scopedAgentDir, { recursive: true });
+		await Bun.write(
+			path.join(scopedAgentDir, "models.yml"),
+			`providers:
+  relative-provider:
+    baseUrl: https://relative.example/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: relative-model
+`,
+		);
+		const registry = new ModelRegistry(authStorage, "models.yml", undefined, {
+			agentDir: scopedAgentDir,
+			automaticRefresh: false,
+		});
+		expect(registry.find("relative-provider", "relative-model")).toBeDefined();
+		registry.dispose();
+	});
+
 	describe("provider base URL environment variables", () => {
 		test("does not bake the public OpenAI API URL into bundled OpenAI models", () => {
 			const restore = unsetEnvForTest("OPENAI_BASE_URL");

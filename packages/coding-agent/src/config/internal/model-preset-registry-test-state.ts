@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { ModelPresetRegistryTrustedKey } from "./model-preset-registry";
+import type { ModelPresetRegistryTrustedKey } from "../model-preset-registry";
 
 interface ModelPresetRegistryTestTrustContext {
 	agentDir: string;

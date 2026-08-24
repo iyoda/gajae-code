@@ -7,7 +7,7 @@ import { exactReplacePath, type NativeExactFileIdentity } from "@gajae-code/nati
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { withFileLock } from "./file-lock";
-import { getModelPresetRegistryTestTrustedKeys } from "./model-preset-registry-test-state";
+import { getModelPresetRegistryTestTrustedKeys } from "./internal/model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
 
@@ -978,13 +978,13 @@ function assertHttpsUrl(raw: string, description: string): URL {
 	} catch {
 		throw new Error(`${description} is invalid.`);
 	}
-	if (url.protocol !== "https:" || url.username || url.password)
+	if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
 		throw new Error(`${description} must use credential-free HTTPS.`);
 	return url;
 }
 function assertRegistryUrl(url: URL, manifestUrl: URL, allowTestUrls: boolean): void {
 	if (allowTestUrls || manifestUrl.href !== DEFAULT_MODEL_PRESET_REGISTRY_URL) {
-		if (url.protocol !== "https:" || url.username || url.password)
+		if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
 			throw new Error("Registry content URL must use credential-free HTTPS.");
 		if (url.origin !== manifestUrl.origin) throw new Error("Registry content URL changed origin.");
 		return;

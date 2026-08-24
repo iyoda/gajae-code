@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { withModelPresetRegistryTestTrust } from "../src/config/internal/model-preset-registry-test-support";
 import {
 	canonicalModelPresetRegistryJson,
 	getModelPresetRegistryStatus as getModelPresetRegistryStatusImpl,
@@ -18,7 +19,6 @@ import {
 	setModelPresetRegistryDisabled,
 	setModelPresetRegistryPin as setModelPresetRegistryPinImpl,
 } from "../src/config/model-preset-registry";
-import { withModelPresetRegistryTestTrust } from "../src/config/model-preset-registry-test-support";
 import { mergeModelProfiles } from "../src/config/model-profiles";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
@@ -236,6 +236,12 @@ describe("signed model preset registry", () => {
 		expect(() =>
 			Bun.resolveSync("@gajae-code/coding-agent/config/model-preset-registry-test-state", import.meta.dir),
 		).toThrow();
+		expect(() =>
+			Bun.resolveSync(
+				"@gajae-code/coding-agent/config/internal/model-preset-registry-test-support",
+				import.meta.dir,
+			),
+		).toThrow();
 	});
 
 	test("matches producer canonical JSON ordering and rejects lone surrogates", () => {
@@ -274,6 +280,26 @@ describe("signed model preset registry", () => {
 				}),
 			),
 		).resolves.toMatchObject({ status: "updated", revision: 1 });
+	});
+
+	test("rejects manifest URL query and fragment components before fetch", async () => {
+		const data = await fixture();
+		const fetchImpl = vi.fn(async () => new Response("must not fetch")) as unknown as typeof fetch;
+		for (const unsafeUrl of [
+			"https://registry.example.test/latest.json?token=secret",
+			"https://registry.example.test/latest.json#secret",
+		]) {
+			await expect(
+				data.run(() =>
+					refreshModelPresetRegistryImpl({
+						agentDir: data.agentDir,
+						manifestUrl: unsafeUrl,
+						fetch: fetchImpl,
+					}),
+				),
+			).rejects.toThrow(/credential-free HTTPS/i);
+		}
+		expect(fetchImpl).not.toHaveBeenCalled();
 	});
 
 	test("accepts the exact signed manifest/snapshot/content contract and merges embedded < registry < user", async () => {

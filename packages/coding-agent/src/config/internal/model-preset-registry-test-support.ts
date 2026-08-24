@@ -1,4 +1,4 @@
-import type { ModelPresetRegistryTrustedKey } from "./model-preset-registry";
+import type { ModelPresetRegistryTrustedKey } from "../model-preset-registry";
 import { runWithModelPresetRegistryTestTrust } from "./model-preset-registry-test-state";
 
 /** Runs one test operation with scoped trust. This module is denied by package exports. */
