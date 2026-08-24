@@ -166,6 +166,10 @@
 		"./config/model-bindings-applier.js": null,
 		"./config/model-discovery-manager": null,
 		"./config/model-discovery-manager.js": null,
+		"./config/model-preset-registry-test-state": null,
+		"./config/model-preset-registry-test-state.js": null,
+		"./config/model-preset-registry-test-support": null,
+		"./config/model-preset-registry-test-support.js": null,
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"

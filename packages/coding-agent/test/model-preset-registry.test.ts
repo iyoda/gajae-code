@@ -17,12 +17,14 @@ import {
 	setModelPresetRegistryDisabled,
 	setModelPresetRegistryPin,
 } from "../src/config/model-preset-registry";
+import { installModelPresetRegistryTestTrust } from "../src/config/model-preset-registry-test-support";
 import { mergeModelProfiles } from "../src/config/model-profiles";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const directories: string[] = [];
+const trustCleanups: (() => void)[] = [];
 setDefaultTimeout(30_000);
 const manifestUrl = "https://presets.gajae-code.test/latest.json";
 const productionManifestV1 = `{"schemaVersion":"1.0.0","signature":{"algorithm":"Ed25519","keyId":"registry-root-2026-01","value":"72hjU+GP8jsfCft0XotlRDhBa1sxPGPzySVATT1wwdT/h3Cb+Ylj7DI0ydiiAqSbDtFPhOmZvhFxpLeUQ5jFBw=="},"signed":{"compatibility":{"consumerContract":{"maxVersion":"1.0.0","minVersion":"1.0.0"}},"contents":{"presets":{"bytes":1230434,"count":4271,"path":"revisions/00000001/presets.json","sha256":"a73a9d0876198475902e7b87ac59dce37746025b35711767bd7ba6afe4104d96"},"profiles":{"bytes":19679,"count":58,"path":"revisions/00000001/profiles.json","sha256":"8befc86c52621d18f71ad141cd194329e8299bcfd50772faaf68b7f9c5b379cd"}},"provenance":{"generatedAt":"2026-08-24T09:41:42.000Z","generatedBy":"gajae-code-presets/scripts/import-upstream.mjs@1","sourcePaths":["packages/ai/src/models.json","packages/coding-agent/src/config/model-profiles.ts"],"sourceRepository":"https://github.com/Yeachan-Heo/gajae-code","sourceRevision":"65d0d2fdae36a4512959a6a8c143339b8ec98c58"},"publishedAt":"2026-08-24T09:41:42.000Z","registryRevision":1,"revision":"00000001","snapshot":{"bytes":819,"count":1,"path":"revisions/00000001/snapshot.json","sha256":"3e3e9e8d114be2b29184b83ed9c3321902a48202cda14ec765a73298c383c030"}}}`;
@@ -65,7 +67,9 @@ async function fixture() {
 		publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
 		validFrom: "2026-01-01T00:00:00.000Z",
 	};
-	return { agentDir, privateKey, trustedKeys: new Map([[trustedKey.keyId, trustedKey]]) };
+	const trustedKeys = new Map([[trustedKey.keyId, trustedKey]]);
+	trustCleanups.push(installModelPresetRegistryTestTrust(agentDir, trustedKeys));
+	return { agentDir, privateKey, trustedKeys };
 }
 
 function signedRegistry(
@@ -158,13 +162,13 @@ async function accept(
 	return refreshModelPresetRegistry({
 		agentDir: data.agentDir,
 		manifestUrl,
-		trustedKeys: data.trustedKeys,
 		fetch: fetchImpl,
 		allowTestUrls: true,
 	});
 }
 
 afterEach(async () => {
+	for (const cleanup of trustCleanups.splice(0)) cleanup();
 	await Promise.all(directories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
 });
 
@@ -209,7 +213,7 @@ describe("signed model preset registry", () => {
 		);
 		expect(await accept(data, registry)).toMatchObject({ status: "updated", revision: 1, revisionId: "00000001" });
 		expect(await Bun.file(path.join(data.agentDir, "models.yml")).exists()).toBe(false);
-		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(accepted.profiles.get("remote")?.source).toBe("registry");
 		expect(accepted.presets).toEqual(
 			expect.arrayContaining([expect.objectContaining({ provider: "provider", id: "remote-model" })]),
@@ -232,7 +236,6 @@ describe("signed model preset registry", () => {
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				automaticRefresh: false,
 			});
@@ -299,7 +302,7 @@ describe("signed model preset registry", () => {
 		const unknown = signedRegistry(data.privateKey, 2);
 		unknown.profilesBody = canonicalModelPresetRegistryJson({ ...unknown.profiles, apiKey: "DO-NOT-ACCEPT" });
 		await expect(accept(data, unknown)).rejects.toThrow(/schema rejected|digest mismatch|size mismatch/i);
-		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(accepted.revision).toBe(1);
 		expect(accepted.profiles.has("stable")).toBe(true);
 	});
@@ -326,7 +329,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				maxManifestBytes: 4,
 				fetch: (async () => new Response("oversized")) as unknown as typeof fetch,
@@ -338,7 +340,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				fetch: (async () => redirectedResponse) as unknown as typeof fetch,
 			}),
@@ -347,7 +348,6 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				timeoutMs: 5,
 				fetch: ((_input, init) =>
@@ -360,16 +360,13 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				fetch: (async () => {
 					throw new Error("token=SUPERSECRET https://private.example/path");
 				}) as unknown as typeof fetch,
 			}),
 		).rejects.toThrow("Registry refresh failed.");
-		expect(
-			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).lastError,
-		).not.toContain("SUPERSECRET");
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).lastError).not.toContain("SUPERSECRET");
 	});
 
 	test("rejects downgrade and same-revision equivocation", async () => {
@@ -405,21 +402,17 @@ describe("signed model preset registry", () => {
 		const data = await fixture();
 		expect(loadAcceptedModelPresetRegistry(data.agentDir).profiles.size).toBe(0);
 		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")]));
-		expect(
-			loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).profiles.has("stable"),
-		).toBe(true);
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).profiles.has("stable")).toBe(true);
 		const statePath = path.join(data.agentDir, "model-presets", "state.json");
 		const state = await Bun.file(statePath).json();
 		state.history[0].retainedProfiles = [registryProfile("retained-unsafe", "https://evil.example/model")];
 		await Bun.write(statePath, JSON.stringify(state));
-		const unsafeRetained = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const unsafeRetained = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(unsafeRetained.profiles.size).toBe(0);
 		expect(unsafeRetained.error).toMatch(/unsafe URL/i);
-		await expect(
-			setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 }),
-		).rejects.toThrow(/unsafe URL/i);
+		await expect(setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 })).rejects.toThrow(/unsafe URL/i);
 		await fs.writeFile(path.join(data.agentDir, "model-presets", "state.json"), '{"secret":"DO-NOT-LOG"}');
-		const corrupted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const corrupted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(corrupted.profiles.size).toBe(0);
 		expect(corrupted.error).not.toContain("DO-NOT-LOG");
 	});
@@ -455,18 +448,16 @@ describe("signed model preset registry", () => {
 		}) as unknown as typeof fetch;
 		await Promise.all([accept(data, second, fetchImpl), accept(data, second, fetchImpl)]);
 		expect(calls).toBe(4);
-		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(accepted.profiles.has("retained")).toBe(true);
 		expect(accepted.profiles.has("retained-dynamic")).toBe(true);
 		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "retained-model" })]));
-		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).cacheHealth).toBe(
-			"valid",
-		);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).cacheHealth).toBe("valid");
 		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
 		expect(state.history[0].retainedDynamicProviders).toEqual(["dynamic-provider"]);
 		state.history[0].retainedProfiles[0].displayName = "Safe-shaped cache injection";
 		await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), JSON.stringify(state));
-		const tampered = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		const tampered = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(tampered.profiles.size).toBe(0);
 		expect(tampered.error).toMatch(/retained provenance content/i);
 		await expect(accept(data, signedRegistry(data.privateKey, 3))).rejects.toThrow(/retained provenance content/i);
@@ -486,7 +477,6 @@ describe("signed model preset registry", () => {
 		let modelRegistry: ModelRegistry | undefined;
 		try {
 			modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				manifestUrl,
 				fetch: countingFetch,
@@ -527,7 +517,6 @@ describe("signed model preset registry", () => {
 		}) as unknown as typeof fetch;
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "disposed-refresh-auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-			trustedKeys: data.trustedKeys,
 			allowTestUrls: true,
 			manifestUrl,
 			fetch: fetchImpl,
@@ -587,55 +576,46 @@ describe("signed model preset registry", () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
 		await accept(data, signedRegistry(data.privateKey, 2));
-		await rollbackModelPresetRegistry({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
-		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys })).toMatchObject({
+		await rollbackModelPresetRegistry({ agentDir: data.agentDir, revision: 1 });
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
 			activeRevision: 1,
 			highestSeenRevision: 2,
 		});
 		await accept(data, signedRegistry(data.privateKey, 2));
-		expect(
-			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).activeRevision,
-		).toBe(1);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).activeRevision).toBe(1);
 		await expect(
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				allowTestUrls: true,
 				fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
 			}),
 		).resolves.toMatchObject({ status: "not_modified", revision: 2 });
-		expect(
-			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).activeRevision,
-		).toBe(1);
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 2 });
-		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(2);
-		await rollbackModelPresetRegistry({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
-		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys })).toMatchObject({
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).activeRevision).toBe(1);
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
+		await rollbackModelPresetRegistry({ agentDir: data.agentDir, revision: 1 });
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
 			activeRevision: 1,
 			pinnedRevision: undefined,
 		});
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 2 });
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir });
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
-		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys })).toMatchObject({
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {})).toMatchObject({
 			disabled: true,
 		});
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: false });
-		expect(
-			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).highestSeenRevision,
-		).toBe(2);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).highestSeenRevision).toBe(2);
 	});
 
 	test("never evicts a selected pinned generation when bounded history advances", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
 		for (let revision = 2; revision <= 5; revision++) await accept(data, signedRegistry(data.privateKey, revision));
-		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(1);
-		expect(
-			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).historyRevisions,
-		).toEqual([5, 4, 3, 2, 1]);
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(1);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).historyRevisions).toEqual([5, 4, 3, 2, 1]);
 	});
 
 	test("serializes a concurrent pin against refresh history pruning", async () => {
@@ -656,21 +636,19 @@ describe("signed model preset registry", () => {
 		const refresh = refreshModelPresetRegistry({
 			agentDir: data.agentDir,
 			manifestUrl,
-			trustedKeys: data.trustedKeys,
 			fetch: fetchImpl,
 			allowTestUrls: true,
 		});
 		await entered.promise;
 		const pin = setModelPresetRegistryPin({
 			agentDir: data.agentDir,
-			trustedKeys: data.trustedKeys,
 			revision: 1,
 		});
 		await Bun.sleep(20);
 		release.resolve();
 		await expect(refresh).resolves.toMatchObject({ status: "updated", revision: 5 });
 		await expect(pin).rejects.toThrow(/Cannot pin unaccepted registry revision 1/);
-		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys })).toMatchObject({
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
 			cacheHealth: "valid",
 			activeRevision: 5,
 		});
@@ -684,12 +662,11 @@ describe("signed model preset registry", () => {
 			refreshModelPresetRegistry({
 				agentDir: data.agentDir,
 				manifestUrl,
-				trustedKeys: data.trustedKeys,
 				fetch: registryFetch(second),
 				allowTestUrls: true,
 				maxStateBytes: 100,
 			}),
 		).rejects.toThrow(/durable size limit/i);
-		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(1);
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(1);
 	});
 });

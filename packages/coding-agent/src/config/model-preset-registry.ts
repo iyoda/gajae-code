@@ -6,6 +6,7 @@ import type { Api, Model } from "@gajae-code/ai/core";
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { withFileLock } from "./file-lock";
+import { getModelPresetRegistryTestTrustedKeys } from "./model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
 
@@ -386,7 +387,6 @@ type RegistryControl = { version: 1; disabled: boolean; pinnedRevision?: number 
 export interface ModelPresetRegistryDependencies {
 	agentDir?: string;
 	manifestUrl?: string;
-	trustedKeys?: ReadonlyMap<string, ModelPresetRegistryTrustedKey>;
 	fetch?: typeof fetch;
 	now?: () => Date;
 	timeoutMs?: number;
@@ -911,8 +911,11 @@ async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 function effectiveAgentDir(dependencies: ModelPresetRegistryDependencies): string {
 	return dependencies.agentDir ?? getAgentDir();
 }
-function effectiveTrustedKeys(dependencies: ModelPresetRegistryDependencies) {
-	return dependencies.trustedKeys ?? MODEL_PRESET_REGISTRY_TRUSTED_KEYS;
+function effectiveTrustedKeys(
+	dependencies: ModelPresetRegistryDependencies,
+	agentDir = effectiveAgentDir(dependencies),
+) {
+	return getModelPresetRegistryTestTrustedKeys(agentDir) ?? MODEL_PRESET_REGISTRY_TRUSTED_KEYS;
 }
 function effectiveManifestUrl(dependencies: ModelPresetRegistryDependencies): string {
 	return dependencies.manifestUrl ?? process.env.GJC_MODEL_PRESET_REGISTRY_URL ?? DEFAULT_MODEL_PRESET_REGISTRY_URL;
@@ -1002,7 +1005,7 @@ export function loadAcceptedModelPresetRegistry(
 		};
 	try {
 		const state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(dependencies));
+		validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
 		const revision = control.pinnedRevision ?? state.activeRevision;
 		const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
 		if (revision !== undefined && !generation)
@@ -1016,7 +1019,7 @@ export function loadAcceptedModelPresetRegistry(
 				disabled: false,
 				pinnedRevision: control.pinnedRevision,
 			};
-		const valid = validateGeneration(generation, effectiveTrustedKeys(dependencies));
+		const valid = validateGeneration(generation, effectiveTrustedKeys(dependencies, agentDir));
 		return {
 			profiles: generationProfiles(valid),
 			presets: generationPresets(valid),
@@ -1510,7 +1513,7 @@ export function getModelPresetRegistryStatus(
 	try {
 		control = loadControlSync(agentDir);
 		state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(dependencies));
+		validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
 		cacheHealth = state.history.length > 0 ? "valid" : "empty";
 	} catch (error) {
 		cacheHealth = "corrupt";
@@ -1526,7 +1529,7 @@ export function getModelPresetRegistryStatus(
 	}
 	if (generation && !disabled) {
 		try {
-			valid = validateGeneration(generation, effectiveTrustedKeys(dependencies));
+			valid = validateGeneration(generation, effectiveTrustedKeys(dependencies, agentDir));
 		} catch (error) {
 			cacheHealth = "corrupt";
 			loadError = safeError(error);
