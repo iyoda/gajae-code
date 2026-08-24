@@ -3,6 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model } from "@gajae-code/ai/core";
+import { exactReplacePath, type NativeExactFileIdentity } from "@gajae-code/natives";
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { withFileLock } from "./file-lock";
@@ -20,8 +21,6 @@ export const MODEL_PRESET_REGISTRY_MAX_SNAPSHOT_BYTES = 64 * 1024;
 export const MODEL_PRESET_REGISTRY_MAX_PROFILES_BYTES = 256 * 1024;
 export const MODEL_PRESET_REGISTRY_MAX_PRESETS_BYTES = 4 * 1024 * 1024;
 const MODEL_PRESET_REGISTRY_MAX_STATE_BYTES = 32 * 1024 * 1024;
-const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
-const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 const MODEL_PRESET_REGISTRY_MAX_HISTORY = 4;
 const MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY = 64;
 const MODEL_PRESET_REGISTRY_MAX_ERROR_BYTES = 1024;
@@ -369,6 +368,7 @@ type AcceptedGeneration = {
 	manifestSha256: string;
 	acceptedAt: string;
 	etag?: string;
+	manifestOrigin?: string;
 	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
 	retainedPresets: ModelPresetRegistryPresets["presets"];
 	retainedDynamicProviders: string[];
@@ -836,7 +836,11 @@ function parseState(value: unknown): RegistryState {
 			!SHA256_PATTERN.test(generation.manifestSha256) ||
 			typeof generation.acceptedAt !== "string" ||
 			!Number.isFinite(Date.parse(generation.acceptedAt)) ||
-			(generation.etag !== undefined && typeof generation.etag !== "string")
+			(generation.etag !== undefined && typeof generation.etag !== "string") ||
+			(generation.manifestOrigin !== undefined &&
+				(typeof generation.manifestOrigin !== "string" ||
+					!generation.manifestOrigin.startsWith("https://") ||
+					new URL(generation.manifestOrigin).origin !== generation.manifestOrigin))
 		)
 			throw new Error(`Registry cache generation ${index} is invalid.`);
 		return {
@@ -847,6 +851,7 @@ function parseState(value: unknown): RegistryState {
 			manifestSha256: generation.manifestSha256,
 			acceptedAt: generation.acceptedAt,
 			etag: generation.etag,
+			manifestOrigin: generation.manifestOrigin,
 			retainedProfiles: retainedProfiles.data,
 			retainedPresets: retainedPresets.data,
 			retainedDynamicProviders: retainedDynamicProviders.data,
@@ -890,6 +895,26 @@ async function syncDirectory(directory: string): Promise<void> {
 	}
 }
 
+async function exactFileIdentity(file: string): Promise<NativeExactFileIdentity> {
+	const [bytes, stat, parent] = await Promise.all([
+		fs.readFile(file),
+		fs.lstat(file, { bigint: true }),
+		fs.lstat(path.dirname(file), { bigint: true }),
+	]);
+	if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n)
+		throw new Error("Registry cache replacement requires a stable single-link regular file.");
+	return {
+		dev: stat.dev,
+		ino: stat.ino,
+		nlink: stat.nlink,
+		parentDev: parent.dev,
+		parentIno: parent.ino,
+		size: stat.size,
+		mtimeNs: stat.mtimeNs,
+		sha256: sha256(bytes),
+	};
+}
+
 async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
 	const serialized = `${JSON.stringify(value)}\n`;
@@ -904,18 +929,26 @@ async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 		await handle.close();
 	}
 	try {
-		for (let attempt = 0; ; attempt++) {
+		if (process.platform === "win32") {
+			let destinationExists = true;
 			try {
-				await fs.rename(temporary, file);
-				break;
+				await fs.lstat(file);
 			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-				if (process.platform !== "win32" || !code || !WINDOWS_RENAME_RETRY_CODES.has(code) || delay === undefined)
-					throw error;
-				await Bun.sleep(delay);
+				if (!isEnoent(error)) throw error;
+				destinationExists = false;
 			}
-		}
+			if (destinationExists) {
+				const [sourceIdentity, destinationIdentity] = await Promise.all([
+					exactFileIdentity(temporary),
+					exactFileIdentity(file),
+				]);
+				const replaced = exactReplacePath(temporary, file, sourceIdentity, destinationIdentity);
+				if (!replaced.ok)
+					throw new Error(`Native Windows registry cache replacement failed: ${replaced.code ?? "unknown"}.`);
+			} else {
+				await fs.rename(temporary, file);
+			}
+		} else await fs.rename(temporary, file);
 		await syncDirectory(path.dirname(file));
 	} catch (error) {
 		await fs.rm(temporary, { force: true }).catch(() => undefined);
@@ -1388,7 +1421,7 @@ async function refreshModelPresetRegistryInner(
 					manifestUrl,
 					dependencies.maxManifestBytes ?? MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES,
 					dependencies,
-					latest?.etag ? { "If-None-Match": latest.etag } : {},
+					latest?.etag && latest.manifestOrigin === manifestUrl.origin ? { "If-None-Match": latest.etag } : {},
 				);
 				if (manifestResponse.response.status === 304) {
 					const currentState = loadStateSync(agentDir);
@@ -1506,6 +1539,7 @@ async function refreshModelPresetRegistryInner(
 						manifestSha256,
 						acceptedAt: now.toISOString(),
 						etag: manifestResponse.response.headers.get("etag") ?? undefined,
+						manifestOrigin: manifestUrl.origin,
 						...retained,
 						retainedFromRevision: hasRetained
 							? latestRevision === manifest.signed.registryRevision

@@ -541,6 +541,12 @@ describe("signed model preset registry", () => {
 		).resolves.toMatchObject({ status: "updated", revision: 2 });
 	});
 
+	test.skipIf(process.platform !== "win32")("replaces existing registry state repeatedly on Windows", async () => {
+		const data = await fixture();
+		for (let revision = 1; revision <= 5; revision++) await accept(data, signedRegistry(data.privateKey, revision));
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(5);
+	});
+
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
 		const data = await fixture();
 		expect(loadAcceptedModelPresetRegistry(data.agentDir).profiles.size).toBe(0);
@@ -656,8 +662,10 @@ describe("signed model preset registry", () => {
 		const second = signedRegistry(data.privateKey, 2);
 		let firstCalls = 0;
 		let secondCalls = 0;
-		const firstFetchBase = registryFetch(first);
-		const secondFetchBase = registryFetch(second);
+		const firstHeaders: Headers[] = [];
+		const secondHeaders: Headers[] = [];
+		const firstFetchBase = registryFetch(first, firstHeaders);
+		const secondFetchBase = registryFetch(second, secondHeaders);
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
 		const firstFetch = (async (input, init) => {
@@ -692,6 +700,8 @@ describe("signed model preset registry", () => {
 		await expect(secondRefresh).resolves.toMatchObject({ revision: 2 });
 		expect(firstCalls).toBe(4);
 		expect(secondCalls).toBe(4);
+		expect(firstHeaders[0]?.get("if-none-match")).toBeNull();
+		expect(secondHeaders[0]?.get("if-none-match")).toBeNull();
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
@@ -831,6 +841,8 @@ describe("signed model preset registry", () => {
 					refreshIntervalMs: 30,
 				}),
 		);
+		const catalogChanged = vi.fn();
+		modelRegistry.onCatalogChanged(catalogChanged);
 		try {
 			await entered.promise;
 			modelRegistry.dispose();
@@ -838,6 +850,8 @@ describe("signed model preset registry", () => {
 			for (let attempt = 0; attempt < 50 && calls < 4; attempt++) await Bun.sleep(10);
 			expect(calls).toBe(4);
 			expect(modelRegistry.getModelProfile("late-profile")).toBeUndefined();
+			await modelRegistry.refresh("offline");
+			expect(catalogChanged).not.toHaveBeenCalled();
 		} finally {
 			modelRegistry.dispose();
 			authStorage.close();
@@ -883,6 +897,50 @@ describe("signed model preset registry", () => {
 		} finally {
 			modelRegistry.dispose();
 			authStorage.close();
+		}
+	});
+
+	test("prevents an in-flight refresh from overwriting replaced scoped settings", async () => {
+		const data = await fixture();
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  scoped-provider:
+    baseUrl: https://scoped.example/v1
+    api: openai-completions
+    auth: none
+    discovery:
+      type: openai-models-list
+`,
+		);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async input => {
+			if (String(input) !== "https://scoped.example/v1/models") throw new Error(`Unexpected URL: ${input}`);
+			entered.resolve();
+			await release.promise;
+			return new Response(JSON.stringify({ data: [{ id: "stale-scoped-model" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as typeof fetch);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "scoped-refresh-auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+			automaticRefresh: false,
+		});
+		try {
+			const refresh = modelRegistry.refreshProvider("scoped-provider", "online");
+			await entered.promise;
+			modelRegistry.setScopedSettings(Settings.isolated({ disabledProviders: ["scoped-provider"] }));
+			release.resolve();
+			await refresh;
+			expect(modelRegistry.find("scoped-provider", "stale-scoped-model")).toBeUndefined();
+			expect(modelRegistry.getDiscoverableProviders()).not.toContain("scoped-provider");
+		} finally {
+			release.resolve();
+			modelRegistry.dispose();
+			authStorage.close();
+			fetchSpy.mockRestore();
 		}
 	});
 

@@ -9,7 +9,7 @@ const LEGACY_MODEL_PROFILE_ALIASES: ReadonlyMap<string, string> = new Map([["cod
 export interface ModelProfileCatalogItem {
 	id: string;
 	displayName: string;
-	source: "builtin" | "registry" | "configured";
+	source: "builtin" | "configured";
 	available?: boolean;
 }
 
@@ -121,11 +121,9 @@ export function projectModelProfileCatalog(
 			id,
 			displayName: formatModelProfileDisplayLabel(definition),
 			source:
-				definition.source === "user"
+				definition.source === "user" || definition.source === "registry"
 					? ("configured" as const)
-					: definition.source === "registry"
-						? ("registry" as const)
-						: ("builtin" as const),
+					: ("builtin" as const),
 		}))
 		.sort((left, right) => left.id.localeCompare(right.id));
 }

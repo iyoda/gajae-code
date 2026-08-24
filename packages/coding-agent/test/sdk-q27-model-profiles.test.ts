@@ -109,7 +109,7 @@ describe("model profile capability contract", () => {
 		expect(projectModelProfileCatalog(profiles).find(item => item.id === "registry-profile")).toEqual({
 			id: "registry-profile",
 			displayName: "Registry Profile",
-			source: "registry",
+			source: "configured",
 		});
 	});
 

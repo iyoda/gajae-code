@@ -1424,12 +1424,9 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
-	#catalogPublicationTail: Promise<void> = Promise.resolve();
-	#pendingCatalogPublications = 0;
-	#activeCatalogRefreshes = 0;
+	#catalogMutationTail: Promise<void> = Promise.resolve();
+	#pendingCatalogMutations = 0;
 	#catalogRefreshGeneration = 0;
-	#catalogRefreshIdle: Promise<void> = Promise.resolve();
-	#resolveCatalogRefreshIdle: (() => void) | undefined;
 	#disposed = false;
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
@@ -1474,7 +1471,7 @@ export class ModelRegistry {
 				knownManifestSha256: this.#loadedModelPresetRegistryManifestSha256,
 			},
 			() => {
-				void this.#enqueueCatalogPublication(() => {
+				void this.#enqueueCatalogMutation(() => {
 					if (this.#disposed) return;
 					this.#reloadStaticModels();
 					this.#modelBindingsApplier.apply();
@@ -1486,43 +1483,23 @@ export class ModelRegistry {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#catalogRefreshGeneration++;
 		this.#cancelModelPresetRegistryRefresh?.();
 		this.#cancelModelPresetRegistryRefresh = undefined;
 		this.#unsubscribeAuthGeneration?.();
 		this.#unsubscribeAuthGeneration = undefined;
+		this.#catalogChangeListeners.clear();
 	}
 
-	#enqueueCatalogPublication(operation: () => void | Promise<void>): Promise<void> {
-		this.#pendingCatalogPublications++;
-		const run = this.#catalogPublicationTail
-			.then(async () => {
-				await this.#catalogRefreshIdle;
-				await operation();
-			})
-			.finally(() => {
-				this.#pendingCatalogPublications--;
-			});
-		this.#catalogPublicationTail = run.catch(() => undefined);
-		return run;
-	}
-
-	async #runCatalogRefresh(operation: () => Promise<void>): Promise<void> {
-		if (this.#pendingCatalogPublications > 0) await this.#catalogPublicationTail;
-		if (this.#activeCatalogRefreshes === 0) {
-			const idle = Promise.withResolvers<void>();
-			this.#catalogRefreshIdle = idle.promise;
-			this.#resolveCatalogRefreshIdle = idle.resolve;
-		}
-		this.#activeCatalogRefreshes++;
-		try {
-			await operation();
-		} finally {
-			this.#activeCatalogRefreshes--;
-			if (this.#activeCatalogRefreshes === 0) {
-				this.#resolveCatalogRefreshIdle?.();
-				this.#resolveCatalogRefreshIdle = undefined;
-			}
-		}
+	#enqueueCatalogMutation(operation: () => void | Promise<void>): Promise<void> {
+		this.#pendingCatalogMutations++;
+		const run =
+			this.#pendingCatalogMutations === 1 ? Promise.resolve(operation()) : this.#catalogMutationTail.then(operation);
+		const completion = run.finally(() => {
+			this.#pendingCatalogMutations--;
+		});
+		this.#catalogMutationTail = completion.catch(() => undefined);
+		return completion;
 	}
 
 	onCatalogChanged(listener: () => void): () => void {
@@ -1534,6 +1511,7 @@ export class ModelRegistry {
 
 	/** Replace the read-only settings snapshot used by profile-scoped resolution. */
 	setScopedSettings(settingsReader: Pick<Settings, "get" | "getGlobal">): void {
+		this.#catalogRefreshGeneration++;
 		this.#settings = settingsReader;
 		this.#staticModelsLoaded = false;
 		this.#reloadStaticModels();
@@ -1544,8 +1522,10 @@ export class ModelRegistry {
 	 * Reload models from disk (embedded + accepted registry + custom from models.yml).
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
+		if (this.#disposed) return;
 		const refreshGeneration = ++this.#catalogRefreshGeneration;
-		await this.#runCatalogRefresh(async () => {
+		await this.#enqueueCatalogMutation(async () => {
+			if (this.#disposed) return;
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
@@ -1577,8 +1557,10 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
+		if (this.#disposed) return;
 		const refreshGeneration = ++this.#catalogRefreshGeneration;
-		await this.#runCatalogRefresh(async () => {
+		await this.#enqueueCatalogMutation(async () => {
+			if (this.#disposed) return;
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
