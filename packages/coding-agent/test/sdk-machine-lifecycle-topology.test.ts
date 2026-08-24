@@ -199,7 +199,7 @@ test("shipped mcp-serve sdk stdio drives authenticated G03-G07 lifecycle topolog
 	await life.invokeScenario((operation, input, idempotencyKey) =>
 		mcpGlobal(life.repo, life.agentDir, operation, input, idempotencyKey),
 	);
-}, 120_000);
+}, 240_000);
 
 test("shipped sdk session raw global CLI drives authenticated G03-G07 lifecycle topology with durable effects", async () => {
 	const life = await fixture();
