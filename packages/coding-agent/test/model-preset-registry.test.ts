@@ -1,14 +1,12 @@
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 import {
 	canonicalModelPresetRegistryJson,
 	getModelPresetRegistryStatus,
 	loadAcceptedModelPresetRegistry,
-	MODEL_PRESET_REGISTRY_TRUSTED_KEYS,
 	type ModelPresetRegistryManifest,
 	type ModelPresetRegistryPresets,
 	type ModelPresetRegistryProfiles,
@@ -21,8 +19,7 @@ import {
 } from "../src/config/model-preset-registry";
 import { mergeModelProfiles } from "../src/config/model-profiles";
 import { ModelRegistry } from "../src/config/model-registry";
-import { loadCoordinatorModelProfiles } from "../src/coordinator-mcp/model-preset";
-import { validateBrokerModelPresetForTest } from "../src/sdk/broker/lifecycle";
+import { Settings } from "../src/config/settings";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const directories: string[] = [];
@@ -206,6 +203,8 @@ describe("signed model preset registry", () => {
 				registryPreset("remote-model"),
 				{ ...registryPreset("MiniMax-M2.5", 12_345), provider: "alibaba-token-plan" },
 				{ ...registryPreset("registry-only-model", 24_680), provider: "alibaba-token-plan" },
+				{ ...registryPreset("configured-model", 32_000), provider: "configured-provider" },
+				{ ...registryPreset("mismatched-model", 32_000), provider: "mismatched-provider" },
 			],
 		);
 		expect(await accept(data, registry)).toMatchObject({ status: "updated", revision: 1, revisionId: "00000001" });
@@ -214,6 +213,21 @@ describe("signed model preset registry", () => {
 		expect(accepted.profiles.get("remote")?.source).toBe("registry");
 		expect(accepted.presets).toEqual(
 			expect.arrayContaining([expect.objectContaining({ provider: "provider", id: "remote-model" })]),
+		);
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  configured-provider:
+    baseUrl: https://configured.example/v1
+    api: openai-completions
+    auth: none
+    compat:
+      supportsDeveloperRole: false
+  mismatched-provider:
+    baseUrl: https://mismatched.example/v1
+    api: anthropic-messages
+    auth: none
+`,
 		);
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
 		try {
@@ -235,7 +249,24 @@ describe("signed model preset registry", () => {
 				modelRegistry
 					.getAll()
 					.find(model => model.provider === "alibaba-token-plan" && model.id === "registry-only-model"),
-			).toMatchObject({ contextWindow: 24_680, baseUrl: expect.stringContaining("https://") });
+			).toMatchObject({
+				contextWindow: 24_680,
+				baseUrl: expect.stringContaining("https://"),
+				compat: expect.objectContaining({ supportsDeveloperRole: false }),
+			});
+			expect(
+				modelRegistry
+					.getAll()
+					.find(model => model.provider === "configured-provider" && model.id === "configured-model"),
+			).toMatchObject({
+				baseUrl: "https://configured.example/v1",
+				compat: expect.objectContaining({ supportsDeveloperRole: false }),
+			});
+			expect(
+				modelRegistry
+					.getAll()
+					.find(model => model.provider === "mismatched-provider" && model.id === "mismatched-model"),
+			).toBeUndefined();
 		} finally {
 			authStorage.close();
 		}
@@ -384,6 +415,9 @@ describe("signed model preset registry", () => {
 		const unsafeRetained = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
 		expect(unsafeRetained.profiles.size).toBe(0);
 		expect(unsafeRetained.error).toMatch(/unsafe URL/i);
+		await expect(
+			setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 }),
+		).rejects.toThrow(/unsafe URL/i);
 		await fs.writeFile(path.join(data.agentDir, "model-presets", "state.json"), '{"secret":"DO-NOT-LOG"}');
 		const corrupted = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
 		expect(corrupted.profiles.size).toBe(0);
@@ -430,6 +464,12 @@ describe("signed model preset registry", () => {
 		);
 		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
 		expect(state.history[0].retainedDynamicProviders).toEqual(["dynamic-provider"]);
+		state.history[0].retainedProfiles[0].displayName = "Safe-shaped cache injection";
+		await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), JSON.stringify(state));
+		const tampered = loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys });
+		expect(tampered.profiles.size).toBe(0);
+		expect(tampered.error).toMatch(/retained provenance content/i);
+		await expect(accept(data, signedRegistry(data.privateKey, 3))).rejects.toThrow(/retained provenance content/i);
 	});
 
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
@@ -471,6 +511,78 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("does not publish an in-flight refresh callback after registry disposal", async () => {
+		const data = await fixture();
+		const remote = signedRegistry(data.privateKey, 1, [registryProfile("late-profile")]);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const responses = [remote.manifestBody, remote.snapshotBody, remote.profilesBody, remote.presetsBody];
+		const fetchImpl = (async () => {
+			if (calls === 0) {
+				entered.resolve();
+				await release.promise;
+			}
+			return new Response(responses[calls++]!);
+		}) as unknown as typeof fetch;
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "disposed-refresh-auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+			trustedKeys: data.trustedKeys,
+			allowTestUrls: true,
+			manifestUrl,
+			fetch: fetchImpl,
+			startupDelayMs: 0,
+			refreshIntervalMs: 30,
+		});
+		try {
+			await entered.promise;
+			modelRegistry.dispose();
+			release.resolve();
+			for (let attempt = 0; attempt < 50 && calls < 4; attempt++) await Bun.sleep(10);
+			expect(calls).toBe(4);
+			expect(modelRegistry.getModelProfile("late-profile")).toBeUndefined();
+		} finally {
+			modelRegistry.dispose();
+			authStorage.close();
+		}
+	});
+
+	test("releases the auth-generation listener when a registry is disposed", async () => {
+		const data = await fixture();
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "listener-auth.db"));
+		const unsubscribe = vi.fn();
+		const listenerSpy = vi.spyOn(authStorage, "onGenerationChanged").mockReturnValue(unsubscribe);
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+				automaticRefresh: false,
+			});
+			modelRegistry.dispose();
+			modelRegistry.dispose();
+			expect(unsubscribe).toHaveBeenCalledTimes(1);
+		} finally {
+			listenerSpy.mockRestore();
+			authStorage.close();
+		}
+	});
+
+	test("synchronously reloads the catalog when scoped settings are installed", async () => {
+		const data = await fixture();
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "scoped-settings-auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+			automaticRefresh: false,
+		});
+		const scopedSettings = Settings.isolated({ disabledProviders: ["ollama"] });
+		try {
+			expect(modelRegistry.getDiscoverableProviders()).toContain("ollama");
+			modelRegistry.setScopedSettings(scopedSettings);
+			scopedSettings.override("disabledProviders", []);
+			expect(modelRegistry.getDiscoverableProviders()).not.toContain("ollama");
+		} finally {
+			modelRegistry.dispose();
+			authStorage.close();
+		}
+	});
+
 	test("supports rollback, pin, unpin, and disable without lowering highest-seen provenance", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
@@ -496,15 +608,15 @@ describe("signed model preset registry", () => {
 		expect(
 			getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys }).activeRevision,
 		).toBe(1);
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 2 });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(2);
 		await rollbackModelPresetRegistry({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys })).toMatchObject({
 			activeRevision: 1,
 			pinnedRevision: undefined,
 		});
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
-		await setModelPresetRegistryPin({ agentDir: data.agentDir });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 2 });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys });
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys })).toMatchObject({
 			disabled: true,
@@ -518,7 +630,7 @@ describe("signed model preset registry", () => {
 	test("never evicts a selected pinned generation when bounded history advances", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
-		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
 		for (let revision = 2; revision <= 5; revision++) await accept(data, signedRegistry(data.privateKey, revision));
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(1);
 		expect(
@@ -549,7 +661,11 @@ describe("signed model preset registry", () => {
 			allowTestUrls: true,
 		});
 		await entered.promise;
-		const pin = setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+		const pin = setModelPresetRegistryPin({
+			agentDir: data.agentDir,
+			trustedKeys: data.trustedKeys,
+			revision: 1,
+		});
 		await Bun.sleep(20);
 		release.resolve();
 		await expect(refresh).resolves.toMatchObject({ status: "updated", revision: 5 });
@@ -575,22 +691,5 @@ describe("signed model preset registry", () => {
 			}),
 		).rejects.toThrow(/durable size limit/i);
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(1);
-	});
-
-	test("uses the same accepted profile catalog in coordinator and broker preflight", async () => {
-		const data = await fixture();
-		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("surface-profile")]));
-		const originalAgentDir = getAgentDir();
-		const productionTrust = MODEL_PRESET_REGISTRY_TRUSTED_KEYS as Map<string, ModelPresetRegistryTrustedKey>;
-		const testKey = data.trustedKeys.get("test-key")!;
-		productionTrust.set(testKey.keyId, testKey);
-		setAgentDir(data.agentDir);
-		try {
-			expect((await loadCoordinatorModelProfiles()).has("surface-profile")).toBe(true);
-			expect(validateBrokerModelPresetForTest(data.agentDir, "surface-profile")).toBe("surface-profile");
-		} finally {
-			setAgentDir(originalAgentDir);
-			productionTrust.delete(testKey.keyId);
-		}
 	});
 });

@@ -85,7 +85,7 @@ export interface ModelPresetRegistryTrustedKey {
 }
 
 /** Compiled trust roots only. Runtime configuration cannot replace these keys. */
-export const MODEL_PRESET_REGISTRY_TRUSTED_KEYS: ReadonlyMap<string, ModelPresetRegistryTrustedKey> = new Map([
+const MODEL_PRESET_REGISTRY_TRUSTED_KEYS: ReadonlyMap<string, ModelPresetRegistryTrustedKey> = new Map([
 	[
 		"registry-root-2026-01",
 		{
@@ -368,6 +368,7 @@ type AcceptedGeneration = {
 	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
 	retainedPresets: ModelPresetRegistryPresets["presets"];
 	retainedDynamicProviders: string[];
+	retainedFromRevision?: number;
 };
 
 type RegistryState = {
@@ -816,6 +817,7 @@ function parseState(value: unknown): RegistryState {
 			.max(128)
 			.refine(values => new Set(values).size === values.length)
 			.safeParse(generation.retainedDynamicProviders);
+		const retainedFromRevision = generation.retainedFromRevision;
 		if (
 			!manifest.success ||
 			!snapshot.success ||
@@ -824,6 +826,8 @@ function parseState(value: unknown): RegistryState {
 			!retainedProfiles.success ||
 			!retainedPresets.success ||
 			!retainedDynamicProviders.success ||
+			(retainedFromRevision !== undefined &&
+				(!Number.isSafeInteger(retainedFromRevision) || retainedFromRevision <= 0)) ||
 			typeof generation.manifestSha256 !== "string" ||
 			!SHA256_PATTERN.test(generation.manifestSha256) ||
 			typeof generation.acceptedAt !== "string" ||
@@ -842,6 +846,7 @@ function parseState(value: unknown): RegistryState {
 			retainedProfiles: retainedProfiles.data,
 			retainedPresets: retainedPresets.data,
 			retainedDynamicProviders: retainedDynamicProviders.data,
+			retainedFromRevision,
 		};
 	});
 	return { ...state, version: 1, history };
@@ -869,6 +874,9 @@ function loadControlSync(agentDir: string): RegistryControl {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
+	// Windows does not expose a directory fsync barrier through Bun/Node. The
+	// temporary file is still synced before atomic rename; only persistence of
+	// the renamed directory entry across sudden power loss is weaker there.
 	if (process.platform === "win32") return;
 	const handle = await fs.open(directory, "r");
 	try {
@@ -994,6 +1002,7 @@ export function loadAcceptedModelPresetRegistry(
 		};
 	try {
 		const state = loadStateSync(agentDir);
+		validateStateGenerations(state, effectiveTrustedKeys(dependencies));
 		const revision = control.pinnedRevision ?? state.activeRevision;
 		const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
 		if (revision !== undefined && !generation)
@@ -1158,6 +1167,50 @@ function retainRemoved(
 	};
 }
 
+function validateStateGenerations(
+	state: RegistryState,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): void {
+	const byRevision = new Map(
+		state.history.map(generation => [generation.manifest.signed.registryRevision, generation]),
+	);
+	const validated = new Set<number>();
+	const visiting = new Set<number>();
+	const visit = (generation: AcceptedGeneration): void => {
+		const revision = generation.manifest.signed.registryRevision;
+		if (validated.has(revision)) return;
+		if (visiting.has(revision)) throw new Error("Registry retained provenance contains a cycle.");
+		visiting.add(revision);
+		validateGeneration(generation, trustedKeys);
+		const hasRetained =
+			generation.retainedProfiles.length > 0 ||
+			generation.retainedPresets.length > 0 ||
+			generation.retainedDynamicProviders.length > 0;
+		if (hasRetained !== (generation.retainedFromRevision !== undefined))
+			throw new Error("Registry retained provenance binding is invalid.");
+		if (generation.retainedFromRevision !== undefined) {
+			const source = byRevision.get(generation.retainedFromRevision);
+			if (!source) throw new Error("Registry retained provenance source is missing.");
+			if (source.manifest.signed.registryRevision >= revision)
+				throw new Error("Registry retained provenance source is not older than its consumer.");
+			visit(source);
+			const expected = retainRemoved(source, generation.profiles, generation.presets);
+			if (
+				canonicalModelPresetRegistryJson(expected.retainedProfiles) !==
+					canonicalModelPresetRegistryJson(generation.retainedProfiles) ||
+				canonicalModelPresetRegistryJson(expected.retainedPresets) !==
+					canonicalModelPresetRegistryJson(generation.retainedPresets) ||
+				canonicalModelPresetRegistryJson(expected.retainedDynamicProviders) !==
+					canonicalModelPresetRegistryJson(generation.retainedDynamicProviders)
+			)
+				throw new Error("Registry retained provenance content is invalid.");
+		}
+		visiting.delete(revision);
+		validated.add(revision);
+	};
+	for (const generation of state.history) visit(generation);
+}
+
 async function recordFailure(agentDir: string, error: unknown, now: Date): Promise<void> {
 	const paths = registryPaths(agentDir);
 	await withFileLock(
@@ -1205,6 +1258,7 @@ async function refreshModelPresetRegistryInner(
 			async () => {
 				const control = loadControlSync(agentDir);
 				const state = loadStateSync(agentDir);
+				validateStateGenerations(state, effectiveTrustedKeys(dependencies));
 				const selectedRevision = control.pinnedRevision ?? state.activeRevision;
 				if (control.disabled || environmentDisabled()) return { status: "disabled", revision: selectedRevision };
 				const latest = state.history.reduce<AcceptedGeneration | undefined>(
@@ -1292,6 +1346,11 @@ async function refreshModelPresetRegistryInner(
 					throw new Error("Registry preset identity is invalid.");
 				assertProfilePresetReferences(profiles, presets);
 				const retained = retainRemoved(latest, profiles, presets);
+				const hasRetained =
+					retained.retainedProfiles.length > 0 ||
+					retained.retainedPresets.length > 0 ||
+					retained.retainedDynamicProviders.length > 0;
+				const latestRevision = latest?.manifest.signed.registryRevision;
 				const generation: AcceptedGeneration = {
 					manifest,
 					snapshot,
@@ -1301,8 +1360,12 @@ async function refreshModelPresetRegistryInner(
 					acceptedAt: now.toISOString(),
 					etag: manifestResponse.response.headers.get("etag") ?? undefined,
 					...retained,
+					retainedFromRevision: hasRetained
+						? latestRevision === manifest.signed.registryRevision
+							? latest?.retainedFromRevision
+							: latestRevision
+						: undefined,
 				};
-				validateGeneration(generation, effectiveTrustedKeys(dependencies));
 				const historyCandidates = [
 					generation,
 					...state.history.filter(
@@ -1311,11 +1374,13 @@ async function refreshModelPresetRegistryInner(
 				].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
 				const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
 				const protectedRevisions = new Set(
-					[control.pinnedRevision, state.activeRevision].filter(
+					[control.pinnedRevision, state.activeRevision, generation.retainedFromRevision].filter(
 						(revision): revision is number => revision !== undefined,
 					),
 				);
-				for (const protectedRevision of protectedRevisions) {
+				const pendingProtectedRevisions = [...protectedRevisions];
+				for (let index = 0; index < pendingProtectedRevisions.length; index++) {
+					const protectedRevision = pendingProtectedRevisions[index]!;
 					const protectedGeneration = historyCandidates.find(
 						item => item.manifest.signed.registryRevision === protectedRevision,
 					);
@@ -1324,6 +1389,13 @@ async function refreshModelPresetRegistryInner(
 						!history.some(item => item.manifest.signed.registryRevision === protectedRevision)
 					)
 						history.push(protectedGeneration);
+					if (
+						protectedGeneration?.retainedFromRevision !== undefined &&
+						!protectedRevisions.has(protectedGeneration.retainedFromRevision)
+					) {
+						protectedRevisions.add(protectedGeneration.retainedFromRevision);
+						pendingProtectedRevisions.push(protectedGeneration.retainedFromRevision);
+					}
 				}
 				const nextState: RegistryState = {
 					version: 1,
@@ -1340,6 +1412,7 @@ async function refreshModelPresetRegistryInner(
 					lastCheckedAt: now.toISOString(),
 					lastError: undefined,
 				};
+				validateStateGenerations(nextState, effectiveTrustedKeys(dependencies));
 				if (
 					Buffer.byteLength(JSON.stringify(nextState)) >
 					(dependencies.maxStateBytes ?? MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
@@ -1383,17 +1456,19 @@ export async function setModelPresetRegistryPin(
 	const agentDir = effectiveAgentDir(options);
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
+		const state = loadStateSync(agentDir);
+		validateStateGenerations(state, effectiveTrustedKeys(options));
 		if (revision === undefined) {
-			const state = loadStateSync(agentDir);
 			const highest = state.history.reduce(
 				(value, item) => Math.max(value, item.manifest.signed.registryRevision),
 				0,
 			);
 			await writeAtomicJson(paths.state, { ...state, activeRevision: highest || state.activeRevision });
 		}
-		const state = loadStateSync(agentDir);
-		if (revision !== undefined && !state.history.some(item => item.manifest.signed.registryRevision === revision))
-			throw new Error(`Cannot pin unaccepted registry revision ${revision}.`);
+		if (revision !== undefined) {
+			const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
+			if (!generation) throw new Error(`Cannot pin unaccepted registry revision ${revision}.`);
+		}
 		const current = loadControlSync(agentDir);
 		await writeAtomicJson(paths.control, { ...current, pinnedRevision: revision });
 	});
@@ -1406,6 +1481,7 @@ export async function rollbackModelPresetRegistry(
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
 		const state = loadStateSync(agentDir);
+		validateStateGenerations(state, effectiveTrustedKeys(options));
 		const control = loadControlSync(agentDir);
 		const activeRevision = control.pinnedRevision ?? state.activeRevision;
 		const revision =
@@ -1434,6 +1510,7 @@ export function getModelPresetRegistryStatus(
 	try {
 		control = loadControlSync(agentDir);
 		state = loadStateSync(agentDir);
+		validateStateGenerations(state, effectiveTrustedKeys(dependencies));
 		cacheHealth = state.history.length > 0 ? "valid" : "empty";
 	} catch (error) {
 		cacheHealth = "corrupt";
@@ -1522,7 +1599,7 @@ export function refreshModelPresetRegistryInBackground(
 		timer = setTimeout(() => {
 			void refreshModelPresetRegistry({ ...dependencies, agentDir })
 				.then(result => {
-					if (result.status === "updated") onAccepted?.(result);
+					if (!cancelled && result.status === "updated") onAccepted?.(result);
 				})
 				.catch(() => undefined)
 				.finally(() => schedule(refreshIntervalMs));

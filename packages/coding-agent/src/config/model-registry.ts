@@ -575,6 +575,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", ModelsCon
 
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
 interface ProviderOverride {
+	api?: Api;
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
@@ -1415,6 +1416,7 @@ export class ModelRegistry {
 	#modelPresetRegistryAgentDir: string;
 	#modelPresetRegistryDependencies: Omit<ModelPresetRegistryDependencies, "agentDir">;
 	#cancelModelPresetRegistryRefresh: (() => void) | undefined;
+	#unsubscribeAuthGeneration: (() => void) | undefined;
 	#staticModelsLoaded = false;
 	#lastDisabledProviderKey: string | undefined;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1453,7 +1455,7 @@ export class ModelRegistry {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			return keyConfig;
 		});
-		this.authStorage.onGenerationChanged(() => this.#invalidateAvailableModels());
+		this.#unsubscribeAuthGeneration = this.authStorage.onGenerationChanged(() => this.#invalidateAvailableModels());
 		// Load models synchronously in constructor
 		this.#loadModels();
 		this.#cancelModelPresetRegistryRefresh = refreshModelPresetRegistryInBackground(
@@ -1471,6 +1473,8 @@ export class ModelRegistry {
 	dispose(): void {
 		this.#cancelModelPresetRegistryRefresh?.();
 		this.#cancelModelPresetRegistryRefresh = undefined;
+		this.#unsubscribeAuthGeneration?.();
+		this.#unsubscribeAuthGeneration = undefined;
 	}
 
 	onCatalogChanged(listener: () => void): () => void {
@@ -1483,6 +1487,9 @@ export class ModelRegistry {
 	/** Replace the read-only settings snapshot used by profile-scoped resolution. */
 	setScopedSettings(settingsReader: Pick<Settings, "get" | "getGlobal">): void {
 		this.#settings = settingsReader;
+		this.#staticModelsLoaded = false;
+		this.#reloadStaticModels();
+		this.#rebuildCanonicalIndex();
 	}
 
 	/**
@@ -1718,7 +1725,7 @@ export class ModelRegistry {
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
 			cachedDiscoveries,
 		);
-		const resolvedDefaults = this.#mergeRegistryModelMetadata(resolvedProviderCatalog, registryModels);
+		const resolvedDefaults = this.#mergeRegistryModelMetadata(resolvedProviderCatalog, registryModels, overrides);
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
 		// Merge runtime extension models so they survive refresh() cycles
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
@@ -1828,25 +1835,40 @@ export class ModelRegistry {
 		return merged;
 	}
 
-	#mergeRegistryModelMetadata(baseModels: Model<Api>[], registryModels: Model<Api>[]): Model<Api>[] {
+	#mergeRegistryModelMetadata(
+		baseModels: Model<Api>[],
+		registryModels: Model<Api>[],
+		providerOverrides: ReadonlyMap<string, ProviderOverride>,
+	): Model<Api>[] {
 		const merged = [...baseModels];
 		const indexByKey = new Map(merged.map((model, index) => [`${model.provider}\u0000${model.id}`, index]));
 		for (const registryModel of registryModels) {
 			const key = `${registryModel.provider}\u0000${registryModel.id}`;
 			const existingIndex = indexByKey.get(key);
+			const explicitTransport = providerOverrides.get(registryModel.provider);
 			if (existingIndex === undefined) {
 				const transportTemplate = merged.find(
 					model => model.provider === registryModel.provider && model.api === registryModel.api,
 				);
-				if (!transportTemplate) continue;
+				const explicitTransportMatches =
+					explicitTransport?.api === registryModel.api && explicitTransport.baseUrl !== undefined;
+				if (!transportTemplate && !explicitTransportMatches) continue;
 				merged.push({
 					...registryModel,
-					baseUrl: transportTemplate.baseUrl,
-					headers: transportTemplate.headers,
-					transport: transportTemplate.transport,
-					requestTransform: transportTemplate.requestTransform,
-					cacheRetention: transportTemplate.cacheRetention,
-					isOAuth: transportTemplate.isOAuth,
+					baseUrl: explicitTransportMatches ? explicitTransport.baseUrl! : transportTemplate!.baseUrl,
+					headers: explicitTransportMatches ? explicitTransport.headers : transportTemplate?.headers,
+					transport: explicitTransportMatches ? explicitTransport.transport : transportTemplate?.transport,
+					requestTransform: explicitTransportMatches
+						? explicitTransport.requestTransform
+						: transportTemplate?.requestTransform,
+					cacheRetention: explicitTransportMatches
+						? explicitTransport.cacheRetention
+						: transportTemplate?.cacheRetention,
+					isOAuth: transportTemplate?.isOAuth,
+					compat:
+						transportTemplate?.compat || registryModel.compat || explicitTransport?.compat
+							? { ...transportTemplate?.compat, ...registryModel.compat, ...explicitTransport?.compat }
+							: undefined,
 				});
 				indexByKey.set(key, merged.length - 1);
 				continue;
@@ -1856,7 +1878,9 @@ export class ModelRegistry {
 				...existing,
 				...registryModel,
 				compat:
-					existing.compat || registryModel.compat ? { ...existing.compat, ...registryModel.compat } : undefined,
+					existing.compat || registryModel.compat || explicitTransport?.compat
+						? { ...existing.compat, ...registryModel.compat, ...explicitTransport?.compat }
+						: undefined,
 			};
 		}
 		return merged;
@@ -2242,6 +2266,7 @@ export class ModelRegistry {
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
+					api: providerConfig.api as Api | undefined,
 					baseUrl: providerConfig.baseUrl,
 					headers: providerConfig.headers,
 					apiKey: providerApiKeyConfig,
@@ -4848,6 +4873,7 @@ export class ModelRegistry {
 			config.transport !== undefined
 		) {
 			const transportOverride = {
+				api: config.api,
 				baseUrl: config.baseUrl,
 				headers: config.headers,
 				apiKey: config.apiKey,
