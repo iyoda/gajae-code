@@ -1136,10 +1136,22 @@ function retainRemoved(
 	const previousProfilesById = new Map(
 		[...previous.retainedProfiles, ...previous.profiles.profiles].map(profile => [profile.id, profile]),
 	);
+	const nextProfilesById = new Map(profiles.profiles.map(profile => [profile.id, profile]));
 	const retainedProfiles = [...previousProfilesById.values()].filter(profile => !nextProfiles.has(profile.id));
 	const retainedSelectors = new Set<string>();
 	const retainedSelectorProviders = new Set<string>();
-	for (const profile of retainedProfiles) {
+	const profilesWhosePreviousSelectorsMustRemain = [
+		...retainedProfiles,
+		...previous.profiles.profiles.filter(profile => {
+			const replacement = nextProfilesById.get(profile.id);
+			return (
+				replacement !== undefined &&
+				canonicalModelPresetRegistryJson(replacement.roleBindings) !==
+					canonicalModelPresetRegistryJson(profile.roleBindings)
+			);
+		}),
+	];
+	for (const profile of profilesWhosePreviousSelectorsMustRemain) {
 		for (const binding of Object.values(profile.roleBindings)) {
 			for (const selector of Array.isArray(binding) ? binding : [binding]) {
 				const base = selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, "");

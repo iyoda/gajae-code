@@ -463,8 +463,9 @@ describe("signed model preset registry", () => {
 				[
 					registryProfile("retained", "provider/retained-model"),
 					registryProfile("retained-dynamic", "dynamic-provider/future-model"),
+					registryProfile("changed", "provider/old-changed-model"),
 				],
-				[registryPreset("retained-model")],
+				[registryPreset("retained-model"), registryPreset("old-changed-model")],
 				undefined,
 				["dynamic-provider"],
 			),
@@ -472,8 +473,11 @@ describe("signed model preset registry", () => {
 		const second = signedRegistry(
 			data.privateKey,
 			2,
-			[registryProfile("replacement", "provider/replacement-model")],
-			[registryPreset("replacement-model")],
+			[
+				registryProfile("replacement", "provider/replacement-model"),
+				registryProfile("changed", "provider/new-changed-model"),
+			],
+			[registryPreset("replacement-model"), registryPreset("new-changed-model")],
 		);
 		let calls = 0;
 		const responses = [second.manifestBody, second.snapshotBody, second.profilesBody, second.presetsBody];
@@ -488,6 +492,7 @@ describe("signed model preset registry", () => {
 		expect(accepted.profiles.has("retained")).toBe(true);
 		expect(accepted.profiles.has("retained-dynamic")).toBe(true);
 		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "retained-model" })]));
+		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "old-changed-model" })]));
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).cacheHealth).toBe("valid");
 		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
 		expect(state.history[0].retainedDynamicProviders).toEqual(["dynamic-provider"]);
