@@ -5,28 +5,58 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	canonicalModelPresetRegistryJson,
-	getModelPresetRegistryStatus,
-	loadAcceptedModelPresetRegistry,
+	getModelPresetRegistryStatus as getModelPresetRegistryStatusImpl,
+	loadAcceptedModelPresetRegistry as loadAcceptedModelPresetRegistryImpl,
 	type ModelPresetRegistryManifest,
 	type ModelPresetRegistryPresets,
 	type ModelPresetRegistryProfiles,
 	type ModelPresetRegistrySnapshot,
 	type ModelPresetRegistryTrustedKey,
-	refreshModelPresetRegistry,
-	rollbackModelPresetRegistry,
+	refreshModelPresetRegistry as refreshModelPresetRegistryImpl,
+	rollbackModelPresetRegistry as rollbackModelPresetRegistryImpl,
 	setModelPresetRegistryDisabled,
-	setModelPresetRegistryPin,
+	setModelPresetRegistryPin as setModelPresetRegistryPinImpl,
 } from "../src/config/model-preset-registry";
-import { installModelPresetRegistryTestTrust } from "../src/config/model-preset-registry-test-support";
+import { withModelPresetRegistryTestTrust } from "../src/config/model-preset-registry-test-support";
 import { mergeModelProfiles } from "../src/config/model-profiles";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const directories: string[] = [];
-const trustCleanups: (() => void)[] = [];
+const testTrustRunners = new Map<string, <T>(operation: () => T) => T>();
 setDefaultTimeout(30_000);
 const manifestUrl = "https://presets.gajae-code.test/latest.json";
+
+function refreshModelPresetRegistry(options: Parameters<typeof refreshModelPresetRegistryImpl>[0] = {}) {
+	const run = options.agentDir ? testTrustRunners.get(options.agentDir) : undefined;
+	return run ? run(() => refreshModelPresetRegistryImpl(options)) : refreshModelPresetRegistryImpl(options);
+}
+
+function loadAcceptedModelPresetRegistry(
+	agentDir?: string,
+	dependencies?: Parameters<typeof loadAcceptedModelPresetRegistryImpl>[1],
+) {
+	const run = agentDir ? testTrustRunners.get(agentDir) : undefined;
+	return run
+		? run(() => loadAcceptedModelPresetRegistryImpl(agentDir, dependencies))
+		: loadAcceptedModelPresetRegistryImpl(agentDir, dependencies);
+}
+
+function getModelPresetRegistryStatus(options: Parameters<typeof getModelPresetRegistryStatusImpl>[0] = {}) {
+	const run = options.agentDir ? testTrustRunners.get(options.agentDir) : undefined;
+	return run ? run(() => getModelPresetRegistryStatusImpl(options)) : getModelPresetRegistryStatusImpl(options);
+}
+
+function setModelPresetRegistryPin(options: Parameters<typeof setModelPresetRegistryPinImpl>[0]) {
+	const run = options.agentDir ? testTrustRunners.get(options.agentDir) : undefined;
+	return run ? run(() => setModelPresetRegistryPinImpl(options)) : setModelPresetRegistryPinImpl(options);
+}
+
+function rollbackModelPresetRegistry(options: Parameters<typeof rollbackModelPresetRegistryImpl>[0]) {
+	const run = options.agentDir ? testTrustRunners.get(options.agentDir) : undefined;
+	return run ? run(() => rollbackModelPresetRegistryImpl(options)) : rollbackModelPresetRegistryImpl(options);
+}
 const productionManifestV1 = `{"schemaVersion":"1.0.0","signature":{"algorithm":"Ed25519","keyId":"registry-root-2026-01","value":"72hjU+GP8jsfCft0XotlRDhBa1sxPGPzySVATT1wwdT/h3Cb+Ylj7DI0ydiiAqSbDtFPhOmZvhFxpLeUQ5jFBw=="},"signed":{"compatibility":{"consumerContract":{"maxVersion":"1.0.0","minVersion":"1.0.0"}},"contents":{"presets":{"bytes":1230434,"count":4271,"path":"revisions/00000001/presets.json","sha256":"a73a9d0876198475902e7b87ac59dce37746025b35711767bd7ba6afe4104d96"},"profiles":{"bytes":19679,"count":58,"path":"revisions/00000001/profiles.json","sha256":"8befc86c52621d18f71ad141cd194329e8299bcfd50772faaf68b7f9c5b379cd"}},"provenance":{"generatedAt":"2026-08-24T09:41:42.000Z","generatedBy":"gajae-code-presets/scripts/import-upstream.mjs@1","sourcePaths":["packages/ai/src/models.json","packages/coding-agent/src/config/model-profiles.ts"],"sourceRepository":"https://github.com/Yeachan-Heo/gajae-code","sourceRevision":"65d0d2fdae36a4512959a6a8c143339b8ec98c58"},"publishedAt":"2026-08-24T09:41:42.000Z","registryRevision":1,"revision":"00000001","snapshot":{"bytes":819,"count":1,"path":"revisions/00000001/snapshot.json","sha256":"3e3e9e8d114be2b29184b83ed9c3321902a48202cda14ec765a73298c383c030"}}}`;
 const productionSnapshotV1 = `{"compatibility":{"consumerContract":{"maxVersion":"1.0.0","minVersion":"1.0.0"}},"contents":{"presets":{"bytes":1230434,"count":4271,"path":"revisions/00000001/presets.json","sha256":"a73a9d0876198475902e7b87ac59dce37746025b35711767bd7ba6afe4104d96"},"profiles":{"bytes":19679,"count":58,"path":"revisions/00000001/profiles.json","sha256":"8befc86c52621d18f71ad141cd194329e8299bcfd50772faaf68b7f9c5b379cd"}},"provenance":{"generatedAt":"2026-08-24T09:41:42.000Z","generatedBy":"gajae-code-presets/scripts/import-upstream.mjs@1","sourcePaths":["packages/ai/src/models.json","packages/coding-agent/src/config/model-profiles.ts"],"sourceRepository":"https://github.com/Yeachan-Heo/gajae-code","sourceRevision":"65d0d2fdae36a4512959a6a8c143339b8ec98c58"},"registryRevision":1,"revision":"00000001","schemaVersion":"1.0.0"}`;
 
@@ -68,8 +98,9 @@ async function fixture() {
 		validFrom: "2026-01-01T00:00:00.000Z",
 	};
 	const trustedKeys = new Map([[trustedKey.keyId, trustedKey]]);
-	trustCleanups.push(installModelPresetRegistryTestTrust(agentDir, trustedKeys));
-	return { agentDir, privateKey, trustedKeys };
+	const run = <T>(operation: () => T): T => withModelPresetRegistryTestTrust(agentDir, trustedKeys, operation);
+	testTrustRunners.set(agentDir, run);
+	return { agentDir, privateKey, trustedKeys, run };
 }
 
 function signedRegistry(
@@ -159,16 +190,18 @@ async function accept(
 	registry: ReturnType<typeof signedRegistry>,
 	fetchImpl = registryFetch(registry),
 ) {
-	return refreshModelPresetRegistry({
-		agentDir: data.agentDir,
-		manifestUrl,
-		fetch: fetchImpl,
-		allowTestUrls: true,
-	});
+	return data.run(() =>
+		refreshModelPresetRegistry({
+			agentDir: data.agentDir,
+			manifestUrl,
+			fetch: fetchImpl,
+			allowTestUrls: true,
+		}),
+	);
 }
 
 afterEach(async () => {
-	for (const cleanup of trustCleanups.splice(0)) cleanup();
+	for (const directory of directories) testTrustRunners.delete(directory);
 	await Promise.all(directories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
 });
 
@@ -235,10 +268,13 @@ describe("signed model preset registry", () => {
 		);
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
 		try {
-			const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-				allowTestUrls: true,
-				automaticRefresh: false,
-			});
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						allowTestUrls: true,
+						automaticRefresh: false,
+					}),
+			);
 			expect(modelRegistry.getModelProfile("remote")?.source).toBe("registry");
 			expect(
 				modelRegistry.getAll().find(model => model.provider === "provider" && model.id === "remote-model"),
@@ -476,13 +512,16 @@ describe("signed model preset registry", () => {
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "background-auth.db"));
 		let modelRegistry: ModelRegistry | undefined;
 		try {
-			modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-				allowTestUrls: true,
-				manifestUrl,
-				fetch: countingFetch,
-				startupDelayMs: 20,
-				refreshIntervalMs: 30,
-			});
+			modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						allowTestUrls: true,
+						manifestUrl,
+						fetch: countingFetch,
+						startupDelayMs: 20,
+						refreshIntervalMs: 30,
+					}),
+			);
 			expect(calls).toBe(0);
 			expect(modelRegistry.getModelProfile("background-profile")).toBeUndefined();
 			for (let attempt = 0; attempt < 50 && !modelRegistry.getModelProfile("background-profile"); attempt++)
@@ -516,13 +555,16 @@ describe("signed model preset registry", () => {
 			return new Response(responses[calls++]!);
 		}) as unknown as typeof fetch;
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "disposed-refresh-auth.db"));
-		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-			allowTestUrls: true,
-			manifestUrl,
-			fetch: fetchImpl,
-			startupDelayMs: 0,
-			refreshIntervalMs: 30,
-		});
+		const modelRegistry = data.run(
+			() =>
+				new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+					allowTestUrls: true,
+					manifestUrl,
+					fetch: fetchImpl,
+					startupDelayMs: 0,
+					refreshIntervalMs: 30,
+				}),
+		);
 		try {
 			await entered.promise;
 			modelRegistry.dispose();
@@ -542,9 +584,12 @@ describe("signed model preset registry", () => {
 		const unsubscribe = vi.fn();
 		const listenerSpy = vi.spyOn(authStorage, "onGenerationChanged").mockReturnValue(unsubscribe);
 		try {
-			const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-				automaticRefresh: false,
-			});
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
 			modelRegistry.dispose();
 			modelRegistry.dispose();
 			expect(unsubscribe).toHaveBeenCalledTimes(1);
@@ -557,9 +602,12 @@ describe("signed model preset registry", () => {
 	test("synchronously reloads the catalog when scoped settings are installed", async () => {
 		const data = await fixture();
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "scoped-settings-auth.db"));
-		const modelRegistry = new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
-			automaticRefresh: false,
-		});
+		const modelRegistry = data.run(
+			() =>
+				new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+					automaticRefresh: false,
+				}),
+		);
 		const scopedSettings = Settings.isolated({ disabledProviders: ["ollama"] });
 		try {
 			expect(modelRegistry.getDiscoverableProviders()).toContain("ollama");

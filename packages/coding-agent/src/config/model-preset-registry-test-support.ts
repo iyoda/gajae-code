@@ -1,11 +1,11 @@
 import type { ModelPresetRegistryTrustedKey } from "./model-preset-registry";
-import { setModelPresetRegistryTestTrustedKeys } from "./model-preset-registry-test-state";
+import { runWithModelPresetRegistryTestTrust } from "./model-preset-registry-test-state";
 
-/** Test-only trust installation. This module is denied by package exports. */
-export function installModelPresetRegistryTestTrust(
+/** Runs one test operation with scoped trust. This module is denied by package exports. */
+export function withModelPresetRegistryTestTrust<T>(
 	agentDir: string,
 	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
-): () => void {
-	setModelPresetRegistryTestTrustedKeys(agentDir, trustedKeys);
-	return () => setModelPresetRegistryTestTrustedKeys(agentDir, undefined);
+	operation: () => T,
+): T {
+	return runWithModelPresetRegistryTestTrust(agentDir, trustedKeys, operation);
 }

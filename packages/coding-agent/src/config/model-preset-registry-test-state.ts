@@ -1,17 +1,24 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ModelPresetRegistryTrustedKey } from "./model-preset-registry";
 
-const trustedKeysByAgentDir = new Map<string, ReadonlyMap<string, ModelPresetRegistryTrustedKey>>();
+interface ModelPresetRegistryTestTrustContext {
+	agentDir: string;
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>;
+}
+
+const testTrustContext = new AsyncLocalStorage<ModelPresetRegistryTestTrustContext>();
 
 export function getModelPresetRegistryTestTrustedKeys(
 	agentDir: string,
 ): ReadonlyMap<string, ModelPresetRegistryTrustedKey> | undefined {
-	return trustedKeysByAgentDir.get(agentDir);
+	const context = testTrustContext.getStore();
+	return context?.agentDir === agentDir ? context.trustedKeys : undefined;
 }
 
-export function setModelPresetRegistryTestTrustedKeys(
+export function runWithModelPresetRegistryTestTrust<T>(
 	agentDir: string,
-	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey> | undefined,
-): void {
-	if (trustedKeys) trustedKeysByAgentDir.set(agentDir, trustedKeys);
-	else trustedKeysByAgentDir.delete(agentDir);
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+	operation: () => T,
+): T {
+	return testTrustContext.run({ agentDir, trustedKeys }, operation);
 }

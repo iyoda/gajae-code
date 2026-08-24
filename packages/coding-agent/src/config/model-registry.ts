@@ -1423,6 +1423,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#catalogMutationTail: Promise<void> = Promise.resolve();
+	#disposed = false;
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
@@ -1430,6 +1432,7 @@ export class ModelRegistry {
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
+	#registryModelKeys: Set<string> = new Set();
 	#rebuildPending: boolean = false;
 	#rebuildSuspended: number = 0;
 	#configuredApiKeyEnvNames: Set<string> = new Set();
@@ -1464,17 +1467,27 @@ export class ModelRegistry {
 				agentDir: this.#modelPresetRegistryAgentDir,
 			},
 			() => {
-				this.#reloadStaticModels();
-				this.#notifyCatalogChanged();
+				void this.#enqueueCatalogMutation(() => {
+					if (this.#disposed) return;
+					this.#reloadStaticModels();
+					this.#notifyCatalogChanged();
+				}).catch(() => undefined);
 			},
 		);
 	}
 
 	dispose(): void {
+		this.#disposed = true;
 		this.#cancelModelPresetRegistryRefresh?.();
 		this.#cancelModelPresetRegistryRefresh = undefined;
 		this.#unsubscribeAuthGeneration?.();
 		this.#unsubscribeAuthGeneration = undefined;
+	}
+
+	#enqueueCatalogMutation(operation: () => void | Promise<void>): Promise<void> {
+		const run = this.#catalogMutationTail.then(operation, operation);
+		this.#catalogMutationTail = run.catch(() => undefined);
+		return run;
 	}
 
 	onCatalogChanged(listener: () => void): () => void {
@@ -1496,15 +1509,17 @@ export class ModelRegistry {
 	 * Reload models from disk (embedded + accepted registry + custom from models.yml).
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
-		this.#suspendRebuild();
-		try {
-			this.#reloadStaticModels();
-			this.#suppressedSelectors.clear();
-			await this.#refreshRuntimeDiscoveries(strategy);
-			this.#modelBindingsApplier.apply();
-		} finally {
-			this.#resumeRebuild();
-		}
+		await this.#enqueueCatalogMutation(async () => {
+			this.#suspendRebuild();
+			try {
+				this.#reloadStaticModels();
+				this.#suppressedSelectors.clear();
+				await this.#refreshRuntimeDiscoveries(strategy);
+				this.#modelBindingsApplier.apply();
+			} finally {
+				this.#resumeRebuild();
+			}
+		});
 	}
 
 	refreshInBackground(strategy: ModelRefreshStrategy = "online-if-uncached"): void {
@@ -1526,19 +1541,21 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		this.#suspendRebuild();
-		try {
-			this.#reloadStaticModels();
-			for (const selector of this.#suppressedSelectors.keys()) {
-				if (selector.startsWith(`${providerId}/`)) {
-					this.#suppressedSelectors.delete(selector);
+		await this.#enqueueCatalogMutation(async () => {
+			this.#suspendRebuild();
+			try {
+				this.#reloadStaticModels();
+				for (const selector of this.#suppressedSelectors.keys()) {
+					if (selector.startsWith(`${providerId}/`)) {
+						this.#suppressedSelectors.delete(selector);
+					}
 				}
+				await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
+				this.#modelBindingsApplier.apply();
+			} finally {
+				this.#resumeRebuild();
 			}
-			await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
-			this.#modelBindingsApplier.apply();
-		} finally {
-			this.#resumeRebuild();
-		}
+		});
 	}
 
 	admitCachedProviderForStoredLiteralCredential(providerId: string, selector: AuthCredentialSelector): boolean {
@@ -1719,6 +1736,7 @@ export class ModelRegistry {
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
 		const registryModels = this.#applyHardcodedModelPolicies(acceptedPresets.presets);
+		this.#registryModelKeys = new Set(registryModels.map(model => `${model.provider}\u0000${model.id}`));
 		const cachedStandardModels = this.#applyHardcodedModelPolicies(this.#loadCachedStandardProviderModels());
 		const cachedDiscoveries = this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels());
 		const resolvedProviderCatalog = this.#mergeResolvedModels(
@@ -1757,6 +1775,10 @@ export class ModelRegistry {
 		}
 		for (const overlay of [...this.#customModelOverlays, ...this.#runtimeModelOverlays])
 			addStaticModel(overlay.provider, overlay.id);
+		for (const model of this.#models) {
+			if (this.#registryModelKeys.has(`${model.provider}\u0000${model.id}`))
+				addStaticModel(model.provider, model.id);
+		}
 
 		const runtimeProviderIds = new Set(this.#runtimeProviderSourceByName.keys());
 		const providerIds = new Set<string>([
@@ -1877,6 +1899,13 @@ export class ModelRegistry {
 			merged[existingIndex] = {
 				...existing,
 				...registryModel,
+				baseUrl: existing.baseUrl,
+				headers: existing.headers,
+				transport: existing.transport,
+				requestTransform: existing.requestTransform,
+				cacheRetention: existing.cacheRetention,
+				isOAuth: existing.isOAuth,
+				wireModelId: existing.wireModelId,
 				compat:
 					existing.compat || registryModel.compat || explicitTransport?.compat
 						? { ...existing.compat, ...registryModel.compat, ...explicitTransport?.compat }
