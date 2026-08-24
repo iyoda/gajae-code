@@ -1499,8 +1499,16 @@ export class ModelRegistry {
 
 	#enqueueCatalogMutation(operation: () => void | Promise<void>): Promise<void> {
 		this.#pendingCatalogMutations++;
-		const run =
-			this.#pendingCatalogMutations === 1 ? Promise.resolve(operation()) : this.#catalogMutationTail.then(operation);
+		let run: Promise<void>;
+		if (this.#pendingCatalogMutations === 1) {
+			try {
+				run = Promise.resolve(operation());
+			} catch (error) {
+				run = Promise.reject(error);
+			}
+		} else {
+			run = this.#catalogMutationTail.then(operation);
+		}
 		const completion = run.finally(() => {
 			this.#pendingCatalogMutations--;
 		});
