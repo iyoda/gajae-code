@@ -1406,7 +1406,8 @@ export async function rollbackModelPresetRegistry(
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
 		const state = loadStateSync(agentDir);
-		const activeRevision = loadControlSync(agentDir).pinnedRevision ?? state.activeRevision;
+		const control = loadControlSync(agentDir);
+		const activeRevision = control.pinnedRevision ?? state.activeRevision;
 		const revision =
 			options.revision ??
 			state.history
@@ -1418,6 +1419,7 @@ export async function rollbackModelPresetRegistry(
 		if (!generation) throw new Error(`Registry revision ${revision} is not in accepted history.`);
 		validateGeneration(generation, effectiveTrustedKeys(options));
 		await writeAtomicJson(paths.state, { ...state, activeRevision: revision, lastError: undefined });
+		await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 	});
 }
 

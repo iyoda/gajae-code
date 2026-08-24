@@ -498,6 +498,12 @@ describe("signed model preset registry", () => {
 		).toBe(1);
 		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys }).revision).toBe(2);
+		await rollbackModelPresetRegistry({ agentDir: data.agentDir, trustedKeys: data.trustedKeys, revision: 1 });
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir, trustedKeys: data.trustedKeys })).toMatchObject({
+			activeRevision: 1,
+			pinnedRevision: undefined,
+		});
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 2 });
 		await setModelPresetRegistryPin({ agentDir: data.agentDir });
 		await setModelPresetRegistryDisabled({ agentDir: data.agentDir, disabled: true });
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, { trustedKeys: data.trustedKeys })).toMatchObject({
