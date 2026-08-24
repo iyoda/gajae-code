@@ -542,6 +542,13 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 	options?: CursorOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	// Cursor owns this watchdog, so the budget begins at streamCursor()
+	// invocation—before system-prompt normalization/rule protobuf construction
+	// as well as history/blob/request serialization.
+	const firstEventStartedAt = Date.now();
+	const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+	const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+	const endpointClass = model.baseUrl ? "custom" : "canonical";
 	const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
 	(async () => {
@@ -656,11 +663,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// history/blob/protobuf serialization. Synchronous setup cannot be
 			// interrupted by a timer; the remaining-budget check below prevents a
 			// credential-bearing request after serialization already exhausted it.
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const firstEventStartedAt = Date.now();
-			const endpointClass = model.baseUrl ? "custom" : "canonical";
-
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
