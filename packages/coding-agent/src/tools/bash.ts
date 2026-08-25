@@ -1773,6 +1773,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				);
 			} catch (error) {
 				await releaseTerminalOnce();
+				if (clientAdmission) ownedManager?.releaseCapacity(clientAdmission);
 				throw error;
 			}
 
@@ -1944,6 +1945,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							);
 						} catch (error) {
 							controls.kill();
+							if (ptyAdmission) ptyManager.releaseCapacity(ptyAdmission);
 							throw error;
 						}
 						const ptyGeneration = ptyManager.getJob(ptyJobId)?.generation ?? ptyJobId;
