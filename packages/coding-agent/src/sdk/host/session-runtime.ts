@@ -1076,6 +1076,7 @@ function createQuerySurface(
 		};
 		try {
 			const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
+			if (profile.source !== "user" && proxyMode === "always" && !proxyAuthenticated) return { available: false };
 			const bindings = resolveProfileBindings(profile);
 			const assignments: Array<{ value: ModelSelectorValue; isDefault: boolean }> = [];
 			if (bindings.defaultSelector !== undefined) {
