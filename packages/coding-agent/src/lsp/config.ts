@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin } from "@gajae-code/utils";
+import * as piUtils from "@gajae-code/utils";
+import { isRecord, logger, pathIsWithin } from "@gajae-code/utils";
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
@@ -332,13 +333,13 @@ export function resolveCommand(command: string, cwd: string): string | null {
 	}
 
 	// Fall back to $PATH
-	return $which(command);
+	return piUtils.$which(command);
 }
 
 /** Resolve an LSP executable without consulting project-controlled bin directories. */
 function resolveTrustedLspCommand(command: string, cwd: string): string | null {
 	if (!path.isAbsolute(command) && (command.includes("/") || command.includes("\\"))) return null;
-	const discovered = path.isAbsolute(command) ? command : $which(command);
+	const discovered = path.isAbsolute(command) ? command : piUtils.$which(command);
 	if (!discovered) return null;
 	if (isProjectControlledPath(discovered, cwd)) return null;
 	const canonical = canonicalExistingPath(discovered);

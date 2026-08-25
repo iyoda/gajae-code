@@ -63,19 +63,25 @@ export function isProjectControlledPath(candidate: string, cwd: string): boolean
 	const home = os.homedir();
 	const stopPaths = new Set([path.resolve(home), canonicalPath(home)].map(normalizePathForComparison));
 	const lexicalTrustRoot = findProjectTrustRoot(cwd, stopPaths);
-	if (lexicalTrustRoot !== undefined && pathIsLexicallyWithin(lexicalTrustRoot, candidate)) return true;
+	const candidateIsHomeScoped = pathIsLexicallyWithin(home, candidate) || pathIsWithin(home, candidate);
+	if (
+		lexicalTrustRoot !== undefined &&
+		pathIsLexicallyWithin(lexicalTrustRoot, candidate) &&
+		(!candidateIsHomeScoped || pathIsLexicallyWithin(home, lexicalTrustRoot))
+	)
+		return true;
 
 	const canonicalTrustRoots = new Set<string>();
 	if (lexicalTrustRoot !== undefined) canonicalTrustRoots.add(canonicalPath(lexicalTrustRoot));
 	const canonicalTrustRoot = findProjectTrustRoot(canonicalPath(cwd), stopPaths);
-	if (canonicalTrustRoot !== undefined) canonicalTrustRoots.add(canonicalTrustRoot);
+	if (canonicalTrustRoot !== undefined) canonicalTrustRoots.add(canonicalPath(canonicalTrustRoot));
 	for (const trustRoot of canonicalTrustRoots) {
 		if (
-			pathIsLexicallyWithin(trustRoot, canonicalParentPath(candidate)) ||
-			pathIsWithin(trustRoot, canonicalPath(candidate))
-		) {
+			(pathIsLexicallyWithin(trustRoot, canonicalParentPath(candidate)) ||
+				pathIsWithin(trustRoot, canonicalPath(candidate))) &&
+			(!candidateIsHomeScoped || pathIsLexicallyWithin(home, trustRoot) || pathIsWithin(home, trustRoot))
+		)
 			return true;
-		}
 	}
 	return false;
 }
