@@ -197,6 +197,33 @@ describe("model selector profiles", () => {
 		expect(rendered).not.toContain("Models (all)");
 	});
 
+	test("renders a registry preset unavailable when its configured proxy lacks the model", async () => {
+		installTestTheme();
+		const proxyProfile: ModelProfileDefinition = {
+			name: "registry-proxy-missing",
+			displayName: "Proxy Missing",
+			providerGroup: "REGISTRY",
+			requiredProviders: ["xai"],
+			modelMapping: { default: "xai/grok-4.3" },
+			source: "registry",
+		};
+		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+			getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
+		};
+		registry.getModelProfiles = () => new Map([[proxyProfile.name, proxyProfile]]);
+		registry.getModelProfile = (name: string) => (name === proxyProfile.name ? proxyProfile : undefined);
+		registry.getAvailable = () => [model("xai", "grok-4.3"), model("litellm", "other-model")];
+		registry.getAll = registry.getAvailable;
+		registry.getApiKeyForProvider = (async (provider: string) =>
+			provider === "litellm" ? "proxy-key" : undefined) as typeof registry.getApiKeyForProvider;
+		const selector = createSelector(() => {}, {
+			registry,
+			settings: Settings.isolated({ "modelProfile.proxyProvider": "litellm" }),
+		});
+		await Bun.sleep(10);
+		expect(() => selector.render(220)).not.toThrow();
+	});
+
 	beforeAll(async () => {
 		testTheme = await getThemeByName("red-claw");
 		installTestTheme();

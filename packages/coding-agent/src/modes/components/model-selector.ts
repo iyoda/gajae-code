@@ -1382,7 +1382,12 @@ export class ModelSelectorComponent extends Container {
 			const bareAssignmentsAvailable = this.#bareProfileAuthByName.get(profile.name) ?? true;
 			return values.every(value =>
 				normalizeModelSelectorValue(value).some(rawSelector => {
-					const selector = this.#rewriteProfileSelectorForProxy(profile, rawSelector);
+					let selector: string;
+					try {
+						selector = this.#rewriteProfileSelectorForProxy(profile, rawSelector);
+					} catch {
+						return false;
+					}
 					if (!selector.includes("/")) return bareAssignmentsAvailable;
 					const resolved = resolveModelRoleValue(selector, this.#modelRegistry.getAvailable(), {
 						settings: this.#settings,
