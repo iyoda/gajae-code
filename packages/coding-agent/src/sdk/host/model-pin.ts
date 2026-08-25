@@ -45,6 +45,9 @@ export function createSdkHostModelRegistryLoader(
 	const cachedRegistries = new Map<string, Promise<OwnedModelRegistry>>();
 	const retiredRegistries = new Map<string, Promise<OwnedModelRegistry>[]>();
 	const activeScopes = new Map<string, number>();
+	const disposedEntries = new Set<Promise<OwnedModelRegistry>>();
+	const pendingDisposals = new Set<Promise<void>>();
+	const disposalBarrier = Promise.withResolvers<void>();
 	const registryAgentDir = path.resolve(path.dirname(modelsPath ?? "."));
 	let disposed = false;
 	const scopeKeyFor = (context?: SdkHostModelResolveContext): string =>
@@ -64,8 +67,32 @@ export function createSdkHostModelRegistryLoader(
 			owned.storage.close();
 		}
 	};
+	const maybeResolveDisposal = (): void => {
+		if (
+			disposed &&
+			cachedRegistries.size === 0 &&
+			retiredRegistries.size === 0 &&
+			activeScopes.size === 0 &&
+			pendingDisposals.size === 0
+		)
+			disposalBarrier.resolve();
+	};
 	const disposeEntries = (entries: Promise<OwnedModelRegistry>[]): void => {
-		if (entries.length > 0) void Promise.all(entries.map(entry => disposeEntry(entry))).catch(() => undefined);
+		const unique = entries.filter(entry => !disposedEntries.has(entry));
+		if (unique.length === 0) {
+			maybeResolveDisposal();
+			return;
+		}
+		for (const entry of unique) disposedEntries.add(entry);
+		const pending = Promise.all(unique.map(entry => disposeEntry(entry))).then(
+			() => undefined,
+			() => undefined,
+		);
+		pendingDisposals.add(pending);
+		void pending.finally(() => {
+			pendingDisposals.delete(pending);
+			maybeResolveDisposal();
+		});
 	};
 	const retireEntry = (scopeKey: string, entry: Promise<OwnedModelRegistry>): void => {
 		if ((activeScopes.get(scopeKey) ?? 0) > 0) {
@@ -137,10 +164,13 @@ export function createSdkHostModelRegistryLoader(
 	};
 	return Object.assign(loadRegistry, {
 		dispose: async (): Promise<void> => {
+			if (disposed) return await disposalBarrier.promise;
 			disposed = true;
 			for (const [scopeKey, entry] of cachedRegistries) retireEntry(scopeKey, entry);
 			cachedRegistries.clear();
 			for (const scopeKey of retiredRegistries.keys()) disposeRetired(scopeKey);
+			maybeResolveDisposal();
+			await disposalBarrier.promise;
 		},
 		acquire: (context?: SdkHostModelResolveContext): (() => void) => {
 			const scopeKey = scopeKeyFor(context);
@@ -154,6 +184,7 @@ export function createSdkHostModelRegistryLoader(
 				else activeScopes.set(scopeKey, next);
 				disposeRetired(scopeKey);
 				disposeEntries(evictIdleEntries());
+				maybeResolveDisposal();
 			};
 		},
 	});
