@@ -15,8 +15,8 @@ import {
 	rewriteSelectorForProxy,
 } from "../../config/model-profile-activation";
 import { isModelProfileProviderAvailable, projectModelProfileCatalog } from "../../config/model-profile-contract";
-import { isAuthenticated, kNoAuth } from "../../config/model-registry";
 import { type ModelProfileDefinition, resolveProfileBindings } from "../../config/model-profiles";
+import { isAuthenticated, kNoAuth } from "../../config/model-registry";
 import { resolveModelChainWithAuth, splitSelectorThinkingSuffix } from "../../config/model-resolver";
 import { type ModelSelectorValue, normalizeModelSelectorValue } from "../../config/model-selector-value";
 import { type Settings, validateSettingPatch } from "../../config/settings";

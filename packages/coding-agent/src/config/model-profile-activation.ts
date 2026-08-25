@@ -8,9 +8,9 @@ import {
 	aggregateModelProfileRequiredProviders,
 	deriveModelProfileMappedProviders,
 	formatModelProfileDisplayLabel,
+	type ModelProfileDefinition,
 	PROXY_ROUTABLE_PROVIDER_IDS,
 	resolveProfileBindings,
-	type ModelProfileDefinition,
 } from "./model-profiles";
 
 export { resolveModelProfileName } from "./model-profile-contract";
@@ -554,9 +554,7 @@ export function resolveProxyProviderId(settings: Pick<Settings, "get"> | undefin
 
 export type ModelProfileProxyMode = "fallback" | "always";
 
-export function resolveProxyMode(
-	settings: Pick<Settings, "get"> | undefined,
-): ModelProfileProxyMode {
+export function resolveProxyMode(settings: Pick<Settings, "get"> | undefined): ModelProfileProxyMode {
 	if (!settings) return "fallback";
 	const value = settings.get("modelProfile.proxyMode");
 	if (value === undefined || value === "fallback" || value === "always") return value ?? "fallback";
@@ -574,7 +572,11 @@ export function resolveProxyMode(
 export function getProxyRoutableProviders(profile: ModelProfileDefinition): ReadonlySet<string> {
 	if (profile.source === "user") return new Set();
 	return profile.source === "registry"
-		? new Set([...PROXY_ROUTABLE_PROVIDER_IDS, ...profile.requiredProviders, ...deriveModelProfileMappedProviders(profile)])
+		? new Set([
+				...PROXY_ROUTABLE_PROVIDER_IDS,
+				...profile.requiredProviders,
+				...deriveModelProfileMappedProviders(profile),
+			])
 		: PROXY_ROUTABLE_PROVIDER_IDS;
 }
 

@@ -6,6 +6,7 @@ import type { Api, Model } from "@gajae-code/ai/core";
 import { exactReplacePath, type NativeExactFileIdentity } from "@gajae-code/natives";
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
+import { splitSelectorThinkingSuffix } from "../thinking";
 import { withFileLock } from "./file-lock";
 import {
 	getModelPresetRegistryTestTrustedKeys,
@@ -13,7 +14,6 @@ import {
 } from "./internal/model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
-import { splitSelectorThinkingSuffix } from "../thinking";
 
 export const MODEL_PRESET_REGISTRY_CONTRACT_VERSION = "1.0.0";
 export const DEFAULT_MODEL_PRESET_REGISTRY_URL =

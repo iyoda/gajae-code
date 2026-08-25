@@ -1707,19 +1707,16 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 			const registryFromParent = options.modelRegistry !== undefined;
 			const registryAuthStorage =
 				options.authStorage ??
-				(options.modelRegistry?.authStorage ?? (await awaitAbortable(discoverAuthStorage(settings.getAgentDir()))));
-			if (options.modelRegistry === undefined && options.authStorage === undefined) ownedAuthStorage = registryAuthStorage;
+				options.modelRegistry?.authStorage ??
+				(await awaitAbortable(discoverAuthStorage(settings.getAgentDir())));
+			if (options.modelRegistry === undefined && options.authStorage === undefined)
+				ownedAuthStorage = registryAuthStorage;
 			ownedModelRegistry = options.modelRegistry
 				? undefined
-				: new ModelRegistry(
-						registryAuthStorage,
-						path.join(settings.getAgentDir(), "models.yml"),
-						settings,
-						{
+				: new ModelRegistry(registryAuthStorage, path.join(settings.getAgentDir(), "models.yml"), settings, {
 						agentDir: settings.getAgentDir(),
-							automaticRefresh: false,
-						},
-					);
+						automaticRefresh: false,
+					});
 			const modelRegistry = options.modelRegistry ?? ownedModelRegistry!;
 			const authStorage = modelRegistry.authStorage;
 			if (options.authStorage && options.authStorage !== authStorage) {

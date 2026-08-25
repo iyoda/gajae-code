@@ -1343,7 +1343,9 @@ export class ModelSelectorComponent extends Container {
 			proxyProvider,
 			resolveProxyMode(this.#settings),
 			this.#modelRegistry.getAvailable(),
-			new Set([...this.#providerAuthById].filter(([, authenticated]) => authenticated).map(([provider]) => provider)),
+			new Set(
+				[...this.#providerAuthById].filter(([, authenticated]) => authenticated).map(([provider]) => provider),
+			),
 			getProxyRoutableProviders(profile),
 		);
 	}
@@ -1470,7 +1472,12 @@ export class ModelSelectorComponent extends Container {
 					}
 				}),
 			);
-			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
+			if (
+				this.#disposed ||
+				this.#viewMode !== "presets" ||
+				refreshGeneration !== this.#providerAuthRefreshGeneration
+			)
+				return;
 			this.#providerAuthById = new Map(entries);
 			const profileAuthEntries = await Promise.all(
 				[...this.#getPresetGroups().values()].flat().map(async profile => {
@@ -1507,13 +1514,23 @@ export class ModelSelectorComponent extends Container {
 					return [profile.name, available.every(Boolean)] as const;
 				}),
 			);
-			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
+			if (
+				this.#disposed ||
+				this.#viewMode !== "presets" ||
+				refreshGeneration !== this.#providerAuthRefreshGeneration
+			)
+				return;
 			this.#bareProfileAuthByName = new Map(profileAuthEntries);
 		} finally {
-			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
-			this.#providerAuthPending = false;
-			this.#renderPresetLanding();
-			this.#tui.requestRender();
+			if (
+				!this.#disposed &&
+				this.#viewMode === "presets" &&
+				refreshGeneration === this.#providerAuthRefreshGeneration
+			) {
+				this.#providerAuthPending = false;
+				this.#renderPresetLanding();
+				this.#tui.requestRender();
+			}
 		}
 	}
 

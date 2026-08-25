@@ -17,7 +17,9 @@ export interface SdkHostModelResolveContext {
 }
 
 /** Registry loader owned by the SDK host, not by machine-facing adapters. */
-export type SdkHostModelRegistryLoader = ((context?: SdkHostModelResolveContext) => ModelRegistry | Promise<ModelRegistry>) & {
+export type SdkHostModelRegistryLoader = ((
+	context?: SdkHostModelResolveContext,
+) => ModelRegistry | Promise<ModelRegistry>) & {
 	acquire?: (context?: SdkHostModelResolveContext) => () => void;
 	dispose?: () => Promise<void>;
 };
@@ -83,9 +85,7 @@ export function createSdkHostModelRegistryLoader(
 	const evictIdleEntries = (): Promise<OwnedModelRegistry>[] => {
 		const evicted: Promise<OwnedModelRegistry>[] = [];
 		while (cachedRegistries.size > MAX_CACHED_MODEL_REGISTRIES) {
-			const oldest = [...cachedRegistries.keys()].find(
-				key => (activeScopes.get(key) ?? 0) === 0,
-			);
+			const oldest = [...cachedRegistries.keys()].find(key => (activeScopes.get(key) ?? 0) === 0);
 			if (oldest === undefined) break;
 			const entry = cachedRegistries.get(oldest);
 			cachedRegistries.delete(oldest);
@@ -163,7 +163,10 @@ export type SdkHostModelResolution =
 	| { ok: true; model: string | null }
 	| { ok: false; reason: "unknown_model"; model: string; error: string };
 
-export type SdkHostModelResolver = ((raw: unknown, context?: SdkHostModelResolveContext) => Promise<SdkHostModelResolution>) & {
+export type SdkHostModelResolver = ((
+	raw: unknown,
+	context?: SdkHostModelResolveContext,
+) => Promise<SdkHostModelResolution>) & {
 	dispose?: () => Promise<void>;
 };
 

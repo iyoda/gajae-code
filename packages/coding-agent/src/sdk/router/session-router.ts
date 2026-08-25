@@ -10,7 +10,12 @@ import {
 } from "../broker/session-index";
 import { lifecycleRequestTimeoutMs } from "../broker/startup-budget";
 import { SdkClient, SdkClientError, type SdkDispatchContext, type SdkDispatchHandler } from "../client/client";
-import { endpointDirectory, readSdkBrokerDiscovery, readSdkSessionEndpoint, type SdkSessionEndpoint } from "../client/discovery";
+import {
+	endpointDirectory,
+	readSdkBrokerDiscovery,
+	readSdkSessionEndpoint,
+	type SdkSessionEndpoint,
+} from "../client/discovery";
 import {
 	type ActivatedPreparedSession,
 	type PreparedSessionActivationClient,
@@ -396,7 +401,13 @@ async function lstatEndpoint(
 		Math.abs(stat.ctimeMs - Number(identity.ctimeNs) / 1_000_000) > 0.0005
 	)
 		return undefined;
-	return { mtimeMs: stat.mtimeMs, mtimeNs: identity.mtimeNs, ctimeNs: identity.ctimeNs, size: identity.size, ino: identity.ino };
+	return {
+		mtimeMs: stat.mtimeMs,
+		mtimeNs: identity.mtimeNs,
+		ctimeNs: identity.ctimeNs,
+		size: identity.size,
+		ino: identity.ino,
+	};
 }
 
 function readFrameSequenceClaim(frame: Record<string, unknown>): {
@@ -1393,7 +1404,9 @@ export class SessionRouter {
 		const previous = this.#attachmentTails.get(indexed.sessionId) ?? Promise.resolve(true);
 		const task = previous
 			.catch(() => false)
-			.then(() => this.#attachUnserialized(indexed, runEpoch, resolvedEndpoint, skipReplay, deferPublication, deferReplay));
+			.then(() =>
+				this.#attachUnserialized(indexed, runEpoch, resolvedEndpoint, skipReplay, deferPublication, deferReplay),
+			);
 		this.#attachmentTails.set(indexed.sessionId, task);
 		try {
 			return await task;
@@ -1421,8 +1434,7 @@ export class SessionRouter {
 		const proven = resolvedEndpoint === undefined ? await this.#readProvenEndpoint(indexed) : null;
 		const endpoint = resolvedEndpoint ?? proven?.endpoint ?? null;
 		let provenIno = proven?.ino;
-		if (resolvedEndpoint !== undefined)
-			provenIno = (await lstatEndpoint(resolvedEndpoint.path))?.ino;
+		if (resolvedEndpoint !== undefined) provenIno = (await lstatEndpoint(resolvedEndpoint.path))?.ino;
 		const retirementAfterValidation = this.#retirements.get(indexed.sessionId);
 		if (retirementAfterValidation) await retirementAfterValidation;
 		if ((this.#retirementVersions.get(indexed.sessionId) ?? 0) !== retirementVersion)
