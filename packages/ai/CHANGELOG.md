@@ -4,9 +4,7 @@
 
 ### Breaking Changes
 
-### Breaking Changes
-
-- `AuthGatewayServerOptions` now requires `providerScope` and `listModels`; direct `@gajae-code/ai` callers must construct one gateway instance per provider and pass the provider-filtered source catalog. This matches the mandatory `--provider=<id>` CLI migration and prevents cross-provider model and credential ambiguity.
+- `AuthGatewayServerOptions` now requires `providerScope` and `listModels`; direct `@gajae-code/ai` callers must construct one gateway instance per provider, pass the provider-filtered source catalog, and have `resolveModel` return the exact catalog object for the requested model. This matches the mandatory `--provider=<id>` CLI migration and prevents cross-provider model and credential ambiguity.
 
 ### Fixed
 
