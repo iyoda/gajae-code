@@ -1711,6 +1711,7 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 						path.join(settings.getAgentDir(), "models.yml"),
 						settings,
 						{
+						agentDir: settings.getAgentDir(),
 							automaticRefresh: false,
 						},
 					);

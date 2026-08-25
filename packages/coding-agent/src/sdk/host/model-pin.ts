@@ -17,9 +17,16 @@ export interface SdkHostModelResolveContext {
 }
 
 /** Registry loader owned by the SDK host, not by machine-facing adapters. */
-export type SdkHostModelRegistryLoader = (
-	context?: SdkHostModelResolveContext,
-) => ModelRegistry | Promise<ModelRegistry>;
+export type SdkHostModelRegistryLoader = ((context?: SdkHostModelResolveContext) => ModelRegistry | Promise<ModelRegistry>) & {
+	dispose?: () => Promise<void>;
+};
+
+type OwnedModelRegistry = {
+	registry: ModelRegistry;
+	storage: AuthStorage;
+};
+
+const MAX_CACHED_MODEL_REGISTRIES = 32;
 
 /**
  * Builds an offline model resolver for a single SDK host process.
@@ -32,16 +39,32 @@ export function createSdkHostModelRegistryLoader(
 	modelsPath?: string,
 	loadSettings?: (context?: SdkHostModelResolveContext) => Promise<Pick<Settings, "get" | "getGlobal">>,
 ): SdkHostModelRegistryLoader {
-	const cachedRegistries = new Map<string, Promise<ModelRegistry>>();
-	return async (context?: SdkHostModelResolveContext) => {
+	const cachedRegistries = new Map<string, Promise<OwnedModelRegistry>>();
+	const disposeEntry = async (entry: Promise<OwnedModelRegistry>): Promise<void> => {
+		const owned = await entry;
+		owned.registry.dispose();
+		owned.storage.close();
+	};
+	const loadRegistry = async (context?: SdkHostModelResolveContext): Promise<ModelRegistry> => {
 		const scopeKey = context?.cwd ?? "";
 		let cachedRegistry = cachedRegistries.get(scopeKey);
 		if (cachedRegistry === undefined) {
+			const registryAgentDir = path.resolve(path.dirname(modelsPath ?? "."));
 			const initializing = Promise.all([discoverStorage(), loadSettings?.(context)]).then(
-				([storage, registrySettings]) => new ModelRegistry(storage, modelsPath, registrySettings),
+				([storage, registrySettings]) => ({
+					storage,
+					registry: new ModelRegistry(storage, modelsPath, registrySettings, { agentDir: registryAgentDir }),
+				}),
 			);
 			cachedRegistries.set(scopeKey, initializing);
 			cachedRegistry = initializing;
+			while (cachedRegistries.size > MAX_CACHED_MODEL_REGISTRIES) {
+				const oldest = cachedRegistries.keys().next().value as string | undefined;
+				if (oldest === undefined || oldest === scopeKey) break;
+				const evicted = cachedRegistries.get(oldest);
+				cachedRegistries.delete(oldest);
+				if (evicted) void disposeEntry(evicted).catch(() => undefined);
+			}
 			try {
 				await initializing;
 			} catch (error) {
@@ -49,21 +72,30 @@ export function createSdkHostModelRegistryLoader(
 				throw error;
 			}
 		}
-		const registry = await cachedRegistry;
+		const owned = await cachedRegistry;
+		cachedRegistries.delete(scopeKey);
+		cachedRegistries.set(scopeKey, cachedRegistry);
+		const registry = owned.registry;
 		if (loadSettings) registry.setScopedSettings(await loadSettings(context));
 		await registry.refresh("offline");
 		return registry;
 	};
+	return Object.assign(loadRegistry, {
+		dispose: async (): Promise<void> => {
+			const entries = [...cachedRegistries.values()];
+			cachedRegistries.clear();
+			await Promise.allSettled(entries.map(entry => disposeEntry(entry)));
+		},
+	});
 }
 
 export type SdkHostModelResolution =
 	| { ok: true; model: string | null }
 	| { ok: false; reason: "unknown_model"; model: string; error: string };
 
-export type SdkHostModelResolver = (
-	raw: unknown,
-	context?: SdkHostModelResolveContext,
-) => Promise<SdkHostModelResolution>;
+export type SdkHostModelResolver = ((raw: unknown, context?: SdkHostModelResolveContext) => Promise<SdkHostModelResolution>) & {
+	dispose?: () => Promise<void>;
+};
 
 /** Resolve the explicit model pin at the SDK host boundary. */
 export async function resolveSdkHostModel(
@@ -96,6 +128,9 @@ export function createDefaultSdkHostModelResolver(agentDir: string): SdkHostMode
 		path.join(agentDir, "models.yml"),
 		context => Settings.loadReadonly({ agentDir, cwd: context?.cwd }),
 	);
-	return (raw: unknown, context?: SdkHostModelResolveContext): Promise<SdkHostModelResolution> =>
-		resolveSdkHostModel(raw, loadRegistry, context);
+	return Object.assign(
+		(raw: unknown, context?: SdkHostModelResolveContext): Promise<SdkHostModelResolution> =>
+			resolveSdkHostModel(raw, loadRegistry, context),
+		{ dispose: loadRegistry.dispose },
+	);
 }

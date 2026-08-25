@@ -96,6 +96,7 @@ describe("resolveSdkHostModel", () => {
 			expect(refresh.mock.calls).toEqual([["offline"], ["offline"]]);
 			expect(first.getAll().length).toBeGreaterThan(0);
 		} finally {
+			await loader.dispose?.();
 			storage.close();
 		}
 	});
