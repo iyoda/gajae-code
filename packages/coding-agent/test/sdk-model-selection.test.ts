@@ -64,7 +64,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						mode: "effort",
 						defaultLevel: Effort.Low,
 					},
-					compat: { supportsReasoningEffort: true },
 				},
 				{
 					id: "runtime-global-b",
@@ -81,7 +80,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						mode: "effort",
 						defaultLevel: Effort.Low,
 					},
-					compat: { supportsReasoningEffort: true },
 				},
 				{
 					id: "runtime-policy-c",
@@ -98,7 +96,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 						mode: "effort",
 						defaultLevel: Effort.Low,
 					},
-					compat: { supportsReasoningEffort: true },
 				},
 			],
 		});
