@@ -31,9 +31,8 @@ import {
 	removeCanonicalBlob,
 } from "../session/blob-store";
 import { FileSessionStorage, probeSessionRetirement, retireSessionTranscript } from "../session/session-storage";
-
-import { buildGcReportText } from "./gc-render";
 import { type EmptyDeleteGcReport, runEmptyDeleteGc } from "./empty-delete-gc";
+import { buildGcReportText } from "./gc-render";
 import { collectSessionScopeUsage, type GcSessionScopeUsage, shouldReportSessionScope } from "./gc-session-scope";
 
 export type GcStore = "harness_leases" | "file_locks" | "tmux_sessions" | "registry_entries" | "local_roots";
@@ -564,7 +563,7 @@ export function gcHelpText(): string {
 		"  --disk            Also report on-disk retention (sessions, blobs, artifacts, natives, backups)",
 		"  --empty-delete-receipts  Report/prune empty .gjc-delete-* under --root / --manifest",
 		"  --root <dir>      Operand root for --empty-delete-receipts (repeatable)",
-		"  --manifest <file> JSON {\"roots\":[...]} for --empty-delete-receipts",
+		'  --manifest <file> JSON {"roots":[...]} for --empty-delete-receipts',
 		"",
 		"Liveness-only: a record is removed only when its owning process is dead",
 		"(ESRCH). Live / permission-denied / unknown processes are always kept.",

@@ -60,7 +60,6 @@ import {
 	syncCoordinatorDirectory,
 	writeCoordinatorAtomic,
 } from "./durability";
-import { listCoordinatorJsonFiles } from "./projection-scan";
 import {
 	createDefaultEventWebhookDelivery,
 	deliverEventWebhook,
@@ -84,6 +83,7 @@ import {
 	requireCoordinatorMutation,
 	safeOpenCoordinatorArtifact,
 } from "./policy";
+import { listCoordinatorJsonFiles } from "./projection-scan";
 import {
 	answerBindingMatches,
 	buildCoordinatorAskAnswerSchema,

@@ -85,7 +85,12 @@ describe("empty .gjc-delete-* latch", () => {
 		const reserved = ".gjc-delete-session-state-lock-fixed.json";
 		await fs.writeFile(path.join(dir, reserved), "");
 		await removeVerifiedEmptyQuarantine(dir, reserved);
-		expect(await fs.stat(path.join(dir, reserved)).then(() => "present", () => "gone")).toBe("gone");
+		expect(
+			await fs.stat(path.join(dir, reserved)).then(
+				() => "present",
+				() => "gone",
+			),
+		).toBe("gone");
 		await fs.writeFile(path.join(dir, reserved), "body");
 		await removeVerifiedEmptyQuarantine(dir, reserved);
 		expect(await fs.readFile(path.join(dir, reserved), "utf8")).toBe("body");
@@ -114,7 +119,12 @@ describe("empty .gjc-delete-* latch", () => {
 		};
 		SessionStateLockTestHooks.forcedQuarantineName = reserved;
 		await expect(reclaimStaleSessionStateLock(lockFile)).resolves.toBeUndefined();
-		expect(await fs.stat(lockFile).then(() => "present", () => "gone")).toBe("gone");
+		expect(
+			await fs.stat(lockFile).then(
+				() => "present",
+				() => "gone",
+			),
+		).toBe("gone");
 	});
 
 	it("Test 3: turn-start persist then next lock cycle can rewrite off running", async () => {

@@ -2,6 +2,8 @@
  * Official GC of already-quarantined empty `.gjc-delete-*` receipts.
  * Roots are operator operands — never hardcoded host paths.
  */
+
+import type { BigIntStats, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -43,7 +45,7 @@ function isUnsafeName(name: string): boolean {
 	return name.includes("/") || name.includes("\0") || name === "." || name === "..";
 }
 
-function identityOf(stat: { dev: bigint; ino: bigint; nlink: bigint; size: bigint; mtimeNs: bigint }): EmptyDeleteIdentity {
+function identityOf(stat: BigIntStats): EmptyDeleteIdentity {
 	return {
 		dev: stat.dev,
 		ino: stat.ino,
@@ -65,7 +67,7 @@ function sameIdentity(left: EmptyDeleteIdentity, right: EmptyDeleteIdentity): bo
 
 export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDeleteGcRecord[]> {
 	const records: EmptyDeleteGcRecord[] = [];
-	let rootStat;
+	let rootStat: Stats;
 	try {
 		rootStat = await fs.lstat(root);
 	} catch (error) {
@@ -92,7 +94,7 @@ export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDel
 	for (const name of names) {
 		if (isUnsafeName(name) || !name.startsWith(EMPTY_DELETE_PREFIX)) continue;
 		const file = path.join(root, name);
-		let stat;
+		let stat: BigIntStats;
 		try {
 			stat = await fs.lstat(file, { bigint: true });
 		} catch {
