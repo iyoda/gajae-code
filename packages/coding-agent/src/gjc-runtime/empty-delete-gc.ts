@@ -168,9 +168,13 @@ export async function runEmptyDeleteGc(options: EmptyDeleteGcOptions): Promise<E
 						} else if (result.code === "not_found") {
 							record.action = "skipped";
 							record.reason = "gone";
-						} else {
+						} else if (result.code === "identity_mismatch") {
 							record.action = "kept";
 							record.reason = "identity_drift";
+						} else {
+							record.action = "kept";
+							record.reason = `unlink_failed:${result.code ?? "unknown"}`;
+							report.errors.push(`${record.path}: ${record.reason}`);
 						}
 					}
 				} catch (error) {
