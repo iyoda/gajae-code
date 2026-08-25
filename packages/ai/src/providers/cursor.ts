@@ -195,7 +195,12 @@ export function disposeCursorConversation(conversationId: string): void {
 	conversationLastAccess.delete(conversationId);
 }
 
-async function waitForCursorMutationLock(conversationId: string, signal: AbortSignal | undefined): Promise<void> {
+async function waitForCursorMutationLock(
+	conversationId: string,
+	signal: AbortSignal | undefined,
+	timeoutMs: number | undefined,
+	timeoutError: () => Error,
+): Promise<void> {
 	const lock = conversationMutationLocks.get(conversationId);
 	if (!lock) return;
 	if (!signal) {
@@ -207,10 +212,17 @@ async function waitForCursorMutationLock(conversationId: string, signal: AbortSi
 	aborted.promise.catch(() => {});
 	const onAbort = () => aborted.reject(cursorAbortError(signal));
 	signal.addEventListener("abort", onAbort, { once: true });
+	const deadline = Promise.withResolvers<never>();
+	deadline.promise.catch(() => {});
+	const deadlineTimer =
+		timeoutMs !== undefined && timeoutMs > 0
+			? setTimeout(() => deadline.reject(timeoutError()), timeoutMs)
+			: undefined;
 	try {
-		await Promise.race([lock, aborted.promise]);
+		await Promise.race([lock, aborted.promise, deadline.promise]);
 	} finally {
 		signal.removeEventListener("abort", onAbort);
+		if (deadlineTimer) clearTimeout(deadlineTimer);
 	}
 }
 
@@ -751,11 +763,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			// interrupted by a timer; the remaining-budget check below prevents a
 			// credential-bearing request after serialization already exhausted it.
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			// A previous bounded non-abortable exec may still be mutating local state
-			// after its provider wrapper published a capped terminal. Do not admit a
-			// retry or later turn for this conversation until that actual operation
-			// settles.
-			await waitForCursorMutationLock(conversationId, options?.signal);
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
 			const cachedState = conversationStateCache.get(conversationId);
@@ -826,6 +833,16 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				throw createFirstEventTimeoutError();
 			}
 			armTransportWatchdog(remainingFirstEventTimeoutMs, createFirstEventTimeoutError);
+			// A previous bounded non-abortable exec may still be mutating local state
+			// after its provider wrapper published a capped terminal. Do not admit a
+			// retry or later turn for this conversation until that actual operation
+			// settles, but keep the same first-event budget governing the wait.
+			await waitForCursorMutationLock(
+				conversationId,
+				options?.signal,
+				remainingFirstEventTimeoutMs,
+				createFirstEventTimeoutError,
+			);
 			if (proxyUrl) {
 				// The watchdog settles the h2 promise but cannot interrupt the
 				// handshake await below: race the tunnel connect against the same
