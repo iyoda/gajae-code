@@ -78,7 +78,12 @@ export function createSdkHostModelRegistryLoader(
 			disposalBarrier.resolve();
 	};
 	const disposeEntries = (entries: Promise<OwnedModelRegistry>[]): void => {
-		const unique = entries.filter(entry => !disposedEntries.has(entry));
+		const seen = new Set<Promise<OwnedModelRegistry>>();
+		const unique = entries.filter(entry => {
+			if (seen.has(entry) || disposedEntries.has(entry)) return false;
+			seen.add(entry);
+			return true;
+		});
 		if (unique.length === 0) {
 			maybeResolveDisposal();
 			return;

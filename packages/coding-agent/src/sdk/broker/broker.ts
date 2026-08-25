@@ -845,7 +845,7 @@ export class Broker {
 	#completion!: Promise<void>;
 	#resolveCompletion!: () => void;
 	#rejectCompletion!: (error: unknown) => void;
-	readonly #resolveModelPin: SdkHostModelResolver;
+	#resolveModelPin: SdkHostModelResolver;
 	constructor(settings: BrokerSettings) {
 		this.settings = {
 			agentDir: settings.agentDir,
@@ -1005,6 +1005,7 @@ export class Broker {
 			this.#resolveCompletion = completion.resolve;
 			this.#rejectCompletion = completion.reject;
 			this.#completionTask = null;
+			this.#resolveModelPin = createDefaultSdkHostModelResolver(this.settings.agentDir);
 			// A drained queue refuses every later startup by design, so a restarted broker
 			// needs a new one or it would admit nothing for the rest of the process.
 			this.#startupAdmissions = new StartupAdmissionQueue(sdkHostStartupConcurrency());
