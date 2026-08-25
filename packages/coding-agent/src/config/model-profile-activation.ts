@@ -552,6 +552,15 @@ export function resolveProxyProviderId(settings: Pick<Settings, "get"> | undefin
 	return id;
 }
 
+/** Passive surfaces fail closed on malformed settings instead of throwing. */
+export function tryResolveProxyProviderId(settings: Pick<Settings, "get"> | undefined): string | undefined {
+	try {
+		return resolveProxyProviderId(settings);
+	} catch {
+		return undefined;
+	}
+}
+
 export type ModelProfileProxyMode = "fallback" | "always";
 
 export function resolveProxyMode(settings: Pick<Settings, "get"> | undefined): ModelProfileProxyMode {

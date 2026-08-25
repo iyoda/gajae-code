@@ -25,8 +25,8 @@ import {
 import {
 	getProxyRoutableProviders,
 	resolveProxyMode,
-	resolveProxyProviderId,
 	rewriteSelectorForProxy,
+	tryResolveProxyProviderId,
 } from "../../config/model-profile-activation";
 
 import { isModelProfileProviderAvailable } from "../../config/model-profile-contract";
@@ -1327,7 +1327,7 @@ export class ModelSelectorComponent extends Container {
 		const authenticated = new Set(
 			profileRequiredProviders(profile).filter(provider => this.#isProviderAuthenticated(provider) === true),
 		);
-		const proxyProvider = profile.source === "user" ? undefined : resolveProxyProviderId(this.#settings);
+		const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(this.#settings);
 		if (proxyProvider !== undefined && this.#isProviderAuthenticated(proxyProvider) === true) {
 			for (const provider of getProxyRoutableProviders(profile)) authenticated.add(provider);
 		}
@@ -1336,7 +1336,7 @@ export class ModelSelectorComponent extends Container {
 
 	#rewriteProfileSelectorForProxy(profile: ModelProfileDefinition, selector: string): string {
 		if (profile.source === "user") return selector;
-		const proxyProvider = resolveProxyProviderId(this.#settings);
+		const proxyProvider = tryResolveProxyProviderId(this.#settings);
 		if (proxyProvider === undefined || this.#isProviderAuthenticated(proxyProvider) !== true) return selector;
 		return rewriteSelectorForProxy(
 			selector,
@@ -1442,7 +1442,7 @@ export class ModelSelectorComponent extends Container {
 			for (const profile of profiles) {
 				for (const provider of profileRequiredProviders(profile)) providers.add(provider);
 				if (profile.source !== "user") {
-					const proxyProvider = resolveProxyProviderId(this.#settings);
+					const proxyProvider = tryResolveProxyProviderId(this.#settings);
 					if (proxyProvider !== undefined) providers.add(proxyProvider);
 				}
 				const bindings = resolveProfileBindings(profile);

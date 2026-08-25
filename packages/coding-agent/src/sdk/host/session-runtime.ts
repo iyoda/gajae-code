@@ -11,8 +11,8 @@ import { AsyncJobManager } from "../../async";
 import {
 	getProxyRoutableProviders,
 	resolveProxyMode,
-	resolveProxyProviderId,
 	rewriteSelectorForProxy,
+	tryResolveProxyProviderId,
 } from "../../config/model-profile-activation";
 import { isModelProfileProviderAvailable, projectModelProfileCatalog } from "../../config/model-profile-contract";
 import { type ModelProfileDefinition, resolveProfileBindings } from "../../config/model-profiles";
@@ -1055,7 +1055,7 @@ function createQuerySurface(
 		profile: ModelProfileDefinition,
 		authenticatedProviders: ReadonlySet<string>,
 	): Promise<{ available: boolean; defaultModel?: Model<Api> }> => {
-		const proxyProvider = profile.source === "user" ? undefined : resolveProxyProviderId(profileSettings);
+		const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
 		const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
 		const proxyAuthenticated = proxyProvider !== undefined && authenticatedProviders.has(proxyProvider);
 		const profileAuthenticated = new Set(authenticatedProviders);
@@ -1138,7 +1138,7 @@ function createQuerySurface(
 		const proxyProviders = new Set<string>();
 		for (const profile of profiles.values()) {
 			if (profile.source === "user") continue;
-			const proxyProvider = resolveProxyProviderId(options.settings);
+			const proxyProvider = tryResolveProxyProviderId(profileSettings);
 			if (proxyProvider !== undefined) proxyProviders.add(proxyProvider);
 		}
 		for (const proxyProvider of proxyProviders) {
@@ -1298,7 +1298,7 @@ function createQuerySurface(
 			const availableProfileIds = new Set<string>();
 			for (const [name, profile] of profiles) {
 				const profileAuthenticated = new Set(authenticatedProviders);
-				const proxyProvider = profile.source === "user" ? undefined : resolveProxyProviderId(profileSettings);
+				const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
 				if (proxyProvider !== undefined && profileAuthenticated.has(proxyProvider))
 					for (const provider of getProxyRoutableProviders(profile)) profileAuthenticated.add(provider);
 				if (!isModelProfileProviderAvailable(profile, profileAuthenticated)) continue;
@@ -1379,7 +1379,8 @@ function createQuerySurface(
 					available: (async () => {
 						const profile = profiles.get(item.id)!;
 						const profileAuthenticated = new Set(authenticatedProviders);
-						const proxyProvider = profile.source === "user" ? undefined : resolveProxyProviderId(profileSettings);
+						const proxyProvider =
+							profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
 						if (proxyProvider !== undefined && profileAuthenticated.has(proxyProvider))
 							for (const provider of getProxyRoutableProviders(profile)) profileAuthenticated.add(provider);
 						return (

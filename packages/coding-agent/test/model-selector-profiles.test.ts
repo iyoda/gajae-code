@@ -224,6 +224,15 @@ describe("model selector profiles", () => {
 		expect(() => selector.render(220)).not.toThrow();
 	});
 
+	test("renders presets safely when the configured proxy identifier is malformed", async () => {
+		installTestTheme();
+		const selector = createSelector(() => {}, {
+			settings: Settings.isolated({ "modelProfile.proxyProvider": "proxy/name" }),
+		});
+		await Bun.sleep(10);
+		expect(() => selector.render(220)).not.toThrow();
+	});
+
 	beforeAll(async () => {
 		testTheme = await getThemeByName("red-claw");
 		installTestTheme();
