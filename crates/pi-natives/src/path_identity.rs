@@ -9607,6 +9607,7 @@ mod secure_skill_write_windows_tests {
 				root_for_write.to_string_lossy().into_owned(),
 				"managed".to_owned(),
 				"after".to_owned(),
+				0o600,
 			)
 		});
 		entered_rx.recv().expect("wait for private-file write");
@@ -9639,6 +9640,7 @@ mod secure_skill_write_windows_tests {
 				root_for_write.to_string_lossy().into_owned(),
 				"managed".to_owned(),
 				"private-stage".to_owned(),
+				0o600,
 			)
 		});
 		entered_rx.recv().expect("wait for private-file write");
@@ -9681,6 +9683,7 @@ mod secure_skill_write_windows_tests {
 				root_for_write.to_string_lossy().into_owned(),
 				"managed".to_owned(),
 				"private-stage".to_owned(),
+				0o600,
 			)
 		});
 		entered_rx.recv().expect("wait for private-file write");
@@ -9724,6 +9727,7 @@ mod secure_skill_write_windows_tests {
 						root.to_string_lossy().into_owned(),
 						"managed".to_owned(),
 						content,
+						0o600,
 					)
 				})
 			})
