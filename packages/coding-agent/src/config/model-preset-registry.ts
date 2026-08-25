@@ -1561,7 +1561,9 @@ async function refreshModelPresetRegistryInner(
 					retainedAncestryDepth(latest, usableState) >= MODEL_PRESET_REGISTRY_MAX_RETENTION_ANCESTRY;
 				const latestRevision = latest?.manifest.signed.registryRevision;
 				const buildCandidate = (compact: boolean): RegistryStateCandidate => {
-					const retentionSource = compact && latest ? withoutRetainedEntries(latest) : latest;
+					const latestIsSelected = latest !== undefined && effectivePinnedRevision === latestRevision;
+					const retentionSource = compact && latest && !latestIsSelected ? withoutRetainedEntries(latest) : latest;
+					const retentionSourceWasStripped = retentionSource !== latest;
 					const retained = retainRemoved(retentionSource, profiles, presets);
 					const hasRetained =
 						retained.retainedProfiles.length > 0 ||
@@ -1583,7 +1585,32 @@ async function refreshModelPresetRegistryInner(
 								: latestRevision
 							: undefined,
 					};
-					const priorHistory = compact ? [retentionSource!] : usableState.history;
+					const protectedRevisions = new Set(
+						[effectivePinnedRevision, usableState.activeRevision, generation.retainedFromRevision].filter(
+							(revision): revision is number => revision !== undefined,
+						),
+					);
+					const historyByRevision = new Map(
+						usableState.history.map(item => [item.manifest.signed.registryRevision, item]),
+					);
+					const selectedHistory: AcceptedGeneration[] = [];
+					const pendingSelectedRevisions = [...protectedRevisions];
+					const selectedRevisionSet = new Set<number>();
+					for (let index = 0; index < pendingSelectedRevisions.length; index++) {
+						const selectedRevision = pendingSelectedRevisions[index]!;
+						if (selectedRevisionSet.has(selectedRevision)) continue;
+						selectedRevisionSet.add(selectedRevision);
+						const selectedGeneration = historyByRevision.get(selectedRevision);
+						if (!selectedGeneration) continue;
+						const sameAsRetentionSource =
+							selectedGeneration.manifest.signed.registryRevision ===
+							retentionSource?.manifest.signed.registryRevision;
+						if (sameAsRetentionSource && retentionSourceWasStripped) continue;
+						if (!sameAsRetentionSource) selectedHistory.push(selectedGeneration);
+						if (selectedGeneration.retainedFromRevision !== undefined)
+							pendingSelectedRevisions.push(selectedGeneration.retainedFromRevision);
+					}
+					const priorHistory = compact ? [retentionSource!, ...selectedHistory] : usableState.history;
 					const historyCandidates = [
 						generation,
 						...priorHistory.filter(
@@ -1591,11 +1618,6 @@ async function refreshModelPresetRegistryInner(
 						),
 					].sort((left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision);
 					const history = historyCandidates.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
-					const protectedRevisions = new Set(
-						[effectivePinnedRevision, usableState.activeRevision, generation.retainedFromRevision].filter(
-							(revision): revision is number => revision !== undefined,
-						),
-					);
 					const pendingProtectedRevisions = [...protectedRevisions];
 					for (let index = 0; index < pendingProtectedRevisions.length; index++) {
 						const protectedRevision = pendingProtectedRevisions[index]!;
