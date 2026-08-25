@@ -56,6 +56,22 @@ export function createSdkHostModelRegistryLoader(
 			// best-effort and must not block broker shutdown on one broken scope.
 		}
 	};
+	const evictIdleEntries = (): Promise<OwnedModelRegistry>[] => {
+		const evicted: Promise<OwnedModelRegistry>[] = [];
+		while (cachedRegistries.size > MAX_CACHED_MODEL_REGISTRIES) {
+			const oldest = [...cachedRegistries.keys()].find(
+				key => (activeScopes.get(key) ?? 0) === 0,
+			);
+			if (oldest === undefined) break;
+			const entry = cachedRegistries.get(oldest);
+			cachedRegistries.delete(oldest);
+			if (entry) evicted.push(entry);
+		}
+		return evicted;
+	};
+	const disposeEvictedEntries = (entries: Promise<OwnedModelRegistry>[]): void => {
+		if (entries.length > 0) void Promise.all(entries.map(entry => disposeEntry(entry))).catch(() => undefined);
+	};
 	const loadRegistry = async (context?: SdkHostModelResolveContext): Promise<ModelRegistry> => {
 		if (disposed) throw new Error("SDK host model registry loader is disposed.");
 		const scopeKey = scopeKeyFor(context);
@@ -78,15 +94,7 @@ export function createSdkHostModelRegistryLoader(
 			});
 			cachedRegistries.set(scopeKey, initializing);
 			cachedRegistry = initializing;
-			while (cachedRegistries.size > MAX_CACHED_MODEL_REGISTRIES) {
-				const oldest = [...cachedRegistries.keys()].find(
-					key => key !== scopeKey && (activeScopes.get(key) ?? 0) === 0,
-				);
-				if (oldest === undefined) break;
-				const evicted = cachedRegistries.get(oldest);
-				cachedRegistries.delete(oldest);
-				if (evicted) void disposeEntry(evicted).catch(() => undefined);
-			}
+			disposeEvictedEntries(evictIdleEntries());
 			try {
 				await initializing;
 			} catch (error) {
@@ -120,6 +128,7 @@ export function createSdkHostModelRegistryLoader(
 				const next = (activeScopes.get(scopeKey) ?? 1) - 1;
 				if (next <= 0) activeScopes.delete(scopeKey);
 				else activeScopes.set(scopeKey, next);
+				disposeEvictedEntries(evictIdleEntries());
 			};
 		},
 	});

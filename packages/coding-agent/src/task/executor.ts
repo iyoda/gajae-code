@@ -1122,6 +1122,7 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 	const abortSignal = abortController.signal;
 	let activeSession: AgentSession | null = null;
 	let ownedModelRegistry: ModelRegistry | undefined;
+	let ownedAuthStorage: AuthStorage | undefined;
 	let unsubscribe: (() => void) | null = null;
 	let yieldCalled = false;
 	let pauseRequested = false;
@@ -1704,10 +1705,14 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 			checkAbort();
 			// Pin authStorage to modelRegistry.authStorage — mirrors the createAgentSession invariant.
 			const registryFromParent = options.modelRegistry !== undefined;
+			const registryAuthStorage =
+				options.authStorage ??
+				(options.modelRegistry?.authStorage ?? (await awaitAbortable(discoverAuthStorage(settings.getAgentDir()))));
+			if (options.modelRegistry === undefined && options.authStorage === undefined) ownedAuthStorage = registryAuthStorage;
 			ownedModelRegistry = options.modelRegistry
 				? undefined
 				: new ModelRegistry(
-						options.authStorage ?? (await awaitAbortable(discoverAuthStorage(settings.getAgentDir()))),
+						registryAuthStorage,
 						path.join(settings.getAgentDir(), "models.yml"),
 						settings,
 						{
@@ -2512,6 +2517,8 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 			}
 			ownedModelRegistry?.dispose();
 			ownedModelRegistry = undefined;
+			ownedAuthStorage?.close();
+			ownedAuthStorage = undefined;
 		}
 
 		return {
