@@ -253,6 +253,33 @@ describe("model selector profiles", () => {
 		expect(() => selector.render(220)).not.toThrow();
 	});
 
+	test("marks a registry preset unavailable when always-mode proxy auth is missing", async () => {
+		installTestTheme();
+		const registry = createRegistry() as unknown as TestModelRegistry;
+		const alwaysProfile: ModelProfileDefinition = {
+			name: "registry-always",
+			providerGroup: "REGISTRY ALWAYS",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry",
+		};
+		registry.getModelProfiles = () => new Map([[alwaysProfile.name, alwaysProfile]]);
+		registry.getModelProfile = (name: string) => (name === alwaysProfile.name ? alwaysProfile : undefined);
+		registry.getApiKeyForProvider = (async (provider: string) =>
+			provider === "provider-a" ? "direct-key" : undefined) as typeof registry.getApiKeyForProvider;
+		const selector = createSelector(() => {}, {
+			registry,
+			settings: Settings.isolated({
+				"modelProfile.proxyProvider": "litellm",
+				"modelProfile.proxyMode": "always",
+			}),
+		});
+		await Bun.sleep(10);
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("REGISTRY ALWAYS");
+		expect(rendered).toContain("✗ REGISTRY ALWAYS");
+	});
+
 	beforeAll(async () => {
 		testTheme = await getThemeByName("red-claw");
 		installTestTheme();

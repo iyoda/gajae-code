@@ -1374,7 +1374,18 @@ export class ModelSelectorComponent extends Container {
 	#isPresetAuthenticated(profileOrProfiles: ModelProfileDefinition | ModelProfileDefinition[]): boolean {
 		const profiles = Array.isArray(profileOrProfiles) ? profileOrProfiles : [profileOrProfiles];
 		return profiles.every(profile => {
-			if (profile.source !== "user" && inspectProxyProviderId(this.#settings).status === "invalid") return false;
+			if (profile.source !== "user") {
+				if (inspectProxyProviderId(this.#settings).status === "invalid") return false;
+				try {
+					if (resolveProxyMode(this.#settings) === "always") {
+						const proxyProvider = tryResolveProxyProviderId(this.#settings);
+						if (proxyProvider === undefined || this.#isProviderAuthenticated(proxyProvider) !== true)
+							return false;
+					}
+				} catch {
+					return false;
+				}
+			}
 			if (this.#getMissingProviders(profile).length > 0) return false;
 			const bindings = resolveProfileBindings(profile);
 			const values = [
