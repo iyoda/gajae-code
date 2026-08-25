@@ -148,6 +148,16 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 	}
 }
 
+async function normalizeGeneratedDeclarationSpacing(): Promise<void> {
+	const declarationPath = path.join(nativeDir, "index.d.ts");
+	const bindings = await Bun.file(declarationPath).text();
+	const normalized = bindings.replace(
+		/(^export declare class ComputerController \{[\s\S]*?^\}\n)(\/\*\*\n \* Long-lived macOS appearance observer\.)/m,
+		"$1\n$2",
+	);
+	if (normalized !== bindings) await Bun.write(declarationPath, normalized);
+}
+
 async function ensurePublishDiagnosticDeclaration(): Promise<void> {
 	const declarationPath = path.join(nativeDir, "index.d.ts");
 	const bindings = await Bun.file(declarationPath).text();
@@ -300,6 +310,7 @@ try {
 	);
 
 	await generateEnumExports();
+	await normalizeGeneratedDeclarationSpacing();
 	await ensurePublishDiagnosticDeclaration();
 	await validateGeneratedBindings();
 
