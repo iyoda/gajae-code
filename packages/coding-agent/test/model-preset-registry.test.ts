@@ -650,6 +650,20 @@ describe("signed model preset registry", () => {
 		expect(corrupted.error).not.toContain("DO-NOT-LOG");
 	});
 
+	test("sanitizes tampered cached error text before exposing registry status", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.lastError = `Registry refresh failed: ${"x".repeat(2_000)}\u0000\u000b`;
+		await Bun.write(statePath, JSON.stringify(state));
+
+		const status = getModelPresetRegistryStatus({ agentDir: data.agentDir });
+		expect(status.lastError).toBeDefined();
+		expect(status.lastError).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+		expect(Buffer.byteLength(status.lastError ?? "", "utf8")).toBeLessThanOrEqual(1024);
+	});
+
 	test("clears a pin when failed refresh replaces unreadable state", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));

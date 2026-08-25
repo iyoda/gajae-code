@@ -826,6 +826,7 @@ function parseState(value: unknown): RegistryState {
 		throw new Error("Registry cache check timestamp is invalid.");
 	if (state.lastError !== undefined && typeof state.lastError !== "string")
 		throw new Error("Registry cache error state is invalid.");
+	const lastError = state.lastError === undefined ? undefined : safeError(state.lastError);
 	const history = state.history.map((entry, index): AcceptedGeneration => {
 		if (!entry || typeof entry !== "object" || Array.isArray(entry))
 			throw new Error(`Registry cache generation ${index} is invalid.`);
@@ -878,7 +879,7 @@ function parseState(value: unknown): RegistryState {
 			retainedFromRevision,
 		};
 	});
-	return { ...state, version: 1, history };
+	return { ...state, version: 1, history, lastError };
 }
 
 function loadStateSync(agentDir: string): RegistryState {
