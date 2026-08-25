@@ -2421,10 +2421,19 @@ export class AuthStorage {
 	}
 
 	/** Updates a credential at index after OAuth token refresh. */
-	#replaceCredentialAt(provider: string, index: number, credential: AuthCredential, persist = true): void {
+	#replaceCredentialAt(
+		provider: string,
+		index: number,
+		credential: AuthCredential,
+		persist = true,
+		expectedId?: number,
+	): void {
 		const entries = this.#getStoredCredentials(provider);
 		if (index < 0 || index >= entries.length) return;
 		const target = entries[index];
+		if (expectedId !== undefined && target.id !== expectedId) {
+			throw new Error("Credential authority changed during refresh");
+		}
 		if (persist) this.#store.updateAuthCredential(target.id, credential);
 		const updated = [...entries];
 		updated[index] = { id: target.id, credential };
@@ -4556,6 +4565,7 @@ export class AuthStorage {
 						candidate.selection.index,
 						updated,
 						!refreshedCredentials.persistedByLease,
+						credentialId,
 					);
 				} catch {}
 			}),
@@ -4781,8 +4791,14 @@ export class AuthStorage {
 		}
 		try {
 			const refreshed = await Promise.race([refreshPromise, cancellation.promise]);
+			let effectiveRefreshed = refreshed;
 			if (this.#refreshOAuthCredentialOverride && this.#store.refreshSnapshot) {
 				await this.#store.refreshSnapshot();
+				const accepted = this.#store.listAuthCredentials(provider).find(row => row.id === credentialId)?.credential;
+				if (accepted?.type !== "oauth") {
+					throw new Error("Credential authority changed during refresh");
+				}
+				effectiveRefreshed = accepted;
 			}
 			// Return the FULL authority of the effective credential: rotated
 			// tokens from upstream plus the identity metadata and MCP binding of
@@ -4792,12 +4808,12 @@ export class AuthStorage {
 			// next refresh token to the wrong endpoint — or relabel rotated
 			// tokens with stale identity.
 			const authority: RefreshedOAuthCredentials = {
-				...refreshed,
-				accountId: refreshed.accountId ?? credential.accountId,
-				email: refreshed.email ?? credential.email,
-				projectId: refreshed.projectId ?? credential.projectId,
-				enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
-				mcpBinding: (refreshed as RefreshedOAuthCredentials).mcpBinding ?? credential.mcpBinding,
+				...effectiveRefreshed,
+				accountId: effectiveRefreshed.accountId ?? credential.accountId,
+				email: effectiveRefreshed.email ?? credential.email,
+				projectId: effectiveRefreshed.projectId ?? credential.projectId,
+				enterpriseUrl: effectiveRefreshed.enterpriseUrl ?? credential.enterpriseUrl,
+				mcpBinding: (effectiveRefreshed as RefreshedOAuthCredentials).mcpBinding ?? credential.mcpBinding,
 			};
 			if (refreshLease) {
 				const completeLease = this.#store.completeOAuthRefreshLease?.bind(this.#store);
@@ -4915,6 +4931,7 @@ export class AuthStorage {
 		}
 
 		try {
+			const selectionCredentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
 			let result: { newCredentials: OAuthCredentials; apiKey: string } | null;
 			// The refresh result carries the effective (possibly guard-adopted)
 			// credential's binding; `updated` must persist it or the next refresh
@@ -4925,7 +4942,7 @@ export class AuthStorage {
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
 					selection.credential,
-					this.#getStoredCredentials(provider)[selection.index]?.id,
+					selectionCredentialId,
 					options?.signal,
 				);
 				refreshedAuthority = refreshedCredentials;
@@ -4942,7 +4959,7 @@ export class AuthStorage {
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
 					selection.credential,
-					this.#getStoredCredentials(provider)[selection.index]?.id,
+					selectionCredentialId,
 					options?.signal,
 				);
 				refreshedAuthority = refreshedCredentials;
@@ -4963,7 +4980,13 @@ export class AuthStorage {
 				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
 				mcpBinding: refreshedAuthority.mcpBinding,
 			};
-			this.#replaceCredentialAt(provider, selection.index, updated, !refreshedAuthority.persistedByLease);
+			this.#replaceCredentialAt(
+				provider,
+				selection.index,
+				updated,
+				!refreshedAuthority.persistedByLease,
+				selectionCredentialId,
+			);
 
 			if ((checkUsage && !allowBlocked) || requiresProModel) {
 				const sameAccount = selection.credential.accountId === updated.accountId;
@@ -5590,7 +5613,7 @@ export class AuthStorage {
 				enterpriseUrl: refreshed.enterpriseUrl ?? target.credential.enterpriseUrl,
 				mcpBinding: refreshed.mcpBinding,
 			};
-			this.#replaceCredentialAt(provider, index, updated, !refreshed.persistedByLease);
+			this.#replaceCredentialAt(provider, index, updated, !refreshed.persistedByLease, id);
 			return {
 				id,
 				provider,
