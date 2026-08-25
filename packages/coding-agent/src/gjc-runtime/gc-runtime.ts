@@ -423,6 +423,7 @@ export async function collectGcReport(adapters: GcStoreAdapter[], ctx: GcContext
 export function computeExitCode(report: GcReport): number {
 	if (report.errors.length > 0) return 1;
 	if (!report.dry_run && report.counts.failed > 0) return 1;
+	if (report.empty_delete_receipts?.errors.length) return 1;
 	if (report.disk) {
 		if (report.disk.errors.length > 0) return 1;
 		if (!report.disk.dry_run && report.disk.totals.failed > 0) return 1;
@@ -517,8 +518,14 @@ export async function runGjcGcCommand(
 	if (parsed.emptyDeleteReceipts) {
 		const roots = [...parsed.emptyDeleteRoots];
 		if (parsed.emptyDeleteManifest) {
-			const raw = await fsp.readFile(parsed.emptyDeleteManifest, "utf8");
-			const parsedManifest = JSON.parse(raw) as { roots?: unknown };
+			let parsedManifest: { roots?: unknown };
+			try {
+				const raw = await fsp.readFile(parsed.emptyDeleteManifest, "utf8");
+				parsedManifest = JSON.parse(raw) as { roots?: unknown };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return { stdout: "", stderr: `gjc gc: manifest_invalid: ${message}\n`, status: 2 };
+			}
 			if (!Array.isArray(parsedManifest.roots)) {
 				return { stdout: "", stderr: "gjc gc: manifest_roots_required\n", status: 2 };
 			}
@@ -542,7 +549,7 @@ export async function runGjcGcCommand(
 		report.session_index?.status === "repair_failed";
 	const status = sessionIndexFailed ? 1 : computeExitCode(report);
 	const stdout = parsed.json
-		? `${JSON.stringify(report, null, 2)}\n`
+		? `${JSON.stringify(report, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2)}\n`
 		: `${buildGcReportText(report)}${report.disk ? buildGcDiskReportText(report.disk) : ""}`;
 	return { stdout, stderr: "", status };
 }

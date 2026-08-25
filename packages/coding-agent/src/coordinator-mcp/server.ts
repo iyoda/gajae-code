@@ -1499,11 +1499,11 @@ function publicSdkAcknowledgement(result: RuntimePromptAcknowledgement): Record<
 
 async function listJsonFiles(dir: string): Promise<unknown[]> {
 	const scan = await listCoordinatorJsonFiles(dir);
-	if (scan.capped || scan.skippedEmpty > 0) {
-		logger.warn("Coordinator projection scan skipped debris or hit the parse cap", {
+	if (scan.capped) throw new Error("coordinator_projection_scan_incomplete");
+	if (scan.skippedEmpty > 0 || scan.skippedDebris > 0) {
+		logger.warn("Coordinator projection scan skipped debris", {
 			dir,
 			parsed: scan.parsed,
-			capped: scan.capped,
 			skippedDebris: scan.skippedDebris,
 			skippedEmpty: scan.skippedEmpty,
 		});

@@ -61,7 +61,10 @@ describe("empty .gjc-delete-* latch", () => {
 		await fs.writeFile(path.join(dir, "a.json"), JSON.stringify({ session_id: "a" }));
 		await fs.writeFile(path.join(dir, "b.json"), JSON.stringify({ session_id: "b" }));
 		for (let i = 0; i < COORDINATOR_JSON_SCAN_CAP + 5; i++) {
-			await fs.writeFile(path.join(dir, `.gjc-delete-session-state-lock-${i}.json`), "");
+			await fs.writeFile(
+				path.join(dir, `.gjc-delete-session-state-lock-${i.toString(16).padStart(32, "0")}.json`),
+				"",
+			);
 		}
 		const scan = await listCoordinatorJsonFiles(dir);
 		expect(scan.capped).toBe(false);
@@ -82,7 +85,7 @@ describe("empty .gjc-delete-* latch", () => {
 
 	it("Test 2: leftover empty at reserved name is removed before exchange", async () => {
 		const dir = await tempRoot("gjc-mint-");
-		const reserved = ".gjc-delete-session-state-lock-fixed.json";
+		const reserved = ".gjc-delete-session-state-lock-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.json";
 		await fs.writeFile(path.join(dir, reserved), "");
 		await removeVerifiedEmptyQuarantine(dir, reserved);
 		expect(
@@ -100,7 +103,7 @@ describe("empty .gjc-delete-* latch", () => {
 		const dir = await tempRoot("gjc-reclaim-");
 		const stateFile = path.join(dir, "session.json");
 		const lockFile = `${stateFile}.lock`;
-		const reserved = ".gjc-delete-session-state-lock-forced.json";
+		const reserved = ".gjc-delete-session-state-lock-cccccccc-cccc-cccc-cccc-cccccccccccc.json";
 		await fs.writeFile(stateFile, JSON.stringify({ state: "running" }));
 		await fs.writeFile(path.join(dir, reserved), "");
 		await fs.writeFile(
@@ -148,9 +151,9 @@ describe("empty .gjc-delete-* latch", () => {
 
 	it("Test 4: gc operands keep non-empty/symlink/missing-root and prune only empty prefix", async () => {
 		const root = await tempRoot("gjc-gc-root-");
-		const empty = path.join(root, ".gjc-delete-session-state-lock-dead.json");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-dddddddd-dddd-dddd-dddd-dddddddddddd.json");
 		const live = path.join(root, "live.json");
-		const other = path.join(root, ".gjc-delete-session-state-lock-full.json");
+		const other = path.join(root, ".gjc-delete-session-state-lock-eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.json");
 		await fs.writeFile(empty, "");
 		await fs.writeFile(live, "{}");
 		await fs.writeFile(other, "not-empty");
@@ -172,7 +175,7 @@ describe("empty .gjc-delete-* latch", () => {
 		await fs.symlink(root, linked);
 		const viaLink = await runEmptyDeleteGc({ roots: [linked], prune: false });
 		expect(viaLink.records.some(r => r.reason === "symlink_root")).toBe(true);
-		const empty = path.join(root, ".gjc-delete-session-state-lock-swap.json");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-ffffffff-ffff-ffff-ffff-ffffffffffff.json");
 		await fs.writeFile(empty, "");
 		const collected = await collectEmptyDeleteReceipts(root);
 		expect(collected.find(r => r.path === empty)?.identity).toBeDefined();
@@ -190,6 +193,30 @@ describe("empty .gjc-delete-* latch", () => {
 		const result = await runGjcGcCommand(["--empty-delete-receipts", "--json"], "/tmp", process.env, []);
 		expect(result.status).toBe(2);
 		expect(result.stderr).toContain("empty_delete_receipts_requires_root_or_manifest");
+	});
+
+	it("Test 4b CLI: JSON and text reports include identity-safe empty-delete results", async () => {
+		const root = await tempRoot("gjc-gc-report-");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-11111111-1111-1111-1111-111111111111.json");
+		await fs.writeFile(empty, "");
+		const json = await runGjcGcCommand(["--empty-delete-receipts", "--root", root, "--json"], root, process.env, []);
+		expect(json.status).toBe(0);
+		const parsed = JSON.parse(json.stdout) as {
+			empty_delete_receipts?: { records: Array<{ identity?: { dev: unknown } }> };
+		};
+		expect(parsed.empty_delete_receipts?.records[0]?.identity?.dev).toBeTypeOf("string");
+		const text = await runGjcGcCommand(["--empty-delete-receipts", "--root", root], root, process.env, []);
+		expect(text.status).toBe(0);
+		expect(text.stdout).toContain("Empty .gjc-delete receipts");
+	});
+
+	it("Test 4c CLI: malformed manifest is a structured usage error", async () => {
+		const root = await tempRoot("gjc-gc-manifest-");
+		const manifest = path.join(root, "manifest.json");
+		await fs.writeFile(manifest, "{");
+		const result = await runGjcGcCommand(["--empty-delete-receipts", "--manifest", manifest], root, process.env, []);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("manifest_invalid");
 	});
 
 	it("Test 5: atomic write leaves no 0-byte canonical on crash-before-rename", async () => {

@@ -88,6 +88,25 @@ export function buildGcReportText(report: GcReport): string {
 		lines.push("");
 	}
 
+	if (report.empty_delete_receipts) {
+		const empty = report.empty_delete_receipts;
+		lines.push(`Empty .gjc-delete receipts (${empty.records.length})`);
+		if (empty.records.length === 0) {
+			lines.push("  (none)");
+		} else {
+			for (const record of empty.records) {
+				const action = record.action === "would_remove" ? "would remove" : record.action;
+				lines.push(`  [${action}] ${record.path} :: ${record.reason}`);
+			}
+		}
+		for (const error of empty.errors) lines.push(`  [error] ${error}`);
+		lines.push(
+			`  Summary: roots=${empty.roots.length} would_remove=${empty.would_remove} removed=${empty.removed} ` +
+				`kept=${empty.kept} skipped=${empty.skipped} errors=${empty.errors.length}`,
+		);
+		lines.push("");
+	}
+
 	if (report.warnings.length > 0) {
 		lines.push(`Warnings (${report.warnings.length})`);
 		for (const warning of report.warnings) lines.push(`  [${warning.store}/${warning.scope}] ${warning.message}`);

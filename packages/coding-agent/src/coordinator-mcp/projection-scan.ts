@@ -5,7 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-/** Post-filter parse-candidate cap. Exhaustion returns a bounded result, never unreadable. */
+/** Post-filter parse-candidate cap. Exhaustion returns an explicit incomplete result. */
 export const COORDINATOR_JSON_SCAN_CAP = 10_000;
 
 export interface ProjectionScanStat {
