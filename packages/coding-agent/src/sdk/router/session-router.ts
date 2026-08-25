@@ -389,6 +389,13 @@ async function lstatEndpoint(
 	if (!stat || !stat.isFile()) return undefined;
 	const identity = await fs.lstat(file, { bigint: true }).catch(() => undefined);
 	if (!identity || !identity.isFile()) return undefined;
+	if (
+		stat.size !== Number(identity.size) ||
+		stat.ino !== Number(identity.ino) ||
+		Math.abs(stat.mtimeMs - Number(identity.mtimeNs) / 1_000_000) > 0.0005 ||
+		Math.abs(stat.ctimeMs - Number(identity.ctimeNs) / 1_000_000) > 0.0005
+	)
+		return undefined;
 	return { mtimeMs: stat.mtimeMs, mtimeNs: identity.mtimeNs, ctimeNs: identity.ctimeNs, size: identity.size, ino: identity.ino };
 }
 
