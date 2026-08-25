@@ -394,7 +394,9 @@ async function verifyMcpQuarantine(): Promise<GateResult> {
 	const missingPrivateBlocks = REQUIRED_PRIVATE_EXPORT_BLOCKS.filter(key => exportsRecord[key] !== null);
 	const builtinRegistry = await readText("packages/coding-agent/src/slash-commands/builtin-registry.ts");
 	const acpBuiltins = await readText("packages/coding-agent/src/slash-commands/acp-builtins.ts");
-	const exposesMcpBuiltin = /name:\s*["']mcp["']/.test(builtinRegistry);
+	// Only a root-level slash-command entry is public. Nested subcommands such as
+	// `/aside mcp` are intentionally allowed and must not trip the quarantine gate.
+	const exposesMcpBuiltin = /^\t\tname:\s*["']mcp["']/m.test(builtinRegistry);
 	const importsMcpBuiltinHandler = builtinRegistry.includes("handleMcpAcp");
 	const acpReferencesMcpHandler = acpBuiltins.includes("handleMcpAcp");
 	const acpAdvertisesMcpCommand = /name:\s*["']mcp["']/.test(acpBuiltins);
