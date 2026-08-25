@@ -265,6 +265,7 @@ describe("model selector profiles", () => {
 		};
 		registry.getModelProfiles = () => new Map([[alwaysProfile.name, alwaysProfile]]);
 		registry.getModelProfile = (name: string) => (name === alwaysProfile.name ? alwaysProfile : undefined);
+		registry.getConfiguredProviderIds = () => ["litellm"];
 		registry.getApiKeyForProvider = (async (provider: string) =>
 			provider === "provider-a" ? "direct-key" : undefined) as typeof registry.getApiKeyForProvider;
 		const selector = createSelector(() => {}, {
