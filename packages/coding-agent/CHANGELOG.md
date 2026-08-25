@@ -28,9 +28,13 @@
 - Notification adapters can now opt into one live representation per native effect: adapters that accept a positioned event are excluded from its matching raw fan-out, while ordinary direct SDK and raw-only legacy subscribers retain their existing delivery. Telegram opts in, preventing turn output, tool activity, and reasoning summaries from rendering twice after #4570; acknowledged terminal shutdown delivery is unchanged.
 - Lean notifications no longer replay a retained completion receipt at idle when identical text was already delivered immediately before an autonomous `ask`; distinct receipts and other settlement windows remain preserved.
 
+### Breaking Changes
+
+- `gjc auth-gateway serve` now requires `--provider=<id>`; existing unscoped invocations must choose the provider whose source-backed model catalog and broker credential the gateway should expose.
+
 ### Added
 
-- `gjc auth-gateway serve` now requires `--provider`, verifies an enabled broker credential before binding, and reports only redacted provider-scoped status/check information.
+- `gjc auth-gateway serve` verifies an enabled broker credential before binding and reports only redacted provider-scoped status/check information.
 
 ## [0.15.2] - 2026-08-25
 
