@@ -413,6 +413,7 @@ export class ModelSelectorComponent extends Container {
 	#providerAuthById = new Map<string, boolean>();
 	#bareProfileAuthByName = new Map<string, boolean>();
 	#providerAuthPending: boolean = false;
+	#providerAuthRefreshGeneration = 0;
 	#presetLoginHint?: string;
 	#authSessionId?: string;
 	#imageRoleFilter: boolean = false;
@@ -526,6 +527,7 @@ export class ModelSelectorComponent extends Container {
 				if (this.#disposed) return;
 				if (this.#viewMode === "presets") {
 					this.#clampPresetCursor();
+					void this.#refreshProviderAuth();
 					this.#renderPresetLanding();
 					this.#tui.requestRender();
 					return;
@@ -1389,6 +1391,7 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	async #refreshProviderAuth(): Promise<void> {
+		const refreshGeneration = ++this.#providerAuthRefreshGeneration;
 		const providers = new Set<string>();
 		for (const profiles of this.#getPresetGroups().values()) {
 			for (const profile of profiles) {
@@ -1425,6 +1428,7 @@ export class ModelSelectorComponent extends Container {
 					}
 				}),
 			);
+			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#providerAuthById = new Map(entries);
 			const profileAuthEntries = await Promise.all(
 				[...this.#getPresetGroups().values()].flat().map(async profile => {
@@ -1461,8 +1465,10 @@ export class ModelSelectorComponent extends Container {
 					return [profile.name, available.every(Boolean)] as const;
 				}),
 			);
+			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#bareProfileAuthByName = new Map(profileAuthEntries);
 		} finally {
+			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#providerAuthPending = false;
 			this.#renderPresetLanding();
 			this.#tui.requestRender();

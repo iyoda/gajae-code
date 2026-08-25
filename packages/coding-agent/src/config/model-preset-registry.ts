@@ -13,6 +13,7 @@ import {
 } from "./internal/model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
+import { splitSelectorThinkingSuffix } from "../thinking";
 
 export const MODEL_PRESET_REGISTRY_CONTRACT_VERSION = "1.0.0";
 export const DEFAULT_MODEL_PRESET_REGISTRY_URL =
@@ -713,6 +714,11 @@ function assertContentDescriptor(
 	if (sha256(bytes) !== descriptor.sha256) throw new Error(`${description} digest mismatch.`);
 }
 
+function selectorIdentityCandidates(selector: string): string[] {
+	const suffix = splitSelectorThinkingSuffix(selector);
+	return suffix.thinkingLevel === undefined ? [selector] : [selector, suffix.selector];
+}
+
 function assertProfilePresetReferences(
 	profiles: ModelPresetRegistryProfiles,
 	presets: ModelPresetRegistryPresets,
@@ -723,14 +729,16 @@ function assertProfilePresetReferences(
 	for (const profile of profiles.profiles) {
 		for (const binding of Object.values(profile.roleBindings)) {
 			for (const selector of Array.isArray(binding) ? binding : [binding]) {
-				const base = selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, "");
-				const slash = base.indexOf("/");
-				if (slash >= 0) {
-					if (!exact.has(base) && !dynamic.has(base.slice(0, slash)))
-						throw new Error(`Registry profile ${profile.id} references an unknown model.`);
-				} else if (!bare.has(base)) {
+				const identities = selectorIdentityCandidates(selector);
+				const exactMatch = identities.find(identity => exact.has(identity));
+				if (exactMatch) continue;
+				const dynamicMatch = identities.find(identity => {
+					const slash = identity.indexOf("/");
+					return slash >= 0 && dynamic.has(identity.slice(0, slash));
+				});
+				if (dynamicMatch) continue;
+				if (!identities.some(identity => bare.has(identity)))
 					throw new Error(`Registry profile ${profile.id} references an unknown model alias.`);
-				}
 			}
 		}
 	}
@@ -1223,10 +1231,11 @@ function retainRemoved(
 	for (const profile of profilesWhosePreviousSelectorsMustRemain) {
 		for (const binding of Object.values(profile.roleBindings)) {
 			for (const selector of Array.isArray(binding) ? binding : [binding]) {
-				const base = selector.replace(/:(?:minimal|low|medium|high|xhigh|max)$/, "");
-				retainedSelectors.add(base);
-				const slash = base.indexOf("/");
-				if (slash >= 0) retainedSelectorProviders.add(base.slice(0, slash));
+				for (const identity of selectorIdentityCandidates(selector)) {
+					retainedSelectors.add(identity);
+					const slash = identity.indexOf("/");
+					if (slash >= 0) retainedSelectorProviders.add(identity.slice(0, slash));
+				}
 			}
 		}
 	}

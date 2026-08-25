@@ -407,6 +407,22 @@ describe("signed model preset registry", () => {
 		expect(merged.get("remote")?.modelMapping.default).toBe("user/model");
 	});
 
+	test("accepts exact registry model ids that end in a thinking-level token", async () => {
+		const data = await fixture();
+		const exactId = "remote-model:minimal";
+		const registry = signedRegistry(
+			data.privateKey,
+			1,
+			[registryProfile("remote", `provider/${exactId}`)],
+			[registryPreset(exactId)],
+		);
+
+		await expect(accept(data, registry)).resolves.toMatchObject({ status: "updated", revision: 1 });
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).profiles.get("remote")?.modelMapping.default).toBe(
+			`provider/${exactId}`,
+		);
+	});
+
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")]));
