@@ -55,9 +55,12 @@ describe("ModelRegistry", () => {
 	let modelsJsonPath: string;
 	let cacheDbPath: string;
 	let authStorage: AuthStorage;
+	let previousPresetRegistryDisabled: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
+		previousPresetRegistryDisabled = Bun.env.GJC_MODEL_PRESET_REGISTRY_DISABLED;
+		Bun.env.GJC_MODEL_PRESET_REGISTRY_DISABLED = "true";
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -68,6 +71,8 @@ describe("ModelRegistry", () => {
 	afterEach(() => {
 		resetSettingsForTest();
 		authStorage.close();
+		if (previousPresetRegistryDisabled === undefined) delete Bun.env.GJC_MODEL_PRESET_REGISTRY_DISABLED;
+		else Bun.env.GJC_MODEL_PRESET_REGISTRY_DISABLED = previousPresetRegistryDisabled;
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
