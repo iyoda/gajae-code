@@ -501,10 +501,11 @@ describe("signed model preset registry", () => {
 				agentDir: data.agentDir,
 				manifestUrl,
 				timeoutMs: 5,
-				fetch: ((_input, init) =>
-					new Promise((_resolve, reject) =>
-						init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }),
-					)) as typeof fetch,
+				fetch: (async (_input, init) => {
+					const pending = Promise.withResolvers<Response>();
+					init?.signal?.addEventListener("abort", () => pending.reject(init.signal?.reason), { once: true });
+					return pending.promise;
+				}) as typeof fetch,
 			}),
 		).rejects.toThrow(/timed out/i);
 		await expect(

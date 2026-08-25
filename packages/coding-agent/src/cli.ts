@@ -9,6 +9,7 @@ import { Args, type CliConfig, Command, type CommandEntry, run } from "@gajae-co
 import { APP_NAME, formatBunRuntimeError, MIN_BUN_VERSION, VERSION } from "@gajae-code/utils/dirs";
 import { runFixtureReport } from "./cli/fixture-report";
 import { ROOT_LAUNCH_FLAGS } from "./cli/root-flags";
+import ModelPresets from "./commands/model-presets";
 import QuickLane from "./commands/quick-lane";
 import { smokeTestTabWorker } from "./tools/browser/tab-worker-smoke";
 
@@ -54,7 +55,7 @@ export const commands: CommandEntry[] = [
 	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "web-search", aliases: ["q"], load: () => import("./commands/web-search").then(m => m.default) },
 	{ name: "local-provider", load: () => import("./commands/local-provider").then(m => m.default) },
-	{ name: "model-presets", load: () => import("./commands/model-presets").then(m => m.default) },
+	{ name: "model-presets", load: async () => ModelPresets },
 	{ name: "mcp-serve", load: () => import("./commands/mcp-serve").then(m => m.default) },
 	{ name: "mcp", load: () => import("./commands/mcp").then(m => m.default) },
 	{

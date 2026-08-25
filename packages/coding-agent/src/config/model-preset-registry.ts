@@ -1838,7 +1838,7 @@ export function refreshModelPresetRegistryInBackground(
 			cacheHealth: current.cacheHealth,
 		});
 	let publishedFingerprint = publicationFingerprint(status);
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let timer: Timer | undefined;
 	const schedule = (delayMs: number): void => {
 		if (cancelled) return;
 		timer = setTimeout(() => {
