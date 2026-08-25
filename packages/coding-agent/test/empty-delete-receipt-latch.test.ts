@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { writeCoordinatorAtomic } from "../src/coordinator-mcp/durability";
 import { COORDINATOR_JSON_SCAN_CAP, listCoordinatorJsonFiles } from "../src/coordinator-mcp/projection-scan";
 import { collectEmptyDeleteReceipts, runEmptyDeleteGc } from "../src/gjc-runtime/empty-delete-gc";
 import { runGjcGcCommand } from "../src/gjc-runtime/gc-runtime";
@@ -220,7 +221,6 @@ describe("empty .gjc-delete-* latch", () => {
 	});
 
 	it("Test 5: atomic write leaves no 0-byte canonical on crash-before-rename", async () => {
-		const { writeCoordinatorAtomic } = await import("../src/coordinator-mcp/durability");
 		const dir = await tempRoot("gjc-atomic-");
 		const file = path.join(dir, "canonical.json");
 		await writeCoordinatorAtomic(file, '{"ok":true}\n');
