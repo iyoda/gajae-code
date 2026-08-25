@@ -1497,7 +1497,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 
 			// Emit partial update so the editor can embed the live terminal card.
-			onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+			try {
+				onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+			} catch (error) {
+				await handle.kill();
+				await handle.release();
+				if (clientAdmission) ownedManager?.releaseCapacity(clientAdmission);
+				throw error;
+			}
 
 			// The remote terminal is released exactly once, by whichever path settles
 			// it: a foreground return, a folded background completion, or a failure.
@@ -1935,9 +1942,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								ptyLabel,
 								async () => {
 									const outcome = await controls.terminalCompletion;
+									ptyManager.appendOutput(ptyJobId, this.#formatResultOutput(outcome));
 									const completed = this.#buildCompletedResult(outcome, timeoutSec, { requestedTimeoutSec });
 									const text = this.#extractTextResult(completed);
-									ptyManager.appendOutput(ptyJobId, text);
 									if (!ptyBackgrounded) ptyManager.cancel(ptyJobId);
 									return text;
 								},
@@ -2000,6 +2007,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						lastPtyFoldKeyTime = 0;
 						return this.session.requestForegroundBashBackground?.() ?? false;
 					},
+				}).catch(error => {
+					if (ptyAdmission) ownedManager?.releaseCapacity(ptyAdmission);
+					throw error;
 				})
 			: await executeBash(command, {
 					cwd: commandCwd,
