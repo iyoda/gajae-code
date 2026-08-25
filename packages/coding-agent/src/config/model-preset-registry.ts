@@ -35,7 +35,7 @@ const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const SELECTOR_PATTERN = /^[^\s\p{Cc}\p{Cf}]+$/u;
 const PRESET_IDENTIFIER_PATTERN = /^[^\s\p{Cc}\p{Cf}]+$/u;
 const SAFE_TEXT_PATTERN = /^[^\p{Cc}\p{Cf}]+$/u;
-const CONTEXT_PROMOTION_TARGET_PATTERN = /^[^\s\p{Cc}\p{Cf}]+\/[^\s\p{Cc}\p{Cf}]+$/u;
+const CONTEXT_PROMOTION_TARGET_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[^\s\p{Cc}\p{Cf}]+$/u;
 const ED25519_SIGNATURE_BASE64_PATTERN = /^[A-Za-z0-9+/]{86}==$/;
 
 function isCanonicalEd25519SignatureBase64(value: string): boolean {
@@ -312,7 +312,7 @@ const LongContextPricingSchema = z.object({ threshold: z.number().int().positive
 const RegistryPresetSchema = z
 	.object({
 		id: z.string().min(1).max(192).regex(PRESET_IDENTIFIER_PATTERN),
-		provider: z.string().min(1).max(192).regex(PRESET_IDENTIFIER_PATTERN),
+		provider: z.string().min(1).max(192).regex(PROFILE_ID_PATTERN),
 		name: z.string().min(1).max(256).regex(SAFE_TEXT_PATTERN),
 		api: z.enum([
 			"anthropic-messages",

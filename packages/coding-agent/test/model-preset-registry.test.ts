@@ -451,6 +451,10 @@ describe("signed model preset registry", () => {
 			{ ...registryPreset("spoof"), contextPromotionTarget: "provider/\u202Emodel" },
 		]);
 		await expect(accept(data, promotionSpoof)).rejects.toThrow(/schema rejected/i);
+		const slashedProvider = signedRegistry(data.privateKey, 1, undefined, [
+			{ ...registryPreset("model"), provider: "foo/bar" },
+		]);
+		await expect(accept(data, slashedProvider)).rejects.toThrow(/schema rejected/i);
 		const confusable = signedRegistry(data.privateKey, 1, undefined, [
 			{ ...registryPreset("model"), provider: "scope" },
 			{ ...registryPreset("mоdel"), provider: "scope" },
