@@ -796,6 +796,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		resolvedEnv?: Record<string, string>;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		startBackgrounded: boolean;
+		onCompletion?: () => void;
 		/** Immutable attempt-scoped tool call id, when executed via a tool call. */
 		toolCallId?: string;
 	}): ManagedBashJobHandle {
@@ -866,12 +867,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
+					options.onCompletion?.();
 					completion.resolve({ kind: "completed", result: finalResult });
 					await reportProgress(finalText, completedDetails(jobId));
 					return finalText;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
+					options.onCompletion?.();
 					completion.resolve({ kind: "failed", error, result: executionResult });
 					await reportProgress(message, failedDetails(jobId));
 					throw error;
@@ -1378,6 +1381,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				? this.#resolveAutoBackgroundWaitMs(timeoutMs)
 				: timeoutMs + 1_000;
 			const startBackgrounded = autoBackgroundWaitMs === 0;
+			let managedForegroundSettled = false;
 			const job = this.#startManagedBashJob({
 				command,
 				commandCwd,
@@ -1389,6 +1393,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				resolvedEnv,
 				onUpdate,
 				startBackgrounded,
+				onCompletion: () => {
+					managedForegroundSettled = true;
+				},
 				toolCallId,
 			});
 			if (startBackgrounded) {
@@ -1403,7 +1410,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			// after a failed fold) share this flag, so a race cannot double-settle.
 			let foregroundSettled = false;
 			const settleForeground = (): "resolved" | "already-settled" => {
-				if (foregroundSettled) return "already-settled";
+				if (foregroundSettled || managedForegroundSettled) return "already-settled";
 				foregroundSettled = true;
 				return "resolved";
 			};
