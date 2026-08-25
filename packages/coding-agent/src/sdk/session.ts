@@ -2191,7 +2191,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						),
 					};
 					if (Object.keys(mergedConfigs).length > 0) {
-						nextManager = new MCPManager(to, null, { sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs") });
+						nextManager = new MCPManager(to, null, {
+							sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+							agentDir,
+							settings,
+						});
 						nextManager.setAuthStorage(authStorage);
 						wireMcpManagerCallbacks(nextManager);
 						const result = await nextManager.connectServers(mergedConfigs, mergedSources as never);
@@ -2832,6 +2836,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const owned = new MCPManager(cwd, null, {
 				toolsOnly: true,
 				sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+				agentDir,
+				settings,
 				...(lifecycleMcpStartupTimeoutMs !== undefined
 					? { maxStartupTimeoutMs: lifecycleMcpStartupTimeoutMs }
 					: {}),
@@ -2924,7 +2930,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					),
 				};
 				if (Object.keys(mergedConfigs).length > 0) {
-					const owned = new MCPManager(cwd, null, { sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs") });
+					const owned = new MCPManager(cwd, null, {
+						sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+						agentDir,
+						settings,
+					});
 					owned.setAuthStorage(authStorage);
 					cleanupOwnedMcpManager = () => owned.disconnectAll();
 					try {

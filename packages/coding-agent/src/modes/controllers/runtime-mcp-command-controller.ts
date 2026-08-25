@@ -687,6 +687,8 @@ export class MCPCommandController {
 			this.ctx.mcpManager ??
 			new MCPManager(getProjectDir(), null, {
 				sharedPoolIdleMs: this.ctx.settings.get("mcp.sharedPoolIdleMs"),
+				agentDir: this.ctx.session.getSessionAgentDir(),
+				settings: this.ctx.settings,
 			});
 		if (!this.ctx.mcpManager) manager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 		await manager.withPreparedLease(testName, config, async () => {});
@@ -1157,6 +1159,8 @@ export class MCPCommandController {
 				this.ctx.mcpManager ??
 				new MCPManager(getProjectDir(), null, {
 					sharedPoolIdleMs: this.ctx.settings.get("mcp.sharedPoolIdleMs"),
+					agentDir: this.ctx.session.getSessionAgentDir(),
+					settings: this.ctx.settings,
 				});
 			if (!this.ctx.mcpManager) manager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 			await manager.withPreparedLease(
