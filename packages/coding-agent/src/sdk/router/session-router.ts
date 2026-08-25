@@ -497,6 +497,7 @@ export class SessionRouter {
 	#stopTimer: (() => void) | undefined;
 	#reconcileTail: Promise<void> = Promise.resolve();
 	#reconcilePending: { readonly runEpoch: number; force: boolean } | undefined;
+	#attachmentTails = new Map<string, Promise<boolean>>();
 	/**
 	 * Set when a live indexed session failed to attach; keeps the idle gate
 	 * from parking retries until the 30s sweep (#4689 review).
@@ -694,7 +695,7 @@ export class SessionRouter {
 		this.#adopted.clear();
 		// Provider notification work is detached and bounded independently; core
 		// shutdown waits only for Router reconciliation and client close.
-		const pending = Promise.allSettled([this.#reconcileTail, ...shutdownTasks]);
+		const pending = Promise.allSettled([this.#reconcileTail, ...this.#attachmentTails.values(), ...shutdownTasks]);
 		const outcome = await Promise.race([
 			pending.then(results => ({ kind: "settled" as const, results })),
 			Bun.sleep(5_000).then(() => ({ kind: "timeout" as const })),
@@ -1345,6 +1346,26 @@ export class SessionRouter {
 		deferPublication = false,
 		deferReplay = false,
 	): Promise<boolean> {
+		const previous = this.#attachmentTails.get(indexed.sessionId) ?? Promise.resolve(true);
+		const task = previous
+			.catch(() => false)
+			.then(() => this.#attachUnserialized(indexed, runEpoch, resolvedEndpoint, skipReplay, deferPublication, deferReplay));
+		this.#attachmentTails.set(indexed.sessionId, task);
+		try {
+			return await task;
+		} finally {
+			if (this.#attachmentTails.get(indexed.sessionId) === task) this.#attachmentTails.delete(indexed.sessionId);
+		}
+	}
+
+	async #attachUnserialized(
+		indexed: IndexedSession,
+		runEpoch: number,
+		resolvedEndpoint?: SdkSessionEndpoint,
+		skipReplay = false,
+		deferPublication = false,
+		deferReplay = false,
+	): Promise<boolean> {
 		const retirementVersion = this.#retirementVersions.get(indexed.sessionId) ?? 0;
 		const retirement = this.#retirements.get(indexed.sessionId);
 		if (retirement) await retirement;
@@ -1364,7 +1385,7 @@ export class SessionRouter {
 		const retirementAfterValidation = this.#retirements.get(indexed.sessionId);
 		if (retirementAfterValidation) await retirementAfterValidation;
 		if ((this.#retirementVersions.get(indexed.sessionId) ?? 0) !== retirementVersion)
-			return await this.#attach(indexed, runEpoch, undefined, skipReplay, deferPublication, deferReplay);
+			return await this.#attachUnserialized(indexed, runEpoch, undefined, skipReplay, deferPublication, deferReplay);
 		if (!this.#running(runEpoch)) return false;
 		if (!endpoint) return false;
 		const existing = this.#sessions.get(indexed.sessionId);
@@ -1424,7 +1445,7 @@ export class SessionRouter {
 			await client.close().catch(() => undefined);
 			const currentRetirement = this.#retirements.get(indexed.sessionId);
 			if (currentRetirement) await currentRetirement;
-			return await this.#attach(indexed, runEpoch, undefined, skipReplay, deferPublication, deferReplay);
+			return await this.#attachUnserialized(indexed, runEpoch, undefined, skipReplay, deferPublication, deferReplay);
 		}
 		let attached: AttachedSession | undefined;
 		const barrier: ReplayBarrier = { held: undefined, detached: false, failed: false };

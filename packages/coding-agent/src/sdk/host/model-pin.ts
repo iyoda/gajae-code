@@ -18,6 +18,7 @@ export interface SdkHostModelResolveContext {
 
 /** Registry loader owned by the SDK host, not by machine-facing adapters. */
 export type SdkHostModelRegistryLoader = ((context?: SdkHostModelResolveContext) => ModelRegistry | Promise<ModelRegistry>) & {
+	acquire?: (context?: SdkHostModelResolveContext) => () => void;
 	dispose?: () => Promise<void>;
 };
 
@@ -40,27 +41,48 @@ export function createSdkHostModelRegistryLoader(
 	loadSettings?: (context?: SdkHostModelResolveContext) => Promise<Pick<Settings, "get" | "getGlobal">>,
 ): SdkHostModelRegistryLoader {
 	const cachedRegistries = new Map<string, Promise<OwnedModelRegistry>>();
+	const activeScopes = new Map<string, number>();
+	const registryAgentDir = path.resolve(path.dirname(modelsPath ?? "."));
+	let disposed = false;
+	const scopeKeyFor = (context?: SdkHostModelResolveContext): string =>
+		context?.cwd === undefined ? "" : path.resolve(context.cwd);
 	const disposeEntry = async (entry: Promise<OwnedModelRegistry>): Promise<void> => {
-		const owned = await entry;
-		owned.registry.dispose();
-		owned.storage.close();
+		try {
+			const owned = await entry;
+			owned.registry.dispose();
+			owned.storage.close();
+		} catch {
+			// Initialization failures close their storage before rejecting. Disposal is
+			// best-effort and must not block broker shutdown on one broken scope.
+		}
 	};
 	const loadRegistry = async (context?: SdkHostModelResolveContext): Promise<ModelRegistry> => {
-		const scopeKey = context?.cwd ?? "";
+		if (disposed) throw new Error("SDK host model registry loader is disposed.");
+		const scopeKey = scopeKeyFor(context);
 		let cachedRegistry = cachedRegistries.get(scopeKey);
 		if (cachedRegistry === undefined) {
-			const registryAgentDir = path.resolve(path.dirname(modelsPath ?? "."));
-			const initializing = Promise.all([discoverStorage(), loadSettings?.(context)]).then(
-				([storage, registrySettings]) => ({
-					storage,
-					registry: new ModelRegistry(storage, modelsPath, registrySettings, { agentDir: registryAgentDir }),
-				}),
-			);
+			const initializing = discoverStorage().then(async storage => {
+				try {
+					const registrySettings = await loadSettings?.(context);
+					return {
+						storage,
+						registry: new ModelRegistry(storage, modelsPath, registrySettings, {
+							agentDir: registryAgentDir,
+							automaticRefresh: false,
+						}),
+					};
+				} catch (error) {
+					storage.close();
+					throw error;
+				}
+			});
 			cachedRegistries.set(scopeKey, initializing);
 			cachedRegistry = initializing;
 			while (cachedRegistries.size > MAX_CACHED_MODEL_REGISTRIES) {
-				const oldest = cachedRegistries.keys().next().value as string | undefined;
-				if (oldest === undefined || oldest === scopeKey) break;
+				const oldest = [...cachedRegistries.keys()].find(
+					key => key !== scopeKey && (activeScopes.get(key) ?? 0) === 0,
+				);
+				if (oldest === undefined) break;
 				const evicted = cachedRegistries.get(oldest);
 				cachedRegistries.delete(oldest);
 				if (evicted) void disposeEntry(evicted).catch(() => undefined);
@@ -82,9 +104,23 @@ export function createSdkHostModelRegistryLoader(
 	};
 	return Object.assign(loadRegistry, {
 		dispose: async (): Promise<void> => {
+			disposed = true;
 			const entries = [...cachedRegistries.values()];
 			cachedRegistries.clear();
-			await Promise.allSettled(entries.map(entry => disposeEntry(entry)));
+			const settled = Promise.allSettled(entries.map(entry => disposeEntry(entry)));
+			await Promise.race([settled, Bun.sleep(1_000)]);
+		},
+		acquire: (context?: SdkHostModelResolveContext): (() => void) => {
+			const scopeKey = scopeKeyFor(context);
+			activeScopes.set(scopeKey, (activeScopes.get(scopeKey) ?? 0) + 1);
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				const next = (activeScopes.get(scopeKey) ?? 1) - 1;
+				if (next <= 0) activeScopes.delete(scopeKey);
+				else activeScopes.set(scopeKey, next);
+			};
 		},
 	});
 }
@@ -106,19 +142,24 @@ export async function resolveSdkHostModel(
 	if (raw === undefined || raw === null) return { ok: true, model: null };
 	const requested = typeof raw === "string" ? raw : "";
 	const echoed = requested.trim().slice(0, MAX_ECHOED_MODEL_LENGTH);
-	const registry = await loadRegistry(context);
-	const resolved: ResolveCliModelResult = resolveCliModel({ cliModel: requested, modelRegistry: registry });
-	if (!resolved.model)
+	const release = loadRegistry.acquire?.(context) ?? (() => {});
+	try {
+		const registry = await loadRegistry(context);
+		const resolved: ResolveCliModelResult = resolveCliModel({ cliModel: requested, modelRegistry: registry });
+		if (!resolved.model)
+			return {
+				ok: false,
+				reason: "unknown_model",
+				model: echoed,
+				error: resolved.error ?? "No models available. Check your installation or add models to models.json.",
+			};
 		return {
-			ok: false,
-			reason: "unknown_model",
-			model: echoed,
-			error: resolved.error ?? "No models available. Check your installation or add models to models.json.",
+			ok: true,
+			model: formatModelSelectorValue(formatModelString(resolved.model), resolved.thinkingLevel),
 		};
-	return {
-		ok: true,
-		model: formatModelSelectorValue(formatModelString(resolved.model), resolved.thinkingLevel),
-	};
+	} finally {
+		release();
+	}
 }
 
 /** Default resolver used by the SDK broker host. */

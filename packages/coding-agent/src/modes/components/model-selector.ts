@@ -399,6 +399,7 @@ export class ModelSelectorComponent extends Container {
 	#closeAfterAssignment = false;
 	#unsubscribeCatalogChanged: () => void = () => {};
 	#unsubscribeProviderOrderChanged: () => void = () => {};
+	#unsubscribeAuthGeneration: () => void = () => {};
 	#disposed = false;
 	/** Standalone smart-routing entry: cancel closes the selector instead of falling back to the preset landing. */
 	#smartRoutingOnly = false;
@@ -546,6 +547,11 @@ export class ModelSelectorComponent extends Container {
 			panel.updateProviderOrderHint(this.#providerOrderHintFor(panel.getProviderOrder()));
 			this.#tui.requestRender();
 		});
+		this.#unsubscribeAuthGeneration =
+			this.#modelRegistry.authStorage?.onGenerationChanged?.(() => {
+				if (this.#disposed || this.#viewMode !== "presets") return;
+				void this.#refreshProviderAuth();
+			}) ?? (() => {});
 
 		// Load models and do initial render
 		this.#loadModels().then(() => {
@@ -580,8 +586,10 @@ export class ModelSelectorComponent extends Container {
 	override dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#providerAuthRefreshGeneration++;
 		this.#unsubscribeCatalogChanged();
 		this.#unsubscribeProviderOrderChanged();
+		this.#unsubscribeAuthGeneration();
 		super.dispose();
 	}
 
@@ -1428,7 +1436,7 @@ export class ModelSelectorComponent extends Container {
 					}
 				}),
 			);
-			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
+			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#providerAuthById = new Map(entries);
 			const profileAuthEntries = await Promise.all(
 				[...this.#getPresetGroups().values()].flat().map(async profile => {
@@ -1465,10 +1473,10 @@ export class ModelSelectorComponent extends Container {
 					return [profile.name, available.every(Boolean)] as const;
 				}),
 			);
-			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
+			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#bareProfileAuthByName = new Map(profileAuthEntries);
 		} finally {
-			if (refreshGeneration !== this.#providerAuthRefreshGeneration) return;
+			if (this.#disposed || this.#viewMode !== "presets" || refreshGeneration !== this.#providerAuthRefreshGeneration) return;
 			this.#providerAuthPending = false;
 			this.#renderPresetLanding();
 			this.#tui.requestRender();
@@ -1688,6 +1696,7 @@ export class ModelSelectorComponent extends Container {
 		this.#smartRoutingPanel = undefined;
 		this.#viewMode = "presets";
 		this.#presetCursor = Math.min(this.#presetCursor, Math.max(0, this.#getPresetRows().length - 1));
+		void this.#refreshProviderAuth();
 		this.#renderPresetLanding();
 		this.#tui.requestRender();
 	}

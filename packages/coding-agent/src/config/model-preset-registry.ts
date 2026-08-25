@@ -1215,6 +1215,12 @@ function retainRemoved(
 	);
 	const nextProfilesById = new Map(profiles.profiles.map(profile => [profile.id, profile]));
 	const retainedProfiles = [...previousProfilesById.values()].filter(profile => !nextProfiles.has(profile.id));
+	const previousPresetSelectors = new Set(
+		[...previous.retainedPresets, ...previous.presets.presets].flatMap(preset => [
+			`${preset.provider}/${preset.id}`,
+			preset.id,
+		]),
+	);
 	const retainedSelectors = new Set<string>();
 	const retainedSelectorProviders = new Set<string>();
 	const profilesWhosePreviousSelectorsMustRemain = [
@@ -1231,7 +1237,12 @@ function retainRemoved(
 	for (const profile of profilesWhosePreviousSelectorsMustRemain) {
 		for (const binding of Object.values(profile.roleBindings)) {
 			for (const selector of Array.isArray(binding) ? binding : [binding]) {
-				for (const identity of selectorIdentityCandidates(selector)) {
+				const identities = selectorIdentityCandidates(selector);
+				const retentionIdentities =
+					identities.length === 2 && previousPresetSelectors.has(identities[0]!)
+						? [identities[0]!]
+						: [identities[identities.length - 1]!];
+				for (const identity of retentionIdentities) {
 					retainedSelectors.add(identity);
 					const slash = identity.indexOf("/");
 					if (slash >= 0) retainedSelectorProviders.add(identity.slice(0, slash));
