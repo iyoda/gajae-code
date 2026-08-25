@@ -1379,7 +1379,12 @@ export class ModelSelectorComponent extends Container {
 				try {
 					if (resolveProxyMode(this.#settings) === "always") {
 						const proxyProvider = tryResolveProxyProviderId(this.#settings);
-						if (proxyProvider === undefined || this.#isProviderAuthenticated(proxyProvider) !== true)
+						const configuredProviders = this.#modelRegistry.getConfiguredProviderIds?.() ?? [];
+						if (
+							proxyProvider === undefined ||
+							this.#isProviderAuthenticated(proxyProvider) !== true ||
+							!configuredProviders.includes(proxyProvider)
+						)
 							return false;
 					}
 				} catch {
