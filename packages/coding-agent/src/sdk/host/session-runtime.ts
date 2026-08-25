@@ -1059,7 +1059,6 @@ function createQuerySurface(
 		if (profile.source !== "user" && inspectProxyProviderId(profileSettings).status === "invalid")
 			return { available: false };
 		const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
-		const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
 		const proxyAuthenticated = proxyProvider !== undefined && authenticatedProviders.has(proxyProvider);
 		const profileAuthenticated = new Set(authenticatedProviders);
 		if (proxyAuthenticated) {
@@ -1076,6 +1075,7 @@ function createQuerySurface(
 			return replacement ? replacement + selector.slice(slash) : selector;
 		};
 		try {
+			const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
 			const bindings = resolveProfileBindings(profile);
 			const assignments: Array<{ value: ModelSelectorValue; isDefault: boolean }> = [];
 			if (bindings.defaultSelector !== undefined) {
@@ -1145,8 +1145,13 @@ function createQuerySurface(
 			if (proxyProvider !== undefined) proxyProviders.add(proxyProvider);
 		}
 		for (const proxyProvider of proxyProviders) {
-			const apiKey = await ctx.modelRegistry.getApiKeyForProvider(proxyProvider, getProfileCredentialSessionId());
-			if (apiKey === kNoAuth || isAuthenticated(apiKey)) authenticated.add(proxyProvider);
+			try {
+				const apiKey = await ctx.modelRegistry.getApiKeyForProvider(proxyProvider, getProfileCredentialSessionId());
+				if (apiKey === kNoAuth || isAuthenticated(apiKey)) authenticated.add(proxyProvider);
+			} catch {
+				// Passive availability must degrade to unavailable when proxy credential
+				// refresh/storage fails; explicit activation retains its diagnostics.
+			}
 		}
 		return authenticated;
 	};

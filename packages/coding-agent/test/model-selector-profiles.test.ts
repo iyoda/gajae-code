@@ -80,6 +80,11 @@ function createRegistry(options: { missingCredentials?: boolean } = {}) {
 	};
 }
 
+type TestModelRegistry = {
+	getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
+	getModelProfile: (name: string) => ModelProfileDefinition | undefined;
+} & Record<string, unknown>;
+
 function createSelector(
 	onSelect: (selection: ModelSelectorSelection) => void,
 	options: {
@@ -90,7 +95,7 @@ function createSelector(
 		currentThinkingLevel?: ThinkingLevel;
 		activeModelProfile?: string;
 		configuredDefaultChain?: readonly string[];
-		registry?: ReturnType<typeof createRegistry>;
+		registry?: TestModelRegistry;
 		sessionId?: string;
 	} = {},
 ) {
@@ -170,7 +175,7 @@ describe("model selector profiles", () => {
 		installTestTheme();
 		const profiles = new Map<string, ModelProfileDefinition>([[profile.name, profile]]);
 		let catalogChanged: (() => void) | undefined;
-		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+		const registry = createRegistry() as unknown as TestModelRegistry & {
 			onCatalogChanged: (listener: () => void) => () => void;
 		};
 		registry.getModelProfiles = () => new Map(profiles);
@@ -207,7 +212,7 @@ describe("model selector profiles", () => {
 			modelMapping: { default: "xai/grok-4.3" },
 			source: "registry",
 		};
-		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+		const registry = createRegistry() as unknown as TestModelRegistry & {
 			getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
 		};
 		registry.getModelProfiles = () => new Map([[proxyProfile.name, proxyProfile]]);
@@ -226,7 +231,7 @@ describe("model selector profiles", () => {
 
 	test("renders presets safely when the configured proxy identifier is malformed", async () => {
 		installTestTheme();
-		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+		const registry = createRegistry() as unknown as TestModelRegistry & {
 			getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
 		};
 		const registryProfile: ModelProfileDefinition = {
