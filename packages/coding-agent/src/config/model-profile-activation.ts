@@ -540,25 +540,35 @@ function rewriteBindingsProviders(
  * treated as proxy ids here; only lowercase provider ids from settings.
  */
 export function resolveProxyProviderId(settings: Pick<Settings, "get"> | undefined): string | undefined {
-	if (!settings) return undefined;
-	const value = settings.get("modelProfile.proxyProvider");
-	if (typeof value !== "string" || value.trim() === "") return undefined;
-	const id = value.trim().toLowerCase();
-	if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+	const config = inspectProxyProviderId(settings);
+	if (config.status === "unset") return undefined;
+	if (config.status === "invalid") {
 		throw new Error(
-			`modelProfile.proxyProvider must be a lowercase provider id (got "${value.trim()}"). Configure an OpenAI-compatible proxy with \`gjc setup provider\`, then set its id here.`,
+			`modelProfile.proxyProvider must be a lowercase provider id (got "${config.value}"). Configure an OpenAI-compatible proxy with \`gjc setup provider\`, then set its id here.`,
 		);
 	}
-	return id;
+	return config.id;
+}
+
+export type ProxyProviderConfig =
+	| { status: "unset" }
+	| { status: "configured"; id: string }
+	| { status: "invalid"; value: string };
+
+export function inspectProxyProviderId(settings: Pick<Settings, "get"> | undefined): ProxyProviderConfig {
+	if (!settings) return { status: "unset" };
+	const value = settings.get("modelProfile.proxyProvider");
+	if (typeof value !== "string" || value.trim() === "") return { status: "unset" };
+	const id = value.trim().toLowerCase();
+	return /^[a-z0-9][a-z0-9._-]*$/.test(id)
+		? { status: "configured", id }
+		: { status: "invalid", value: value.trim() };
 }
 
 /** Passive surfaces fail closed on malformed settings instead of throwing. */
 export function tryResolveProxyProviderId(settings: Pick<Settings, "get"> | undefined): string | undefined {
-	try {
-		return resolveProxyProviderId(settings);
-	} catch {
-		return undefined;
-	}
+	const config = inspectProxyProviderId(settings);
+	return config.status === "configured" ? config.id : undefined;
 }
 
 export type ModelProfileProxyMode = "fallback" | "always";
