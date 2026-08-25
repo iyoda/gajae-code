@@ -236,7 +236,10 @@ function correlateFrame(frame: Record<string, unknown>): CorrelatedFrame | undef
 		identityClaim(payload, "generation", readGeneration),
 	);
 	if (!generation.ok) return undefined;
-	const seq = reconcileIdentity(identityClaim(frame, "seq", readSequence), identityClaim(payload, "seq", readSequence));
+	const seq = reconcileIdentity(
+		identityClaim(frame, "seq", readSequence),
+		identityClaim(payload, "seq", readSequence),
+	);
 	if (!seq.ok) return undefined;
 	return {
 		body,
