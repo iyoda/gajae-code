@@ -114,6 +114,10 @@ function readGeneration(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+function readSequence(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 /**
  * What one representation of a frame states about an identity it owns.
  *
@@ -138,7 +142,7 @@ const ABSENT_IDENTITY: IdentityClaim<never> = { state: "absent" };
  */
 function identityClaim<T>(
 	frame: Record<string, unknown> | undefined,
-	key: "sessionId" | "generation" | "name" | "kind",
+	key: "sessionId" | "generation" | "name" | "kind" | "seq",
 	read: (value: unknown) => T | undefined,
 ): IdentityClaim<T> {
 	if (!frame || !Object.hasOwn(frame, key)) return ABSENT_IDENTITY;
@@ -232,11 +236,14 @@ function correlateFrame(frame: Record<string, unknown>): CorrelatedFrame | undef
 		identityClaim(payload, "generation", readGeneration),
 	);
 	if (!generation.ok) return undefined;
+	const seq = reconcileIdentity(identityClaim(frame, "seq", readSequence), identityClaim(payload, "seq", readSequence));
+	if (!seq.ok) return undefined;
 	return {
 		body,
 		name: envelopeName.value ?? bodyName,
 		sessionId: sessionId.value,
 		generation: generation.value,
+		seq: seq.value,
 	};
 }
 

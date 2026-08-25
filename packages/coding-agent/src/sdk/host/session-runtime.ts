@@ -1378,21 +1378,17 @@ function createQuerySurface(
 			const profiles = ctx.modelRegistry.getModelProfiles();
 			const authenticatedProviders = await collectProfileAuthentication(profiles);
 			return (await Promise.all(
-				projectModelProfileCatalog(profiles, ctx.modelRegistry.getError()).map(async item => ({
-					...item,
-					available: (async () => {
-						const profile = profiles.get(item.id)!;
-						const profileAuthenticated = new Set(authenticatedProviders);
-						const proxyProvider =
-							profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
-						if (proxyProvider !== undefined && profileAuthenticated.has(proxyProvider))
-							for (const provider of getProxyRoutableProviders(profile)) profileAuthenticated.add(provider);
-						return (
-							isModelProfileProviderAvailable(profile, profileAuthenticated) &&
-							(await resolveProfileAvailability(profile, authenticatedProviders)).available
-						);
-					})(),
-				})),
+				projectModelProfileCatalog(profiles, ctx.modelRegistry.getError()).map(async item => {
+					const profile = profiles.get(item.id)!;
+					const profileAuthenticated = new Set(authenticatedProviders);
+					const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
+					if (proxyProvider !== undefined && profileAuthenticated.has(proxyProvider))
+						for (const provider of getProxyRoutableProviders(profile)) profileAuthenticated.add(provider);
+					const available =
+						isModelProfileProviderAvailable(profile, profileAuthenticated) &&
+						(await resolveProfileAvailability(profile, authenticatedProviders)).available;
+					return { ...item, available };
+				}),
 			)) as unknown[];
 		},
 		installedQueries: policy.installedQueries,
