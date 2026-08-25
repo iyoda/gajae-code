@@ -124,6 +124,10 @@ export function createSdkHostModelRegistryLoader(
 			}
 		}
 		const owned = await cachedRegistry;
+		if (disposed) {
+			retireEntry(scopeKey, cachedRegistry);
+			throw new Error("SDK host model registry loader is disposed.");
+		}
 		cachedRegistries.delete(scopeKey);
 		cachedRegistries.set(scopeKey, cachedRegistry);
 		const registry = owned.registry;

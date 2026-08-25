@@ -10,7 +10,7 @@ import {
 } from "../broker/session-index";
 import { lifecycleRequestTimeoutMs } from "../broker/startup-budget";
 import { SdkClient, SdkClientError, type SdkDispatchContext, type SdkDispatchHandler } from "../client/client";
-import { readSdkBrokerDiscovery, readSdkSessionEndpoint, type SdkSessionEndpoint } from "../client/discovery";
+import { endpointDirectory, readSdkBrokerDiscovery, readSdkSessionEndpoint, type SdkSessionEndpoint } from "../client/discovery";
 import {
 	type ActivatedPreparedSession,
 	type PreparedSessionActivationClient,
@@ -382,12 +382,14 @@ function readSequence(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : undefined;
 }
 
-async function lstatEndpoint(file: string): Promise<{ mtimeMs: number; ino: bigint } | undefined> {
+async function lstatEndpoint(
+	file: string,
+): Promise<{ mtimeMs: number; mtimeNs: bigint; ctimeNs: bigint; size: bigint; ino: bigint } | undefined> {
 	const stat = await fs.lstat(file).catch(() => undefined);
 	if (!stat || !stat.isFile()) return undefined;
 	const identity = await fs.lstat(file, { bigint: true }).catch(() => undefined);
 	if (!identity || !identity.isFile()) return undefined;
-	return { mtimeMs: stat.mtimeMs, ino: identity.ino };
+	return { mtimeMs: stat.mtimeMs, mtimeNs: identity.mtimeNs, ctimeNs: identity.ctimeNs, size: identity.size, ino: identity.ino };
 }
 
 function readFrameSequenceClaim(frame: Record<string, unknown>): {
@@ -1277,9 +1279,10 @@ export class SessionRouter {
 					? "chat"
 					: undefined;
 		if (!scope || indexed.endpointMtimeMs === undefined || !Number.isFinite(indexed.endpointMtimeMs)) return null;
+		const endpointPath = path.join(endpointDirectory(repo, scope), `${indexed.sessionId}.json`);
+		const endpointIdentity = await lstatEndpoint(endpointPath);
 		const endpoint = await readSdkSessionEndpoint(repo, indexed.sessionId, scope);
 		if (!endpoint || endpoint.stale || endpoint.pid !== indexed.pid) return null;
-		const endpointIdentity = await lstatEndpoint(endpoint.path);
 		if (!endpointIdentity || endpointIdentity.mtimeMs !== indexed.endpointMtimeMs) return null;
 		// Identity is proven INSIDE this authority read (#4730 review): sampling it
 		// afterwards would let an identical rename between the read and the sample
@@ -1306,6 +1309,9 @@ export class SessionRouter {
 		if (
 			!endpointIdentityAfterRead ||
 			endpointIdentityAfterRead.mtimeMs !== indexed.endpointMtimeMs ||
+			endpointIdentityAfterRead.mtimeNs !== endpointIdentity.mtimeNs ||
+			endpointIdentityAfterRead.ctimeNs !== endpointIdentity.ctimeNs ||
+			endpointIdentityAfterRead.size !== endpointIdentity.size ||
 			endpointIdentityAfterRead.ino !== provenIno
 		)
 			return null;
