@@ -22,6 +22,12 @@ import {
 	normalizeTierMap,
 	validateAutoroutingSetup,
 } from "../../config/autorouting-contract";
+import {
+	getProxyRoutableProviders,
+	resolveProxyMode,
+	resolveProxyProviderId,
+	rewriteSelectorForProxy,
+} from "../../config/model-profile-activation";
 
 import { isModelProfileProviderAvailable } from "../../config/model-profile-contract";
 import {
@@ -1317,13 +1323,36 @@ export class ModelSelectorComponent extends Container {
 		return this.#providerAuthById.get(providerId);
 	}
 
+	#getProfileAuthenticatedProviders(profile: ModelProfileDefinition): Set<string> {
+		const authenticated = new Set(
+			profileRequiredProviders(profile).filter(provider => this.#isProviderAuthenticated(provider) === true),
+		);
+		const proxyProvider = profile.source === "user" ? undefined : resolveProxyProviderId(this.#settings);
+		if (proxyProvider !== undefined && this.#isProviderAuthenticated(proxyProvider) === true) {
+			for (const provider of getProxyRoutableProviders(profile)) authenticated.add(provider);
+		}
+		return authenticated;
+	}
+
+	#rewriteProfileSelectorForProxy(profile: ModelProfileDefinition, selector: string): string {
+		if (profile.source === "user") return selector;
+		const proxyProvider = resolveProxyProviderId(this.#settings);
+		if (proxyProvider === undefined || this.#isProviderAuthenticated(proxyProvider) !== true) return selector;
+		return rewriteSelectorForProxy(
+			selector,
+			proxyProvider,
+			resolveProxyMode(this.#settings),
+			this.#modelRegistry.getAvailable(),
+			new Set([...this.#providerAuthById].filter(([, authenticated]) => authenticated).map(([provider]) => provider)),
+			getProxyRoutableProviders(profile),
+		);
+	}
+
 	#getMissingProviders(profileOrProfiles: ModelProfileDefinition | ModelProfileDefinition[]): string[] {
 		const profiles = Array.isArray(profileOrProfiles) ? profileOrProfiles : [profileOrProfiles];
 		const missing = new Set<string>();
 		for (const profile of profiles) {
-			const authenticated = new Set(
-				profileRequiredProviders(profile).filter(provider => this.#isProviderAuthenticated(provider) === true),
-			);
+			const authenticated = this.#getProfileAuthenticatedProviders(profile);
 			if (isModelProfileProviderAvailable(profile, authenticated)) continue;
 			const alternativeGroups = profile.alternativeProviderGroups ?? [];
 			const alternativeProviders = new Set(alternativeGroups.flat());
@@ -1350,7 +1379,8 @@ export class ModelSelectorComponent extends Container {
 			];
 			const bareAssignmentsAvailable = this.#bareProfileAuthByName.get(profile.name) ?? true;
 			return values.every(value =>
-				normalizeModelSelectorValue(value).some(selector => {
+				normalizeModelSelectorValue(value).some(rawSelector => {
+					const selector = this.#rewriteProfileSelectorForProxy(profile, rawSelector);
 					if (!selector.includes("/")) return bareAssignmentsAvailable;
 					const resolved = resolveModelRoleValue(selector, this.#modelRegistry.getAvailable(), {
 						settings: this.#settings,
@@ -1404,6 +1434,10 @@ export class ModelSelectorComponent extends Container {
 		for (const profiles of this.#getPresetGroups().values()) {
 			for (const profile of profiles) {
 				for (const provider of profileRequiredProviders(profile)) providers.add(provider);
+				if (profile.source !== "user") {
+					const proxyProvider = resolveProxyProviderId(this.#settings);
+					if (proxyProvider !== undefined) providers.add(proxyProvider);
+				}
 				const bindings = resolveProfileBindings(profile);
 				const values = [
 					...(bindings.defaultSelector ? [bindings.defaultSelector] : []),

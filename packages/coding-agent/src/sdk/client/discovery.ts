@@ -132,6 +132,8 @@ export async function readSdkSessionEndpoint(
 	if (!isUsableSessionId(sessionId)) return null;
 	const file = path.join(endpointDirectory(repo, scope), `${sessionId}.json`);
 	try {
+		const stat = await fs.lstat(file);
+		if (!stat.isFile()) return null;
 		return parseEndpoint(sessionId, file, JSON.parse(await fs.readFile(file, "utf8")));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

@@ -1522,9 +1522,9 @@ describe("SessionRouter dispatch authority", () => {
 
 	test("rejects an endpoint rewritten after its indexed stat", async () => {
 		const fixture = await routerFixture({ start: false });
-		const realStat = fsPromises.stat;
+		const realStat = fsPromises.lstat;
 		let rewritten = false;
-		const statSpy = spyOn(fsPromises, "stat").mockImplementation((async (file, options) => {
+		const statSpy = spyOn(fsPromises, "lstat").mockImplementation((async (file, options) => {
 			const stat = await realStat(file, options);
 			if (!rewritten && file === fixture.endpointFile) {
 				rewritten = true;
@@ -1539,7 +1539,7 @@ describe("SessionRouter dispatch authority", () => {
 				);
 			}
 			return stat;
-		}) as typeof fsPromises.stat);
+		}) as typeof fsPromises.lstat);
 		try {
 			await fixture.router.start();
 			expect(rewritten).toBe(true);
@@ -1574,9 +1574,9 @@ describe("SessionRouter dispatch authority", () => {
 		);
 		fixture.authority.pid = 43;
 		fixture.authority.endpointMtimeMs = fs.statSync(fixture.endpointFile).mtimeMs;
-		const realStat = fsPromises.stat;
+		const realStat = fsPromises.lstat;
 		let blockedValidation = false;
-		const statSpy = spyOn(fsPromises, "stat").mockImplementation((async (file, options) => {
+		const statSpy = spyOn(fsPromises, "lstat").mockImplementation((async (file, options) => {
 			const stat = await realStat(file, options);
 			if (!blockedValidation && file === fixture.endpointFile) {
 				blockedValidation = true;
@@ -1584,7 +1584,7 @@ describe("SessionRouter dispatch authority", () => {
 				await releaseEndpointValidation.promise;
 			}
 			return stat;
-		}) as typeof fsPromises.stat);
+		}) as typeof fsPromises.lstat);
 		try {
 			const reconciliation = fixture.router.reconcile();
 			await endpointValidationEntered.promise;

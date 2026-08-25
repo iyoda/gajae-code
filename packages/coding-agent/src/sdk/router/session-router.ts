@@ -382,6 +382,33 @@ function readSequence(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : undefined;
 }
 
+async function lstatEndpoint(file: string): Promise<{ mtimeMs: number; ino: bigint } | undefined> {
+	const stat = await fs.lstat(file).catch(() => undefined);
+	if (!stat || !stat.isFile()) return undefined;
+	const identity = await fs.lstat(file, { bigint: true }).catch(() => undefined);
+	if (!identity || !identity.isFile()) return undefined;
+	return { mtimeMs: stat.mtimeMs, ino: identity.ino };
+}
+
+function readFrameSequenceClaim(frame: Record<string, unknown>): {
+	claimed: boolean;
+	valid: boolean;
+	seq?: number;
+} {
+	const payload =
+		frame.type === "event" && frame.payload && typeof frame.payload === "object" && !Array.isArray(frame.payload)
+			? (frame.payload as Record<string, unknown>)
+			: undefined;
+	const claims: unknown[] = [];
+	if (Object.hasOwn(frame, "seq")) claims.push(frame.seq);
+	if (payload && Object.hasOwn(payload, "seq")) claims.push(payload.seq);
+	if (claims.length === 0) return { claimed: false, valid: true };
+	const sequences = claims.map(readSequence);
+	if (sequences.some(sequence => sequence === undefined)) return { claimed: true, valid: false };
+	if (new Set(sequences).size !== 1) return { claimed: true, valid: false };
+	return { claimed: true, valid: true, seq: sequences[0] };
+}
+
 function fallbackCorrelation(frame: Record<string, unknown>): SessionRouterFrame | undefined {
 	const payload =
 		frame.type === "event" && frame.payload && typeof frame.payload === "object" && !Array.isArray(frame.payload)
@@ -509,6 +536,7 @@ export class SessionRouter {
 	#lastReconciledIndexSeq = -1;
 	#ready = false;
 	#started = false;
+	#startPromise: Promise<void> | undefined;
 	#stopController = new AbortController();
 	#runEpoch = 0;
 
@@ -530,14 +558,26 @@ export class SessionRouter {
 
 	/** Starts reconciliation and the index watcher. */
 	async start(): Promise<void> {
+		if (this.#startPromise) return await this.#startPromise;
 		if (this.#started) return;
 		this.#started = true;
+		const startup = this.#startImpl();
+		this.#startPromise = startup;
+		try {
+			await startup;
+		} finally {
+			if (this.#startPromise === startup) this.#startPromise = undefined;
+		}
+	}
+
+	async #startImpl(): Promise<void> {
 		const runEpoch = ++this.#runEpoch;
 		if (this.#stopController.signal.aborted) {
 			this.#stopController = new AbortController();
 			this.#reconcileTail = Promise.resolve();
 			this.#reconcilePending = undefined;
 			this.#frameTails.clear();
+			this.#attachmentTails.clear();
 			// A restart must re-run the full body on the first tick: reset the
 			// idle-gate markers so stale state cannot carry across run epochs.
 			this.#lastReconcileSweepAt = 0;
@@ -1239,16 +1279,12 @@ export class SessionRouter {
 		if (!scope || indexed.endpointMtimeMs === undefined || !Number.isFinite(indexed.endpointMtimeMs)) return null;
 		const endpoint = await readSdkSessionEndpoint(repo, indexed.sessionId, scope);
 		if (!endpoint || endpoint.stale || endpoint.pid !== indexed.pid) return null;
-		const endpointStat = await fs.stat(endpoint.path).catch(() => undefined);
-		const endpointIno = await fs
-			.stat(endpoint.path, { bigint: true })
-			.then(value => value.ino)
-			.catch(() => undefined);
-		if (!endpointStat || endpointIno === undefined || endpointStat.mtimeMs !== indexed.endpointMtimeMs) return null;
+		const endpointIdentity = await lstatEndpoint(endpoint.path);
+		if (!endpointIdentity || endpointIdentity.mtimeMs !== indexed.endpointMtimeMs) return null;
 		// Identity is proven INSIDE this authority read (#4730 review): sampling it
 		// afterwards would let an identical rename between the read and the sample
 		// install the replacement's inode as the trusted baseline.
-		const provenIno = endpointIno;
+		const provenIno = endpointIdentity.ino;
 		let raw: Record<string, unknown>;
 		try {
 			const parsed = JSON.parse(await Bun.file(endpoint.path).text());
@@ -1266,16 +1302,11 @@ export class SessionRouter {
 		)
 			return null;
 		// Fail CLOSED on stat error and on any identity change across the body read.
-		const endpointStatAfterRead = await fs.stat(endpoint.path).catch(() => undefined);
-		const inoAfterRead = await fs
-			.stat(endpoint.path, { bigint: true })
-			.then(value => value.ino)
-			.catch(() => undefined);
+		const endpointIdentityAfterRead = await lstatEndpoint(endpoint.path);
 		if (
-			!endpointStatAfterRead ||
-			inoAfterRead === undefined ||
-			endpointStatAfterRead.mtimeMs !== indexed.endpointMtimeMs ||
-			inoAfterRead !== provenIno
+			!endpointIdentityAfterRead ||
+			endpointIdentityAfterRead.mtimeMs !== indexed.endpointMtimeMs ||
+			endpointIdentityAfterRead.ino !== provenIno
 		)
 			return null;
 		await this.#index.refresh();
@@ -1378,10 +1409,7 @@ export class SessionRouter {
 		const endpoint = resolvedEndpoint ?? proven?.endpoint ?? null;
 		let provenIno = proven?.ino;
 		if (resolvedEndpoint !== undefined)
-			provenIno = await fs
-				.stat(resolvedEndpoint.path, { bigint: true })
-				.then(value => value.ino)
-				.catch(() => undefined);
+			provenIno = (await lstatEndpoint(resolvedEndpoint.path))?.ino;
 		const retirementAfterValidation = this.#retirements.get(indexed.sessionId);
 		if (retirementAfterValidation) await retirementAfterValidation;
 		if ((this.#retirementVersions.get(indexed.sessionId) ?? 0) !== retirementVersion)
@@ -1599,10 +1627,7 @@ export class SessionRouter {
 			return false;
 		};
 		if (provenIno === undefined) return await rollback();
-		const publishIno = await fs
-			.stat(endpoint.path, { bigint: true })
-			.then(value => value.ino)
-			.catch(() => undefined);
+		const publishIno = (await lstatEndpoint(endpoint.path))?.ino;
 		if (publishIno === undefined || publishIno !== provenIno) return await rollback();
 		this.#sessions.set(indexed.sessionId, attached);
 		this.#endpointInodes.set(attached.id, provenIno);
@@ -2000,7 +2025,21 @@ export class SessionRouter {
 				}
 				const correlated = this.#correlateFrame(frame);
 				if (!correlated) return;
-				const seq = typeof frame.seq === "number" && Number.isSafeInteger(frame.seq) ? frame.seq : undefined;
+				const sequenceClaim = readFrameSequenceClaim(frame);
+				if (!sequenceClaim.valid) {
+					this.#failBarrier(attached, "protocol error: malformed sequence coordinate");
+					return;
+				}
+				const correlatedSeq = correlated.seq === undefined ? undefined : readSequence(correlated.seq);
+				if (correlated.seq !== undefined && correlatedSeq === undefined) {
+					this.#failBarrier(attached, "protocol error: malformed correlated sequence coordinate");
+					return;
+				}
+				if (sequenceClaim.claimed && correlatedSeq !== sequenceClaim.seq) {
+					this.#failBarrier(attached, "protocol error: inconsistent sequence coordinate");
+					return;
+				}
+				const seq = sequenceClaim.seq ?? correlatedSeq;
 				if (correlated.sessionId !== undefined && correlated.sessionId !== attached.sessionId) return;
 				if (correlated.generation !== undefined && correlated.generation !== attached.generation) return;
 				if (seq !== undefined && correlated.generation === undefined) return;

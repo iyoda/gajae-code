@@ -1267,26 +1267,32 @@ export class Broker {
 		if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer);
 		this.#heartbeatTimer = null;
 		this.#completionTask = (async () => {
-			await this.#resolveModelPin.dispose?.();
-			await this.#transport?.stop();
-			this.#transport = null;
-			if (mode === "lost-root")
-				await Promise.race([Promise.allSettled(this.#admitted), Bun.sleep(BROKER_SETTLEMENT_MS)]);
-			else await Promise.allSettled(this.#admitted);
-			this.#publication?.close();
-			this.#publication = null;
-			if (mode === "owned-root" && this.discovery?.ownerId === this.#owner) {
-				try {
-					const disk = JSON.parse(await fs.readFile(brokerDiscoveryPath(this.settings.agentDir), "utf8")) as {
-						ownerId?: string;
-					};
-					if (disk.ownerId === this.#owner) await fs.unlink(brokerDiscoveryPath(this.settings.agentDir));
-				} catch (e) {
-					if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+			try {
+				await this.#transport?.stop();
+				this.#transport = null;
+				if (mode === "lost-root")
+					await Promise.race([Promise.allSettled(this.#admitted), Bun.sleep(BROKER_SETTLEMENT_MS)]);
+				else await Promise.allSettled(this.#admitted);
+				this.#publication?.close();
+				this.#publication = null;
+				if (mode === "owned-root" && this.discovery?.ownerId === this.#owner) {
+					try {
+						const disk = JSON.parse(await fs.readFile(brokerDiscoveryPath(this.settings.agentDir), "utf8")) as {
+							ownerId?: string;
+						};
+						if (disk.ownerId === this.#owner) await fs.unlink(brokerDiscoveryPath(this.settings.agentDir));
+					} catch (e) {
+						if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+					}
+					await this.#releaseOwnedLock();
 				}
-				await this.#releaseOwnedLock();
+			} finally {
+				try {
+					await this.#resolveModelPin.dispose?.();
+				} finally {
+					this.discovery = null;
+				}
 			}
-			this.discovery = null;
 		})();
 		void this.#completionTask.then(this.#resolveCompletion, this.#rejectCompletion);
 		return this.#completionTask;

@@ -10,6 +10,7 @@ import {
 	formatModelProfileDisplayLabel,
 	PROXY_ROUTABLE_PROVIDER_IDS,
 	resolveProfileBindings,
+	type ModelProfileDefinition,
 } from "./model-profiles";
 
 export { resolveModelProfileName } from "./model-profile-contract";
@@ -538,7 +539,8 @@ function rewriteBindingsProviders(
  * preset. Returns undefined when unset or empty. Passwords/labels are never
  * treated as proxy ids here; only lowercase provider ids from settings.
  */
-function resolveProxyProviderId(settings: Pick<Settings, "get" | "getGlobal" | "getOverride">): string | undefined {
+export function resolveProxyProviderId(settings: Pick<Settings, "get"> | undefined): string | undefined {
+	if (!settings) return undefined;
 	const value = settings.get("modelProfile.proxyProvider");
 	if (typeof value !== "string" || value.trim() === "") return undefined;
 	const id = value.trim().toLowerCase();
@@ -550,7 +552,12 @@ function resolveProxyProviderId(settings: Pick<Settings, "get" | "getGlobal" | "
 	return id;
 }
 
-function resolveProxyMode(settings: Pick<Settings, "get" | "getGlobal" | "getOverride">): "fallback" | "always" {
+export type ModelProfileProxyMode = "fallback" | "always";
+
+export function resolveProxyMode(
+	settings: Pick<Settings, "get"> | undefined,
+): ModelProfileProxyMode {
+	if (!settings) return "fallback";
 	const value = settings.get("modelProfile.proxyMode");
 	if (value === undefined || value === "fallback" || value === "always") return value ?? "fallback";
 	throw new Error(`modelProfile.proxyMode must be "fallback" or "always" (got "${String(value)}")`);
@@ -564,10 +571,17 @@ function resolveProxyMode(settings: Pick<Settings, "get" | "getGlobal" | "getOve
  * not retain the upstream provider prefix. Missing or ambiguous matches fail
  * closed rather than leaving an unauthenticated role selector behind.
  */
-function rewriteSelectorForProxy(
+export function getProxyRoutableProviders(profile: ModelProfileDefinition): ReadonlySet<string> {
+	if (profile.source === "user") return new Set();
+	return profile.source === "registry"
+		? new Set([...PROXY_ROUTABLE_PROVIDER_IDS, ...profile.requiredProviders, ...deriveModelProfileMappedProviders(profile)])
+		: PROXY_ROUTABLE_PROVIDER_IDS;
+}
+
+export function rewriteSelectorForProxy(
 	selector: string,
 	proxyProvider: string,
-	proxyMode: "fallback" | "always",
+	proxyMode: ModelProfileProxyMode,
 	allModels: Model<Api>[],
 	directlyAuthenticated: ReadonlySet<string>,
 	routableProviders: ReadonlySet<string>,
