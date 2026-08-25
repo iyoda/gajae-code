@@ -1294,6 +1294,7 @@ export class AuthStorage {
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
 		store.onSnapshotChanged?.(() => {
+			this.#data = new Map();
 			void this.reload();
 		});
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
