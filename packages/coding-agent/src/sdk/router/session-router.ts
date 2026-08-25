@@ -557,6 +557,7 @@ export class SessionRouter {
 	#ready = false;
 	#started = false;
 	#startPromise: Promise<void> | undefined;
+	#stopPromise: Promise<void> | undefined;
 	#stopController = new AbortController();
 	#runEpoch = 0;
 
@@ -578,6 +579,7 @@ export class SessionRouter {
 
 	/** Starts reconciliation and the index watcher. */
 	async start(): Promise<void> {
+		if (this.#stopPromise) await this.#stopPromise;
 		if (this.#startPromise) return await this.#startPromise;
 		if (this.#started) return;
 		this.#started = true;
@@ -736,6 +738,20 @@ export class SessionRouter {
 	}
 
 	async stop(): Promise<void> {
+		if (this.#stopPromise) return await this.#stopPromise;
+		const stopping = this.#stopImpl();
+		this.#stopPromise = stopping;
+		try {
+			await stopping;
+		} finally {
+			if (this.#stopPromise === stopping) this.#stopPromise = undefined;
+		}
+	}
+
+	async #stopImpl(): Promise<void> {
+		// Detach the in-flight startup promise before invalidating its epoch. A
+		// later start must not return a promise owned by the stopped epoch.
+		this.#startPromise = undefined;
 		if (this.#stopTimer) this.#stopTimer();
 		this.#stopTimer = undefined;
 		this.#started = false;

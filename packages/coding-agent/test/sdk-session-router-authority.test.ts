@@ -740,6 +740,30 @@ describe("SessionRouter dispatch authority", () => {
 		await fixture.router.stop();
 	});
 
+	test("restarts cleanly when stop overlaps an in-flight startup", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const fixture = await routerFixture({
+			start: false,
+			onAttachment: async () => {
+				entered.resolve();
+				await release.promise;
+			},
+		});
+		const firstStart = fixture.router.start();
+		await entered.promise;
+		const stopping = fixture.router.stop();
+		release.resolve();
+		await stopping;
+		await firstStart;
+		await fixture.router.start();
+		try {
+			expect(fixture.router.attachment(fixture.sessionId)?.isCurrent()).toBe(true);
+		} finally {
+			await fixture.router.stop();
+		}
+	});
+
 	test("holds live frames until provider publication succeeds", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
