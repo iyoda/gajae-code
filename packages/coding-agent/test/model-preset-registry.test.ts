@@ -76,7 +76,7 @@ function registryProfile(id: string, selector = "provider/remote-model") {
 		roleBindings: { default: selector },
 	};
 }
-function registryPreset(id: string, contextWindow = 8192) {
+function registryPreset(id: string, contextWindow = 8192, extras: { contextPromotionTarget?: string } = {}) {
 	return {
 		id,
 		provider: "provider",
@@ -87,6 +87,7 @@ function registryPreset(id: string, contextWindow = 8192) {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens: 2048,
+		...extras,
 	};
 }
 
@@ -446,6 +447,10 @@ describe("signed model preset registry", () => {
 			{ ...registryProfile("format-control"), displayName: "trusted\u202Eliame" },
 		]);
 		await expect(accept(data, formatControl)).rejects.toThrow(/schema rejected/i);
+		const promotionSpoof = signedRegistry(data.privateKey, 1, undefined, [
+			{ ...registryPreset("spoof"), contextPromotionTarget: "provider/\u202Emodel" },
+		]);
+		await expect(accept(data, promotionSpoof)).rejects.toThrow(/schema rejected/i);
 		const confusable = signedRegistry(data.privateKey, 1, undefined, [
 			{ ...registryPreset("model"), provider: "scope" },
 			{ ...registryPreset("mоdel"), provider: "scope" },
@@ -501,6 +506,24 @@ describe("signed model preset registry", () => {
 		await expect(accept(data, signedRegistry(data.privateKey, 2, [registryProfile("changed")]))).rejects.toThrow(
 			/equivocation/i,
 		);
+	});
+
+	test("rejects noncanonical Ed25519 signature encoding of an otherwise valid manifest", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(data.privateKey, 1);
+		const canonical = registry.manifest.signature.value;
+		expect(canonical).toMatch(/^[A-Za-z0-9+/]{86}==$/);
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const lastDataChar = canonical[85]!;
+		const alphabetIndex = alphabet.indexOf(lastDataChar);
+		expect(alphabetIndex).toBeGreaterThanOrEqual(0);
+		const mutatedChar = alphabet[alphabetIndex ^ 1]!;
+		expect(mutatedChar).not.toBe(lastDataChar);
+		const mutatedValue = `${canonical.slice(0, 85)}${mutatedChar}==`;
+		expect(Buffer.from(mutatedValue, "base64").equals(Buffer.from(canonical, "base64"))).toBe(true);
+		registry.manifest.signature.value = mutatedValue;
+		registry.manifestBody = canonicalModelPresetRegistryJson(registry.manifest);
+		await expect(accept(data, registry)).rejects.toThrow(/schema rejected|canonical/i);
 	});
 
 	test("rejects every manifest signed by a revoked key, including pre-revocation publications", async () => {

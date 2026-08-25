@@ -35,6 +35,19 @@ const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const SELECTOR_PATTERN = /^[^\s\p{Cc}\p{Cf}]+$/u;
 const PRESET_IDENTIFIER_PATTERN = /^[^\s\p{Cc}\p{Cf}]+$/u;
 const SAFE_TEXT_PATTERN = /^[^\p{Cc}\p{Cf}]+$/u;
+const CONTEXT_PROMOTION_TARGET_PATTERN = /^[^\s\p{Cc}\p{Cf}]+\/[^\s\p{Cc}\p{Cf}]+$/u;
+const ED25519_SIGNATURE_BASE64_PATTERN = /^[A-Za-z0-9+/]{86}==$/;
+
+function isCanonicalEd25519SignatureBase64(value: string): boolean {
+	if (!ED25519_SIGNATURE_BASE64_PATTERN.test(value)) return false;
+	const decoded = Buffer.from(value, "base64");
+	return decoded.length === 64 && decoded.toString("base64") === value;
+}
+
+function decodeCanonicalEd25519Signature(value: string): Buffer {
+	if (!isCanonicalEd25519SignatureBase64(value)) throw new Error("Registry signature encoding is not canonical.");
+	return Buffer.from(value, "base64");
+}
 const DESCRIPTOR_PATH_PATTERN = /^revisions\/[0-9]{8}\/[a-z]+\.json$/;
 const SOURCE_REPOSITORY = "https://github.com/Yeachan-Heo/gajae-code";
 const REGISTRY_RAW_PATH_PREFIX = "/Yeachan-Heo/gajae-code-presets/";
@@ -165,7 +178,10 @@ const SignatureSchema = z
 			.min(3)
 			.max(64)
 			.regex(/^[a-z0-9][a-z0-9._-]+$/),
-		value: z.string().regex(/^[A-Za-z0-9+/]{86}==$/),
+		value: z
+			.string()
+			.regex(ED25519_SIGNATURE_BASE64_PATTERN)
+			.refine(isCanonicalEd25519SignatureBase64, "Expected canonical Ed25519 Base64."),
 	})
 	.strict();
 
@@ -333,12 +349,7 @@ const RegistryPresetSchema = z
 		preferWebsockets: z.boolean().optional(),
 		premiumMultiplier: z.number().nonnegative().finite().optional(),
 		priority: z.number().int().nonnegative().optional(),
-		contextPromotionTarget: z
-			.string()
-			.min(3)
-			.max(256)
-			.regex(/^[^\s\p{Cc}]+\/[^\s\p{Cc}]+$/u)
-			.optional(),
+		contextPromotionTarget: z.string().min(3).max(256).regex(CONTEXT_PROMOTION_TARGET_PATTERN).optional(),
 	})
 	.strict();
 export const ModelPresetRegistryPresetsSchema = z
@@ -659,8 +670,7 @@ function verifyManifest(
 	if (!Number.isFinite(publishedAt) || publishedAt < Date.parse(key.validFrom))
 		throw new Error("Registry manifest predates its signing key validity.");
 	if (key.revokedAt) throw new Error("Registry manifest signing key is revoked.");
-	const signature = Buffer.from(manifest.signature.value, "base64");
-	if (signature.length !== 64) throw new Error("Registry signature has an invalid length.");
+	const signature = decodeCanonicalEd25519Signature(manifest.signature.value);
 	if (
 		!crypto.verify(null, Buffer.from(canonicalModelPresetRegistryJson(manifest.signed)), key.publicKeyPem, signature)
 	)
