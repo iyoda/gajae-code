@@ -45,7 +45,7 @@ export function createSdkHostModelRegistryLoader(
 	const cachedRegistries = new Map<string, Promise<OwnedModelRegistry>>();
 	const retiredRegistries = new Map<string, Promise<OwnedModelRegistry>[]>();
 	const activeScopes = new Map<string, number>();
-	const disposedEntries = new Set<Promise<OwnedModelRegistry>>();
+	const disposedEntries = new WeakSet<Promise<OwnedModelRegistry>>();
 	const pendingDisposals = new Set<Promise<void>>();
 	const disposalBarrier = Promise.withResolvers<void>();
 	const registryAgentDir = path.resolve(path.dirname(modelsPath ?? "."));
