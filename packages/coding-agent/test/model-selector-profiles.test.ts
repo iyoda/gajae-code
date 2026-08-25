@@ -226,10 +226,25 @@ describe("model selector profiles", () => {
 
 	test("renders presets safely when the configured proxy identifier is malformed", async () => {
 		installTestTheme();
+		const registry = createRegistry() as ReturnType<typeof createRegistry> & {
+			getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
+		};
+		const registryProfile: ModelProfileDefinition = {
+			name: "registry-direct",
+			providerGroup: "REGISTRY",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry",
+		};
+		registry.getModelProfiles = () => new Map([[registryProfile.name, registryProfile]]);
+		registry.getModelProfile = (name: string) => (name === registryProfile.name ? registryProfile : undefined);
 		const selector = createSelector(() => {}, {
+			registry,
 			settings: Settings.isolated({ "modelProfile.proxyProvider": "proxy/name" }),
 		});
 		await Bun.sleep(10);
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("REGISTRY");
 		expect(() => selector.render(220)).not.toThrow();
 	});
 

@@ -10,6 +10,7 @@ import { logger } from "@gajae-code/utils";
 import { AsyncJobManager } from "../../async";
 import {
 	getProxyRoutableProviders,
+	inspectProxyProviderId,
 	resolveProxyMode,
 	rewriteSelectorForProxy,
 	tryResolveProxyProviderId,
@@ -1055,6 +1056,8 @@ function createQuerySurface(
 		profile: ModelProfileDefinition,
 		authenticatedProviders: ReadonlySet<string>,
 	): Promise<{ available: boolean; defaultModel?: Model<Api> }> => {
+		if (profile.source !== "user" && inspectProxyProviderId(profileSettings).status === "invalid")
+			return { available: false };
 		const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
 		const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
 		const proxyAuthenticated = proxyProvider !== undefined && authenticatedProviders.has(proxyProvider);
@@ -1297,6 +1300,7 @@ function createQuerySurface(
 			);
 			const availableProfileIds = new Set<string>();
 			for (const [name, profile] of profiles) {
+				if (profile.source !== "user" && inspectProxyProviderId(profileSettings).status === "invalid") continue;
 				const profileAuthenticated = new Set(authenticatedProviders);
 				const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(profileSettings);
 				if (proxyProvider !== undefined && profileAuthenticated.has(proxyProvider))

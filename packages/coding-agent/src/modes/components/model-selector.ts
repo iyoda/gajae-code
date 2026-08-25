@@ -24,6 +24,7 @@ import {
 } from "../../config/autorouting-contract";
 import {
 	getProxyRoutableProviders,
+	inspectProxyProviderId,
 	resolveProxyMode,
 	rewriteSelectorForProxy,
 	tryResolveProxyProviderId,
@@ -1324,6 +1325,7 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#getProfileAuthenticatedProviders(profile: ModelProfileDefinition): Set<string> {
+		if (profile.source !== "user" && inspectProxyProviderId(this.#settings).status === "invalid") return new Set();
 		const authenticated = new Set(
 			profileRequiredProviders(profile).filter(provider => this.#isProviderAuthenticated(provider) === true),
 		);
@@ -1372,6 +1374,7 @@ export class ModelSelectorComponent extends Container {
 	#isPresetAuthenticated(profileOrProfiles: ModelProfileDefinition | ModelProfileDefinition[]): boolean {
 		const profiles = Array.isArray(profileOrProfiles) ? profileOrProfiles : [profileOrProfiles];
 		return profiles.every(profile => {
+			if (profile.source !== "user" && inspectProxyProviderId(this.#settings).status === "invalid") return false;
 			if (this.#getMissingProviders(profile).length > 0) return false;
 			const bindings = resolveProfileBindings(profile);
 			const values = [

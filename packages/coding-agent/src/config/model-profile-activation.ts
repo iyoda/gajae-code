@@ -560,9 +560,7 @@ export function inspectProxyProviderId(settings: Pick<Settings, "get"> | undefin
 	const value = settings.get("modelProfile.proxyProvider");
 	if (typeof value !== "string" || value.trim() === "") return { status: "unset" };
 	const id = value.trim().toLowerCase();
-	return /^[a-z0-9][a-z0-9._-]*$/.test(id)
-		? { status: "configured", id }
-		: { status: "invalid", value: value.trim() };
+	return /^[a-z0-9][a-z0-9._-]*$/.test(id) ? { status: "configured", id } : { status: "invalid", value: value.trim() };
 }
 
 /** Passive surfaces fail closed on malformed settings instead of throwing. */
