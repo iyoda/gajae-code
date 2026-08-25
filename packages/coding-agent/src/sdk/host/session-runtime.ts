@@ -1076,9 +1076,17 @@ function createQuerySurface(
 		};
 		try {
 			const proxyMode = profile.source === "user" ? "fallback" : resolveProxyMode(profileSettings);
-			if (profile.source !== "user" && proxyMode === "always") {
+			if (profile.source !== "user") {
 				const configuredProviders = ctx.modelRegistry.getConfiguredProviderIds?.() ?? [];
-				if (proxyProvider === undefined || !proxyAuthenticated || !configuredProviders.includes(proxyProvider))
+				if (proxyProvider !== undefined && !configuredProviders.includes(proxyProvider))
+					return { available: false };
+			}
+			if (profile.source !== "user" && proxyMode === "always") {
+				if (
+					proxyProvider === undefined ||
+					!proxyAuthenticated ||
+					!(ctx.modelRegistry.getConfiguredProviderIds?.() ?? []).includes(proxyProvider)
+				)
 					return { available: false };
 			}
 			const bindings = resolveProfileBindings(profile);

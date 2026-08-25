@@ -1376,9 +1376,14 @@ export class ModelSelectorComponent extends Container {
 		return profiles.every(profile => {
 			if (profile.source !== "user") {
 				if (inspectProxyProviderId(this.#settings).status === "invalid") return false;
+				const proxyProvider = tryResolveProxyProviderId(this.#settings);
+				if (
+					proxyProvider !== undefined &&
+					!(this.#modelRegistry.getConfiguredProviderIds?.() ?? []).includes(proxyProvider)
+				)
+					return false;
 				try {
 					if (resolveProxyMode(this.#settings) === "always") {
-						const proxyProvider = tryResolveProxyProviderId(this.#settings);
 						const configuredProviders = this.#modelRegistry.getConfiguredProviderIds?.() ?? [];
 						if (
 							proxyProvider === undefined ||
