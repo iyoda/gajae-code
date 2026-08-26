@@ -639,6 +639,27 @@ describe("signed model preset registry", () => {
 		);
 	});
 
+	test("does not report a valid selected generation when another history row is corrupt", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		await accept(data, signedRegistry(data.privateKey, 2));
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.history[1].retainedProfiles = [registryProfile("corrupt-unrelated", "https://evil.example/model")];
+		await Bun.write(statePath, JSON.stringify(state));
+
+		const status = getModelPresetRegistryStatus({ agentDir: data.agentDir });
+		expect(status).toMatchObject({
+			source: "embedded",
+			cacheHealth: "corrupt",
+			profileCount: 0,
+			presetCount: 0,
+			historyRevisions: [],
+		});
+		expect(status.activeRevision).toBeUndefined();
+		expect(status.highestSeenRevision).toBeUndefined();
+	});
+
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
 		const data = await fixture();
 		expect(loadAcceptedModelPresetRegistry(data.agentDir).profiles.size).toBe(0);

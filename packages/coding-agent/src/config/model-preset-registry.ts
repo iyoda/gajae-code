@@ -1772,6 +1772,7 @@ export function getModelPresetRegistryStatus(
 		cacheHealth = state.history.length > 0 ? "valid" : "empty";
 	} catch (error) {
 		cacheHealth = "corrupt";
+		state = { version: 1, history: [] };
 		loadError = safeError(error);
 	}
 	const disabled = control.disabled || environmentDisabled();
