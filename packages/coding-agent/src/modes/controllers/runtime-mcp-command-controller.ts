@@ -1680,7 +1680,7 @@ export class MCPCommandController {
 	async #handleSmitheryLoginWithApiKey(): Promise<boolean> {
 		const apiKey = await this.#promptSmitheryApiKey("Smithery API key (Esc to cancel)");
 		if (!apiKey) return false;
-		await saveSmitheryApiKey(apiKey);
+		await saveSmitheryApiKey(apiKey, this.ctx.session.getSessionAgentDir());
 		this.ctx.showStatus("Smithery API key saved.");
 		return true;
 	}
@@ -1729,7 +1729,7 @@ export class MCPCommandController {
 
 		const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, new AbortController().signal);
 		await this.#validateSmitheryApiKey(apiKey);
-		await saveSmitheryApiKey(apiKey);
+		await saveSmitheryApiKey(apiKey, this.ctx.session.getSessionAgentDir());
 		this.ctx.showStatus("Smithery API key saved.");
 		return true;
 	}
@@ -1765,7 +1765,8 @@ export class MCPCommandController {
 	}
 
 	async #requireSmitheryApiKey(reason: string): Promise<string> {
-		let apiKey = await getSmitheryApiKey();
+		const agentDir = this.ctx.session.getSessionAgentDir();
+		let apiKey = await getSmitheryApiKey(agentDir);
 		if (apiKey) return apiKey;
 
 		const loggedIn = await this.#promptSmitheryLogin(reason);
@@ -1773,7 +1774,7 @@ export class MCPCommandController {
 			throw new Error("Smithery login cancelled. Run /mcp smithery-login, then retry /mcp smithery-search.");
 		}
 
-		apiKey = await getSmitheryApiKey();
+		apiKey = await getSmitheryApiKey(agentDir);
 		if (!apiKey) {
 			throw new Error("Smithery API key not found after login.");
 		}
@@ -1806,7 +1807,7 @@ export class MCPCommandController {
 	}
 
 	async #handleSmitheryLogout(): Promise<void> {
-		const removed = await clearSmitheryApiKey();
+		const removed = await clearSmitheryApiKey(this.ctx.session.getSessionAgentDir());
 		this.ctx.showStatus(removed ? "Smithery API key removed." : "No cached Smithery API key found.");
 	}
 
