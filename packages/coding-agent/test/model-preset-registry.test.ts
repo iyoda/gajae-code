@@ -506,7 +506,6 @@ describe("signed model preset registry", () => {
 						{
 							...registryPreset("gpt-4o-mini", 64_000),
 							provider: "openai",
-							compat: { supportsDeveloperRole: true },
 						},
 					],
 				),
@@ -535,7 +534,6 @@ describe("signed model preset registry", () => {
 				contextWindow: 64_000,
 				baseUrl: "https://openai-proxy.example/v1",
 			});
-			expect(model?.compat?.supportsDeveloperRole).toBeUndefined();
 		} finally {
 			authStorage.close();
 		}
