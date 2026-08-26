@@ -476,14 +476,16 @@ export function isWindowsSessionPathRegressionPath(changedPath: string): boolean
 		changedPath === "packages/coding-agent/test/sdk-session-index-lock-contention.test.ts" ||
 		changedPath === "packages/coding-agent/src/sdk/broker/process-incarnation.ts" ||
 		changedPath === "packages/coding-agent/src/config/file-lock.ts" ||
-		// The session-state lock's owner-record protocol leans on Windows
-		// handle-sharing semantics: the create descriptor grants no share-delete,
-		// so the failed-write retract path and the exact identity-bound delete can
-		// only be proven on windows-latest. Ubuntu shards exercise an equivalent
-		// but not identical code path, so route changes to the lock and its suite
-		// to the Windows job (#4990).
+		// The session-state lock and empty-delete receipt GC consume the native
+		// identity-bound direct unlink, whose Windows semantics (handle-bound delete,
+		// no quarantine exchange; cross-platform name guards) cannot be exercised on
+		// an Ubuntu shard — route these to the windows-latest job (#4988 review).
 		changedPath === "packages/coding-agent/src/gjc-runtime/session-state-lock.ts" ||
+		changedPath === "packages/coding-agent/src/gjc-runtime/empty-delete-gc.ts" ||
+		changedPath === "packages/coding-agent/src/gjc-runtime/gc-runtime.ts" ||
+		changedPath === "packages/coding-agent/test/empty-delete-receipt-latch.test.ts" ||
 		changedPath === "packages/coding-agent/test/session-state-lock.test.ts" ||
+		changedPath === "packages/coding-agent/test/helpers/exact-identity-natives.ts" ||
 		// Windows environment names are case-insensitive while the project-dotenv
 		// provenance snapshot is keyed exactly, so `canonicalEnvKey()` folds on
 		// win32 only. That branch is an identity function on Ubuntu, meaning a

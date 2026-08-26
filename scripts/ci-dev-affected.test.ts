@@ -1271,12 +1271,15 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 			"packages/coding-agent/test/sdk-session-index-lock-contention.test.ts",
 			"packages/coding-agent/src/sdk/broker/process-incarnation.ts",
 			"packages/coding-agent/src/config/file-lock.ts",
-			// #4990: the session-state lock's owner-record create/retract protocol
-			// depends on Windows handle-sharing semantics (the create descriptor
-			// grants no share-delete), so the lock and its suite must execute on
-			// the windows-latest job.
+			// Session-state lock / empty-delete receipt GC bind the native identity
+			// primitives whose win32 semantics (handle-bound delete, no quarantine)
+			// an Ubuntu shard cannot exercise.
 			"packages/coding-agent/src/gjc-runtime/session-state-lock.ts",
+			"packages/coding-agent/src/gjc-runtime/empty-delete-gc.ts",
+			"packages/coding-agent/src/gjc-runtime/gc-runtime.ts",
+			"packages/coding-agent/test/empty-delete-receipt-latch.test.ts",
 			"packages/coding-agent/test/session-state-lock.test.ts",
+			"packages/coding-agent/test/helpers/exact-identity-natives.ts",
 			// canonicalEnvKey() folds project-dotenv provenance keys on win32 only,
 			// so a Linux shard exercises an identity function and proves nothing.
 			"packages/utils/src/dirs.ts",
