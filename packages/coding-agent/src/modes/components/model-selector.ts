@@ -1337,7 +1337,7 @@ export class ModelSelectorComponent extends Container {
 	#createProfileResolutionRegistry(availableModels: readonly Model[]) {
 		return {
 			getAvailable: () => availableModels as Model[],
-			getApiKey: this.#modelRegistry.getApiKey.bind(this.#modelRegistry),
+			getApiKey: this.#modelRegistry.getApiKey?.bind(this.#modelRegistry) ?? (async () => undefined),
 			resolveCanonicalModel: this.#modelRegistry.resolveCanonicalModel?.bind(this.#modelRegistry),
 			getCanonicalVariants: this.#modelRegistry.getCanonicalVariants?.bind(this.#modelRegistry),
 			getCanonicalId: this.#modelRegistry.getCanonicalId?.bind(this.#modelRegistry),
