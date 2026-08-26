@@ -7,10 +7,11 @@ import { randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { exactUnlinkDirect } from "@gajae-code/natives";
+import { exactUnlinkDirect, type NativeExactUnlinkResult } from "@gajae-code/natives";
 
 export const EMPTY_DELETE_PREFIX = ".gjc-delete-";
-const EMPTY_DELETE_RECEIPT_PATTERN = /^\.gjc-delete-session-state-lock-[0-9a-f-]+\.json$/u;
+const EMPTY_DELETE_RECEIPT_PATTERN =
+	/^\.gjc-delete-session-state-lock-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/u;
 const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 export interface EmptyDeleteIdentity {
@@ -30,6 +31,8 @@ export interface EmptyDeleteGcRecord {
 	action: "would_remove" | "removed" | "kept" | "skipped";
 	reason: string;
 	identity?: EmptyDeleteIdentity;
+	/** Retained-object paths a native direct unlink left behind; operator-recoverable only there. */
+	retainedPaths?: { detached?: string; successor?: string; placeholder?: string; unknown?: string };
 }
 
 export interface EmptyDeleteGcReport {
@@ -59,6 +62,29 @@ function identityOf(stat: BigIntStats): Omit<EmptyDeleteIdentity, "parentDev" | 
 		nlink: stat.nlink,
 		size: stat.size,
 		mtimeNs: stat.mtimeNs,
+	};
+}
+
+/**
+ * Extract the operator-recoverable retained paths a native direct unlink can leave behind.
+ * Any of them means debris still exists outside the receipt namespace, so the caller
+ * records them and fails the run instead of reporting a clean prune.
+ */
+function retainedPathsOf(
+	result: NativeExactUnlinkResult,
+): { detached?: string; successor?: string; placeholder?: string; unknown?: string } | undefined {
+	if (
+		result.detachedPath === undefined &&
+		result.retainedSuccessorPath === undefined &&
+		result.retainedPlaceholderPath === undefined &&
+		result.retainedUnknownPath === undefined
+	)
+		return undefined;
+	return {
+		detached: result.detachedPath,
+		successor: result.retainedSuccessorPath,
+		placeholder: result.retainedPlaceholderPath,
+		unknown: result.retainedUnknownPath,
 	};
 }
 
@@ -98,8 +124,11 @@ export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDel
 		let stat: BigIntStats;
 		try {
 			stat = await fs.lstat(file, { bigint: true });
-		} catch {
-			continue;
+		} catch (error) {
+			// ENOENT is an ordinary race with concurrent cleanup; any other stat failure is
+			// a hard discovery error that must surface instead of silently shrinking the report.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw error;
 		}
 		if (stat.isSymbolicLink()) {
 			records.push({ root, path: file, action: "kept", reason: "symlink" });
@@ -163,6 +192,7 @@ export async function runEmptyDeleteGc(options: EmptyDeleteGcOptions): Promise<E
 							...record.identity,
 							quarantineName: `.gjc-delete-gc-${randomUUID()}.json`,
 						});
+						const retainedPaths = retainedPathsOf(result);
 						if (result.ok) {
 							record.action = "removed";
 						} else if (result.code === "not_found") {
@@ -175,6 +205,16 @@ export async function runEmptyDeleteGc(options: EmptyDeleteGcOptions): Promise<E
 							record.action = "kept";
 							record.reason = `unlink_failed:${result.code ?? "unknown"}`;
 							report.errors.push(`${record.path}: ${record.reason}`);
+						}
+						// Objects the native layer retained (post-detach failure or a successor at
+						// the private quarantine name) are recoverable only at those paths; surface
+						// them and fail the run instead of silently stranding debris.
+						if (retainedPaths !== undefined) {
+							record.retainedPaths = retainedPaths;
+							record.reason = result.ok ? `retained:${result.code ?? "cleanup_pending"}` : record.reason;
+							report.errors.push(
+								`${record.path}: retained debris requires operator recovery: ${JSON.stringify(retainedPaths)}`,
+							);
 						}
 					}
 				} catch (error) {

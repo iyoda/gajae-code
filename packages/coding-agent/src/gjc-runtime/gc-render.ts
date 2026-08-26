@@ -97,6 +97,16 @@ export function buildGcReportText(report: GcReport): string {
 			for (const record of empty.records) {
 				const action = record.action === "would_remove" ? "would remove" : record.action;
 				lines.push(`  [${action}] ${record.path} :: ${record.reason}`);
+				if (record.retainedPaths) {
+					const retained = [
+						["detached", record.retainedPaths.detached],
+						["successor", record.retainedPaths.successor],
+						["placeholder", record.retainedPaths.placeholder],
+						["unknown", record.retainedPaths.unknown],
+					].filter((entry): entry is [string, string] => entry[1] !== undefined);
+					if (retained.length > 0)
+						lines.push(`    retained: ${retained.map(([kind, p]) => `${kind}=${p}`).join(" ")}`);
+				}
 			}
 		}
 		for (const error of empty.errors) lines.push(`  [error] ${error}`);

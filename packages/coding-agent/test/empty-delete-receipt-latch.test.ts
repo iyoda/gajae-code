@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { exactUnlinkDirect } from "@gajae-code/natives";
 import { writeCoordinatorAtomic } from "../src/coordinator-mcp/durability";
 import { COORDINATOR_JSON_SCAN_CAP, listCoordinatorJsonFiles } from "../src/coordinator-mcp/projection-scan";
 import { collectEmptyDeleteReceipts, runEmptyDeleteGc } from "../src/gjc-runtime/empty-delete-gc";
@@ -170,24 +171,57 @@ describe("empty .gjc-delete-* latch", () => {
 		expect(await fs.readFile(live, "utf8")).toBe("{}");
 	});
 
-	it("Test 4b: gc keeps symlink root and identity-drifted empty replacement", async () => {
+	it("Test 4b: symlink root skipped; forged non-UUID and GC-minted names never collected", async () => {
 		const root = await tempRoot("gjc-gc-id-");
 		const linked = path.join(root, "linked-root");
 		await fs.symlink(root, linked);
 		const viaLink = await runEmptyDeleteGc({ roots: [linked], prune: false });
 		expect(viaLink.records.some(r => r.reason === "symlink_root")).toBe(true);
 		const empty = path.join(root, ".gjc-delete-session-state-lock-ffffffff-ffff-ffff-ffff-ffffffffffff.json");
-		await fs.writeFile(empty, "");
+		const shortHex = path.join(root, ".gjc-delete-session-state-lock-aaaaaaaa.json");
+		const gcMinted = path.join(root, ".gjc-delete-gc-33333333-3333-3333-3333-333333333333.json");
+		await Promise.all([fs.writeFile(empty, ""), fs.writeFile(shortHex, ""), fs.writeFile(gcMinted, "")]);
 		const collected = await collectEmptyDeleteReceipts(root);
 		expect(collected.find(r => r.path === empty)?.identity).toBeDefined();
-		await fs.unlink(empty);
-		await fs.writeFile(empty, "");
+		expect(collected.find(r => r.path === shortHex)).toBeUndefined();
+		expect(collected.find(r => r.path === gcMinted)).toBeUndefined();
 		const pruned = await runEmptyDeleteGc({ roots: [root], prune: true });
-		const row = pruned.records.find(r => r.path === empty);
-		expect(row).toBeDefined();
-		if (row?.reason === "identity_drift") {
-			expect(await fs.readFile(empty, "utf8")).toBe("");
-		}
+		expect(pruned.removed).toBe(1);
+		// The forged suffix and the GC-minted namespace survive a prune untouched.
+		expect(await fs.readFile(shortHex, "utf8")).toBe("");
+		expect(await fs.readFile(gcMinted, "utf8")).toBe("");
+	});
+
+	it("Test 4c: replacement planted after collection is refused by identity drift", async () => {
+		const root = await tempRoot("gjc-gc-drift-");
+		const file = path.join(root, ".gjc-delete-session-state-lock-22222222-2222-2222-2222-222222222222.json");
+		await fs.writeFile(file, "");
+		const collected = await collectEmptyDeleteReceipts(root);
+		const wouldRemove = collected.find(r => r.action === "would_remove");
+		expect(wouldRemove?.identity).toBeDefined();
+		// Swap the object out from under the collected identity: same pathname, and on
+		// inode-recycling filesystems even the same inode — but a later mtime.
+		await Bun.sleep(20);
+		await fs.unlink(file);
+		await fs.writeFile(file, "payload");
+		const pruned = await runEmptyDeleteGc({ roots: [root], prune: true });
+		const row = pruned.records.find(r => r.path === file);
+		// The non-empty replacement is kept before any unlink is attempted; the
+		// identity-drift refusal is proven separately at the native boundary below.
+		expect(row?.action).toBe("kept");
+		expect(["non_empty", "identity_drift"]).toContain(row?.reason ?? "");
+		expect(pruned.removed).toBe(0);
+		// The replacement survives: no deletion path may consume it.
+		expect(await fs.readFile(file, "utf8")).toBe("payload");
+		// Native-boundary drift proof: the stale collected identity must be refused
+		// against the replaced object, and the replacement must remain.
+		const driftResult = exactUnlinkDirect(file, {
+			...wouldRemove!.identity!,
+			quarantineName: ".gjc-delete-drift-probe.json",
+		});
+		expect(driftResult.ok).toBe(false);
+		expect(driftResult.code).toBe("identity_mismatch");
+		expect(await fs.readFile(file, "utf8")).toBe("payload");
 	});
 
 	it("Test 4 CLI: empty-delete-receipts requires operand", async () => {
@@ -218,6 +252,57 @@ describe("empty .gjc-delete-* latch", () => {
 		const result = await runGjcGcCommand(["--empty-delete-receipts", "--manifest", manifest], root, process.env, []);
 		expect(result.status).toBe(2);
 		expect(result.stderr).toContain("manifest_invalid");
+	});
+
+	it("Test 4d CLI: malformed manifest with --prune mutates nothing", async () => {
+		const root = await tempRoot("gjc-gc-preflight-");
+		const manifest = path.join(root, "manifest.json");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-44444444-4444-4444-4444-444444444444.json");
+		await fs.writeFile(manifest, "{");
+		await fs.writeFile(empty, "");
+		const result = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--manifest", manifest, "--root", root],
+			root,
+			process.env,
+			[],
+		);
+		expect(result.status).toBe(2);
+		expect(result.stdout).toBe("");
+		// Operand validation failed before any store could prune: the receipt is intact.
+		expect(await fs.readFile(empty, "utf8")).toBe("");
+	});
+
+	it("Test 4e CLI: a following option token is a missing operand, not a root", async () => {
+		const root = await tempRoot("gjc-gc-opttoken-");
+		const result = await runGjcGcCommand(["--empty-delete-receipts", "--root", "--json"], root, process.env, []);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("missing_root");
+		const manifest = await runGjcGcCommand(
+			["--empty-delete-receipts", "--manifest", "--json"],
+			root,
+			process.env,
+			[],
+		);
+		expect(manifest.status).toBe(2);
+		expect(manifest.stderr).toContain("missing_manifest");
+	});
+
+	it("Test 2c: replacement planted under a verified quarantine name survives cleanup", async () => {
+		const dir = await tempRoot("gjc-quarantine-toctou-");
+		const reserved = ".gjc-delete-session-state-lock-55555555-5555-5555-5555-555555555555.json";
+		const target = path.join(dir, reserved);
+		await fs.writeFile(target, "");
+		// Observe the empty leftover, then swap in a replacement before cleanup runs.
+		const observed = await fs.lstat(target, { bigint: true });
+		await Bun.sleep(20);
+		await fs.unlink(target);
+		await fs.writeFile(target, "operator payload");
+		const stat = await fs.lstat(target, { bigint: true });
+		expect(stat.mtimeNs).not.toBe(observed.mtimeNs);
+		await removeVerifiedEmptyQuarantine(dir, reserved);
+		// The replacement is NOT the verified-empty object, so identity-bound cleanup
+		// must refuse it and leave every byte in place.
+		expect(await fs.readFile(target, "utf8")).toBe("operator payload");
 	});
 
 	it("Test 5: atomic write leaves no 0-byte canonical on crash-before-rename", async () => {

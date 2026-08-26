@@ -323,13 +323,14 @@ function parseGcArgs(argv: string[]): ParsedGcArgs {
 				break;
 			case "--root": {
 				const value = argv[++i];
-				if (!value) throw new GcUsageError("missing_root");
+				// A following option token is a missing operand, not a root path.
+				if (!value || value.startsWith("--")) throw new GcUsageError("missing_root");
 				emptyDeleteRoots.push(value);
 				break;
 			}
 			case "--manifest": {
 				const value = argv[++i];
-				if (!value) throw new GcUsageError("missing_manifest");
+				if (!value || value.startsWith("--")) throw new GcUsageError("missing_manifest");
 				emptyDeleteManifest = value;
 				break;
 			}
@@ -502,21 +503,12 @@ export async function runGjcGcCommand(
 		return { stdout: gcHelpText(), stderr: "", status: 0 };
 	}
 
-	const resolvedAdapters = adapters ?? (await defaultGcAdapters());
-	const ctx: GcContext = { probe: gcPidProbe, force: parsed.prune, env, cwd };
-	const report = await collectGcReport(resolvedAdapters, ctx, parsed.prune);
-	report.operation = parsed.repairSessionIndex ? "repair_session_index" : parsed.prune ? "prune" : "dry_run";
-	report.session_index = await collectSessionIndexHealth(parsed.repairSessionIndex, resolveGcAgentDir(env));
-	if (parsed.disk) {
-		report.disk = await collectGcDiskReport({
-			agentDir: resolveGcAgentDir(env),
-			env,
-			policy: resolveGcDiskPolicy(diskPolicy),
-			prune: parsed.prune,
-		});
-	}
+	// Resolve and validate every empty-delete operand BEFORE any store collection or
+	// prune can mutate: a malformed manifest or missing operand must fail with status 2
+	// while every candidate is still untouched.
+	let emptyDeleteRoots: string[] = [];
 	if (parsed.emptyDeleteReceipts) {
-		const roots = [...parsed.emptyDeleteRoots];
+		emptyDeleteRoots = [...parsed.emptyDeleteRoots];
 		if (parsed.emptyDeleteManifest) {
 			let parsedManifest: { roots?: unknown };
 			try {
@@ -533,13 +525,28 @@ export async function runGjcGcCommand(
 				if (typeof root !== "string" || root.length === 0) {
 					return { stdout: "", stderr: "gjc gc: manifest_root_invalid\n", status: 2 };
 				}
-				roots.push(root);
+				emptyDeleteRoots.push(root);
 			}
 		}
-		if (roots.length === 0) {
+		if (emptyDeleteRoots.length === 0) {
 			return { stdout: "", stderr: "gjc gc: empty_delete_receipts_requires_root_or_manifest\n", status: 2 };
 		}
-		report.empty_delete_receipts = await runEmptyDeleteGc({ roots, prune: parsed.prune });
+	}
+	const resolvedAdapters = adapters ?? (await defaultGcAdapters());
+	const ctx: GcContext = { probe: gcPidProbe, force: parsed.prune, env, cwd };
+	const report = await collectGcReport(resolvedAdapters, ctx, parsed.prune);
+	report.operation = parsed.repairSessionIndex ? "repair_session_index" : parsed.prune ? "prune" : "dry_run";
+	report.session_index = await collectSessionIndexHealth(parsed.repairSessionIndex, resolveGcAgentDir(env));
+	if (parsed.disk) {
+		report.disk = await collectGcDiskReport({
+			agentDir: resolveGcAgentDir(env),
+			env,
+			policy: resolveGcDiskPolicy(diskPolicy),
+			prune: parsed.prune,
+		});
+	}
+	if (parsed.emptyDeleteReceipts) {
+		report.empty_delete_receipts = await runEmptyDeleteGc({ roots: emptyDeleteRoots, prune: parsed.prune });
 	}
 	const scopeUsage = await collectGcSessionScope(cwd, resolveGcAgentDir(env));
 	if (scopeUsage && shouldReportSessionScope(scopeUsage)) report.session_scope = scopeUsage;

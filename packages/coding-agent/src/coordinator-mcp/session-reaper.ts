@@ -100,9 +100,15 @@ export function createSessionReaper(deps: SessionReaperDeps, policy: SessionReap
 	function schedule(gen: number): void {
 		timer = setTimeout(() => {
 			if (gen !== generation) return; // stale timer from a prior start()
-			void sweepOnce().finally(() => {
-				if (gen === generation) schedule(gen);
-			});
+			void sweepOnce()
+				.catch(error => {
+					// A refused sweep (e.g. a fail-closed capped projection scan) must not
+					// become an unhandled rejection; log and keep the schedule alive.
+					logger.warn(`session-reaper: sweep refused: ${error instanceof Error ? error.message : String(error)}`);
+				})
+				.finally(() => {
+					if (gen === generation) schedule(gen);
+				});
 		}, sweepIntervalMs);
 		// The reaper must never keep the coordinator process alive by itself.
 		(timer as { unref?: () => void }).unref?.();

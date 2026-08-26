@@ -33,6 +33,17 @@ export default class Gc extends Command {
 			description: "Quarantine a corrupt session-index suffix and retain its valid prefix",
 			default: false,
 		}),
+		"empty-delete-receipts": Flags.boolean({
+			description: "Report (and with --prune, prune) empty .gjc-delete-* receipts under --root/--manifest",
+			default: false,
+		}),
+		root: Flags.string({
+			description: "Operand root for --empty-delete-receipts (repeatable)",
+			multiple: true,
+		}),
+		manifest: Flags.string({
+			description: 'JSON {"roots":[...]} file for --empty-delete-receipts',
+		}),
 	};
 
 	static examples = [
@@ -44,6 +55,8 @@ export default class Gc extends Command {
 		"gjc gc --disk --json",
 		"gjc gc --disk --prune",
 		"gjc gc --repair-session-index --json",
+		"gjc gc --empty-delete-receipts --root ~/.gjc/agent/session-states",
+		"gjc gc --empty-delete-receipts --manifest receipts-manifest.json --prune --json",
 	];
 
 	async run(): Promise<void> {

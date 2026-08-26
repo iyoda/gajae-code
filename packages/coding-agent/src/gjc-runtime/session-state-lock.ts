@@ -11,6 +11,9 @@ import { genericFileLockDirIsStale, processStartTime as portableProcessStartTime
 import { loadInstallationHostId, loadLegacyInstallationHostId } from "../config/machine-identity";
 import { readLinuxProcStartTimeSync } from "./linux-proc";
 
+/** SHA-256 of the empty payload; the constant identity of every verified-empty receipt. */
+const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 /**
  * The one lock implementation for a coordinator-shared session state file.
  *
@@ -180,7 +183,7 @@ export class SessionStateLockUnavailableError extends Error {
  */
 export type SessionStateLockNativeBindings = Pick<
 	typeof import("@gajae-code/natives"),
-	"exactRemoveDirectoryTree" | "exactUnlink" | "snapshotDirectoryTree"
+	"exactRemoveDirectoryTree" | "exactUnlink" | "exactUnlinkDirect" | "snapshotDirectoryTree"
 >;
 
 /** How the deletion primitives are obtained. Throwing means they are unavailable. */
@@ -961,21 +964,39 @@ async function reclaimStaleOwnerRecord(
 		throw new SessionStateLockUnavailableError(new Error("Stale owner record could not be reclaimed."));
 }
 
-/** Verified empty leftover at a reserved quarantine name is incomplete debris, not in-progress cleanup. */
+/**
+ * Verified empty leftover at a reserved quarantine name is incomplete debris, not
+ * in-progress cleanup.
+ *
+ * Deletion authority is the native identity-bound direct unlink — never a plain
+ * pathname unlink. A replacement planted at the reserved name between observation
+ * and deletion has a different inode identity and is refused by construction.
+ */
 export async function removeVerifiedEmptyQuarantine(directory: string, name: string): Promise<void> {
 	if (!name.startsWith(".gjc-delete-") || name.includes("/") || name.includes("\0")) return;
 	const target = path.join(directory, name);
-	let stat: fsSync.Stats;
+	let stat: fsSync.BigIntStats;
 	try {
-		stat = await fs.lstat(target);
+		stat = await fs.lstat(target, { bigint: true });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw error;
 	}
-	if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== 0 || stat.nlink !== 1) return;
-	await fs.unlink(target).catch(error => {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== 0n || stat.nlink !== 1n) return;
+	const result = nativeSessionStateLock().exactUnlinkDirect(target, {
+		dev: stat.dev,
+		ino: stat.ino,
+		nlink: stat.nlink,
+		size: stat.size,
+		mtimeNs: stat.mtimeNs,
+		sha256: EMPTY_FILE_SHA256,
+		quarantineName: `.gjc-delete-cleanup-${randomUUID()}.json`,
 	});
+	// not_found is an ordinary concurrent-cleanup race; identity_mismatch means a
+	// replacement owns the pathname now and must be left alone. Any other failure
+	// leaves the (empty, verified) leftover in place for the next cycle rather than
+	// falling back to a pathname delete.
+	if (!result.ok && result.code !== "not_found" && result.code !== "identity_mismatch") return;
 }
 
 async function releaseTransitionClaim(

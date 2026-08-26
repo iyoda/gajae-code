@@ -59,7 +59,47 @@ function exactUnlink(target: string, identity: NativeExactFileIdentity): NativeE
 	return { ok: true };
 }
 
-function treeEntries(root: string, relativePath: string, into: NativeDirectoryTreeEntry[]): string | undefined {
+/**
+ * Faithful stand-in for the debris variant: detach to the caller's private quarantine
+ * name, revalidate identity there, then remove. A replacement at the original pathname
+ * is never consumed; a mismatch at the quarantine name restores the detached object
+ * whenever the original pathname is still vacant, mirroring the native no-replace
+ * exchange semantics.
+ */
+function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): NativeExactUnlinkResult {
+	const quarantine = identity.quarantineName;
+	if (
+		typeof quarantine !== "string" ||
+		quarantine === "" ||
+		quarantine === "." ||
+		quarantine === ".." ||
+		quarantine.includes("/")
+	)
+		return { ok: false, code: "invalid_request" };
+	const detached = path.join(path.dirname(target), quarantine);
+	try {
+		fs.renameSync(target, detached);
+	} catch (error) {
+		return isEnoent(error) ? { ok: false, code: "not_found" } : { ok: false, code: "io_error" };
+	}
+	const result = exactUnlink(detached, identity);
+	if (result.ok) return { ok: true };
+	if (result.code === "identity_mismatch") {
+		try {
+			if (!fs.existsSync(target)) fs.renameSync(detached, target);
+		} catch {
+			/* the mismatch verdict already stands */
+		}
+		return { ok: false, code: "identity_mismatch", detachedPath: detached };
+	}
+	return { ...result, detachedPath: detached };
+}
+
+function treeEntries(
+	root: string,
+	relativePath: string,
+	into: NativeDirectoryTreeEntry[],
+): "reparse_point" | "unsupported_entry" | "not_a_directory" | undefined {
 	const absolute = relativePath === "" ? root : path.join(root, relativePath);
 	const stat = fs.lstatSync(absolute, { bigint: true });
 	if (stat.isSymbolicLink()) return "reparse_point";
@@ -109,6 +149,7 @@ function exactRemoveDirectoryTree(root: string, snapshot: NativeDirectoryTreeSna
 
 export const exactIdentityNativeBindings: SessionStateLockNativeBindings = {
 	exactUnlink,
+	exactUnlinkDirect,
 	snapshotDirectoryTree,
 	exactRemoveDirectoryTree,
 };
