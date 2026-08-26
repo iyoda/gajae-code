@@ -1037,7 +1037,12 @@ export function planTargetedTasks(
 // so the matrix shard name stays small and directly traceable to the file.
 function addTestFileTask(tasks: Map<string, Task>, testFile: string, requireExisting = false): void {
 	if (requireExisting && !fsSync.existsSync(path.join(repoRoot, testFile))) return;
-	const timeout = testFile === "packages/coding-agent/test/model-registry.test.ts" ? "120000" : undefined;
+	const timeout =
+		testFile === "packages/coding-agent/test/model-registry.test.ts"
+			? "120000"
+			: testFile === "packages/coding-agent/src/sdk/host/session-runtime.test.ts"
+				? "30000"
+				: undefined;
 	add(
 		tasks,
 		`test:${testFile}`,
