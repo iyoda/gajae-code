@@ -186,14 +186,6 @@ export type ManagedAttemptOutcome =
 			type: "escaped_arguments_discarded";
 			/** The defective assistant turn; already removed from usable history by the loop. */
 			message: AssistantMessage;
-			/**
-			 * True when this discarded attempt had no transient steering instruction
-			 * attached yet. A managed retry continuation should carry the escaped
-			 * non-ASCII recovery instruction exactly once, so a deterministic
-			 * escaper has a reason to change its spelling; the instruction never
-			 * lands in durable history. Absent/false means steering already ran.
-			 */
-			steeringPending?: boolean;
 			scope?: AttemptScope;
 	  }
 	| { type: "context_overflow_discarded"; message: AssistantMessage; scope?: AttemptScope }

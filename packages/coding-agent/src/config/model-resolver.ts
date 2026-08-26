@@ -1025,6 +1025,7 @@ export interface ModelChainResolutionOptions {
 	aliasIntent?: "preset-equivalent" | "reject";
 	canonicalSessionId?: string | null;
 	credentialSessionId?: string;
+	signal?: AbortSignal;
 }
 
 export async function resolveModelChainWithAuth(
@@ -1080,7 +1081,7 @@ export async function resolveModelChainWithAuth(
 					break;
 				}
 			}
-			const key = await modelRegistry.getApiKey(candidate.model, credentialSessionId);
+			const key = await modelRegistry.getApiKey(candidate.model, credentialSessionId, { signal: options?.signal });
 			if (isAuthenticatedOrKeyless(key)) {
 				return { ...candidate, activeIndex, skips };
 			}
