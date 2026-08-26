@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { registerOwnedDeletionRoot } from "../../../scripts/safe-cleanup";
 import { withModelPresetRegistryTestTrust } from "../src/config/internal/model-preset-registry-test-support";
 import {
 	canonicalModelPresetRegistryJson,
@@ -25,9 +26,18 @@ import { Settings } from "../src/config/settings";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const directories: string[] = [];
+const ownedDirectoryDisposers: Array<() => void> = [];
 const testTrustRunners = new Map<string, <T>(operation: () => T) => T>();
 setDefaultTimeout(30_000);
 const manifestUrl = "https://presets.gajae-code.test/latest.json";
+
+async function createTrackedDirectory(prefix: string): Promise<string> {
+	const directory = path.join(os.tmpdir(), `${prefix}${crypto.randomUUID()}`);
+	ownedDirectoryDisposers.push(registerOwnedDeletionRoot(directory));
+	await fs.mkdir(directory, { recursive: true });
+	directories.push(directory);
+	return directory;
+}
 
 function refreshModelPresetRegistry(options: Parameters<typeof refreshModelPresetRegistryImpl>[0] = {}) {
 	const run = options.agentDir ? testTrustRunners.get(options.agentDir) : undefined;
@@ -110,8 +120,7 @@ interface SignedRegistryFixture {
 }
 
 async function fixture(): Promise<RegistryFixture> {
-	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-preset-registry-"));
-	directories.push(agentDir);
+	const agentDir = await createTrackedDirectory("gjc-preset-registry-");
 	const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 	const trustedKey: ModelPresetRegistryTrustedKey = {
 		keyId: "test-key",
@@ -226,6 +235,7 @@ async function accept(
 afterEach(async () => {
 	for (const directory of directories) testTrustRunners.delete(directory);
 	await Promise.all(directories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
+	for (const dispose of ownedDirectoryDisposers.splice(0)) dispose();
 });
 
 describe("signed model preset registry", () => {
@@ -252,8 +262,7 @@ describe("signed model preset registry", () => {
 	});
 
 	test("accepts the exact producer revision-1 manifest signature and snapshot binding", async () => {
-		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-preset-production-contract-"));
-		directories.push(agentDir);
+		const agentDir = await createTrackedDirectory("gjc-preset-production-contract-");
 		let calls = 0;
 		const fetchImpl = (async () => {
 			calls++;
@@ -590,8 +599,7 @@ describe("signed model preset registry", () => {
 		expect(
 			(await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json()).externalWriterMarker,
 		).toBe("preserve-me");
-		const externalAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-preset-registry-external-"));
-		directories.push(externalAgentDir);
+		const externalAgentDir = await createTrackedDirectory("gjc-preset-registry-external-");
 		const externalRun = <T>(operation: () => T): T =>
 			withModelPresetRegistryTestTrust(externalAgentDir, data.trustedKeys, operation);
 		testTrustRunners.set(externalAgentDir, externalRun);
