@@ -155,6 +155,23 @@ export class FallbackChainController {
 		return this.advance() ? "advance" : "exhausted";
 	}
 
+	/**
+	 * Record one bounded escaped-argument exhaustion for the active model and
+	 * advance immediately. The discarded wire attempts are intentionally not
+	 * provider charges; this single policy charge prevents the same model from
+	 * being retried forever while still allowing every eligible fallback model
+	 * its own literal-UTF-8 recovery budget.
+	 */
+	recordEscapedArgumentsFailure(reason: string, advance = true): boolean {
+		const selector = this.currentSelector();
+		if (!selector || this.exhaustedForTurn) return false;
+		this.#attemptStarted = false;
+		this.attemptsUsed = this.maxAttempts;
+		this.#totalAttemptsUsed += 1;
+		this.tried.push({ selector, triggerClass: "unknown", reason });
+		return advance ? this.advance() : this.activeIndex + 1 < this.chain.entries.length;
+	}
+
 	advance(): boolean {
 		if (this.exhaustedForTurn) return false;
 		this.activeIndex += 1;

@@ -320,6 +320,14 @@ export function stream<TApi extends Api>(
 	if (options?.fallbackManaged) {
 		options = { ...options, requestMaxRetries: 0, streamMaxRetries: 0 } as OptionsForApi<TApi>;
 	}
+	// Canonical low-level boundary: the request budget must be a positive safe
+	// integer. Provider options arrive here unvalidated (unlike `streamSimple`,
+	// whose resolver already normalizes), so an unsafe value is dropped to
+	// unspecified here once for every dispatch below — integer-only provider
+	// fields can never receive a fractional or MAX_SAFE_INTEGER+1 budget.
+	if (options?.maxTokens !== undefined && !(Number.isSafeInteger(options.maxTokens) && options.maxTokens > 0)) {
+		options = { ...options, maxTokens: undefined } as OptionsForApi<TApi>;
+	}
 	// Check custom API registry first (extension-provided APIs like "vertex-Anthropic model-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
@@ -613,17 +621,18 @@ export function streamSimple<TApi extends Api>(
 	// the gateway bearer instead. Comes BEFORE the custom-API check so
 	// extension-registered APIs can't accidentally override a configured
 	// pi-native transport.
+	const resolvedRequestMaxTokens = resolveDefaultRequestMaxTokens(model, options?.maxTokens);
 	if (model.transport === "pi-native") {
 		return streamFromLazyImport(async () => {
 			const { streamPiNative } = await import("./providers/pi-native-client");
-			return streamPiNative(model, context, options);
+			return streamPiNative(model, context, { ...options, maxTokens: resolvedRequestMaxTokens });
 		}, options?.signal);
 	}
 
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.streamSimple(model, context, options);
+		return customApiProvider.streamSimple(model, context, { ...options, maxTokens: resolvedRequestMaxTokens });
 	}
 
 	// Vertex AI uses Application Default Credentials, not API keys
@@ -643,6 +652,7 @@ export function streamSimple<TApi extends Api>(
 	const adapterOptions = isProviderSafetyStopModelTrusted(model)
 		? withProviderSafetyStopAdapterInvocation(options ?? {})
 		: options;
+	const resolvedSpecialProviderMaxTokens = resolvedRequestMaxTokens;
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (model.provider === "gitlab-duo") {
@@ -654,6 +664,7 @@ export function streamSimple<TApi extends Api>(
 				copyProviderSafetyStopAdapterInvocation(adapterOptions, {
 					...adapterOptions,
 					apiKey,
+					maxTokens: resolvedSpecialProviderMaxTokens,
 				}),
 			);
 		}, options?.signal);
@@ -670,6 +681,7 @@ export function streamSimple<TApi extends Api>(
 				copyProviderSafetyStopAdapterInvocation(adapterOptions, {
 					...adapterOptions,
 					apiKey,
+					maxTokens: resolvedSpecialProviderMaxTokens,
 					format: options?.kimiApiFormat ?? "anthropic",
 				}),
 			);
@@ -687,6 +699,7 @@ export function streamSimple<TApi extends Api>(
 				copyProviderSafetyStopAdapterInvocation(adapterOptions, {
 					...adapterOptions,
 					apiKey,
+					maxTokens: resolvedSpecialProviderMaxTokens,
 					format: options?.syntheticApiFormat ?? "openai", // Default to OpenAI format
 				}),
 			);
@@ -707,6 +720,7 @@ export async function completeSimple<TApi extends Api>(
 }
 
 const MIN_OUTPUT_TOKENS = 1024;
+const DEFAULT_REQUEST_MAX_TOKENS = 32000;
 export const OUTPUT_FALLBACK_BUFFER = 4000;
 const ANTHROPIC_USE_INTERLEAVED_THINKING = Bun.env.PI_NO_INTERLEAVED_THINKING !== "1";
 
@@ -804,6 +818,16 @@ function resolveOpenAiReasoningEffort<TApi extends Api>(
 
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
 
+export function resolveDefaultRequestMaxTokens<TApi extends Api>(model: Model<TApi>, requested?: number): number {
+	if (requested !== undefined && Number.isSafeInteger(requested) && requested > 0) return requested;
+	if (model.maxTokensSource === "configured" && Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0) {
+		return model.maxTokens;
+	}
+	return Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0
+		? Math.min(model.maxTokens, DEFAULT_REQUEST_MAX_TOKENS)
+		: DEFAULT_REQUEST_MAX_TOKENS;
+}
+
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	options?: SimpleStreamOptions,
@@ -816,7 +840,7 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
-		maxTokens: options?.maxTokens || Math.min(model.maxTokens, 32000),
+		maxTokens: resolveDefaultRequestMaxTokens(model, options?.maxTokens),
 		signal: options?.signal,
 		apiKey: apiKey || options?.apiKey,
 		fallbackManaged: options?.fallbackManaged,
@@ -888,8 +912,13 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
-			// Caller's maxTokens is the desired output; add thinking budget on top, capped at model limit
-			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
+			// Caller's maxTokens is the desired output; add thinking budget on top,
+			// capped at the model limit. `base.maxTokens` is already resolver-sanitized,
+			// so only a finite positive model cap participates (malformed metadata
+			// cannot reintroduce NaN into the wire budget).
+			const modelCap =
+				Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? model.maxTokens : base.maxTokens;
+			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, modelCap);
 
 			// If not enough room for thinking + output, reduce thinking budget
 			if (maxTokens <= thinkingBudget) {
@@ -1048,12 +1077,17 @@ function mapOptionsForApi<TApi extends Api>(
 
 			let thinkingBudget = options.thinkingBudgets?.[effort] ?? GOOGLE_THINKING[effort];
 
-			// Caller's maxTokens is the desired output; add thinking budget on top, capped at model limit
-			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
+			// Caller's maxTokens is the desired output; add thinking budget on top,
+			// capped at the model limit. `base.maxTokens` is already resolver-sanitized,
+			// so only a finite positive model cap participates (malformed metadata
+			// cannot reintroduce NaN into the wire budget).
+			const modelCap =
+				Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? model.maxTokens : base.maxTokens;
+			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, modelCap);
 
 			// If not enough room for thinking + output, reduce thinking budget
 			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS) ?? 0;
+				thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
 			}
 
 			// If thinking budget is too low, disable thinking

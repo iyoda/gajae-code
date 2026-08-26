@@ -164,6 +164,7 @@ Authoritative inventory of the keybinding registry, one row per action. Generate
 | `app.clipboard.pasteText` | _(none)_ | composer |
 | `app.clipboard.copyLine` | alt+shift+l | composer |
 | `app.clipboard.copyPrompt` | alt+shift+c | composer |
+| `app.clipboard.copyOAuthUrl` | alt+shift+u | composer |
 | `app.session.new` | ctrl+n | composer |
 | `app.session.tree` | alt+shift+s | composer |
 | `app.session.fork` | alt+shift+f | composer |

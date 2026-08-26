@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
+	captureUnicodeEscapeEvidence,
 	collectUnicodeEscapeEvidence,
+	collectUnsafeUnicodeEscapeEvidence,
 	findUnnecessaryUnicodeEscape,
 	isCompleteJson,
 	parseJsonWithRepair,
 	parseStreamingJson,
 	repairJson,
+	type UnicodeEscapeEvidence,
 	unicodeEscapePathTag,
 	unicodeEscapeScalarTag,
 	verifyUnicodeEscapeEvidence,
@@ -211,6 +214,45 @@ describe("findUnnecessaryUnicodeEscape", () => {
 			truncated: false,
 			malformed: true,
 		});
+	});
+
+	it.each([
+		["Hangul", String.raw`{"q":"\ub9c8\uc9c0\ub9c9 \ubcd1\ubaa9"}`],
+		["emoji surrogate pair", String.raw`{"q":"\ud83d\ude00"}`],
+		["printable ASCII", String.raw`{"q":"\u0077"}`],
+		["escaped source syntax", String.raw`{"q":"\\u2014"}`],
+	])("treats valid JSON escapes as canonical decoded arguments: %s", (_label, raw) => {
+		expect(collectUnsafeUnicodeEscapeEvidence(raw)).toBeUndefined();
+	});
+
+	it.each([
+		["malformed JSON", String.raw`{"q":"\u2014"`],
+		["duplicate object member", String.raw`{"q":"\u2014","q":"—"}`],
+		["lone high surrogate", String.raw`{"q":"\ud83d"}`],
+		["lone low surrogate", String.raw`{"q":"\ude00"}`],
+		["literal lone high surrogate", `{"q":"${String.fromCharCode(0xd83d)}"}`],
+	])("keeps unsafe Unicode argument data fail-closed: %s", (_label, raw) => {
+		expect(collectUnsafeUnicodeEscapeEvidence(raw)).toMatchObject({
+			positions: [],
+			totalPositions: 0,
+			truncated: false,
+			malformed: true,
+		});
+	});
+
+	it("attaches guard metadata only for unsafe Unicode argument data", () => {
+		const valid: {
+			escapedNonAsciiArguments?: boolean;
+			escapedUnicodeArgumentEvidence?: UnicodeEscapeEvidence;
+		} = {};
+		expect(captureUnicodeEscapeEvidence(valid, String.raw`{"q":"\ub9c8\uc9c0\ub9c9"}`)).toBe(false);
+		expect(valid.escapedNonAsciiArguments).toBeUndefined();
+		expect(valid.escapedUnicodeArgumentEvidence).toBeUndefined();
+
+		const unsafe: typeof valid = {};
+		expect(captureUnicodeEscapeEvidence(unsafe, String.raw`{"q":"\ud83d"}`)).toBe(true);
+		expect(unsafe.escapedNonAsciiArguments).toBe(true);
+		expect(unsafe.escapedUnicodeArgumentEvidence?.malformed).toBe(true);
 	});
 
 	it("keeps dotted keys distinct from nested display paths", () => {

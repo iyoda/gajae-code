@@ -11,6 +11,7 @@ import type {
 	SessionLifecycleOperation,
 	SessionLifecycleSavedSession,
 	SessionLifecycleSavedSessionIdentity,
+	SessionReconcileUncertainTarget,
 } from "../lifecycle/service";
 import { PROMPT_CLIENT_REF_MAX_LENGTH } from "../prompt-status";
 import { validateAdapterControl, validateAdapterSecretFields } from "../protocol/adapter-validation";
@@ -36,6 +37,7 @@ export type SdkSessionCliAction =
 	| "send"
 	| "status"
 	| "tail"
+	| "retire"
 	| "raw"
 	| "control"
 	| "query"
@@ -209,7 +211,8 @@ function isLifecycleOperation(operation: string): operation is LifecycleMutation
 		operation === "session.fork" ||
 		operation === "session.resume" ||
 		operation === "session.close" ||
-		operation === "session.delete"
+		operation === "session.delete" ||
+		operation === "session.reconcile_uncertain"
 	);
 }
 
@@ -1294,11 +1297,16 @@ function lifecycleMutationRequest(
 			2,
 		);
 	const target = input as JsonRecord & { sessionId: string };
-	return operation === "session.resume"
-		? { ...base, operation, capability: operation, target }
-		: operation === "session.close"
-			? { ...base, operation, capability: operation, target }
-			: { ...base, operation, capability: "session.delete", target };
+	if (operation === "session.resume") return { ...base, operation, capability: operation, target };
+	if (operation === "session.close") return { ...base, operation, capability: operation, target };
+	if (operation === "session.reconcile_uncertain")
+		return {
+			...base,
+			operation,
+			capability: operation,
+			target: input as unknown as SessionReconcileUncertainTarget,
+		};
+	return { ...base, operation, capability: "session.delete", target };
 }
 
 async function runRawGlobal(
@@ -1346,6 +1354,7 @@ export async function runSdkSessionCli(
 			action !== "send" &&
 			action !== "status" &&
 			action !== "tail" &&
+			action !== "retire" &&
 			action !== "raw" &&
 			action !== "control" &&
 			action !== "query" &&
@@ -1353,7 +1362,7 @@ export async function runSdkSessionCli(
 		)
 			throw new SdkSessionCliError(
 				"usage",
-				"Expected one of: list, inspect, send, status, tail, raw (control|query|global).",
+				"Expected one of: list, inspect, send, status, tail, retire, raw (control|query|global).",
 				2,
 			);
 		const agentDir = args.agentDir ?? getAgentDir();
@@ -1386,6 +1395,24 @@ export async function runSdkSessionCli(
 			writeOutput(
 				stripSecretFields(
 					await runTail(args.repo ?? process.cwd(), agentDir, requireValue(args.sessionId, "<sessionId>"), args),
+				),
+			);
+			return;
+		}
+		if (action === "retire") {
+			const sessionId = requireValue(args.sessionId, "<sessionId>");
+			const input = await inputFromArgs(args);
+			if (input.sessionId !== undefined && input.sessionId !== sessionId)
+				throw new SdkSessionCliError(
+					"invalid_input",
+					"Retirement sessionId does not match the selected session.",
+					2,
+				);
+			const secretError = validateAdapterSecretFields("session.reconcile_uncertain", input);
+			if (secretError) throw new SdkSessionCliError(secretError.code, secretError.message, 2);
+			writeOutput(
+				stripSecretFields(
+					await runRawGlobal(agentDir, "session.reconcile_uncertain", { ...input, sessionId }, args),
 				),
 			);
 			return;

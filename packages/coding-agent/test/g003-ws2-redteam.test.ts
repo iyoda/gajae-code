@@ -38,6 +38,9 @@ function createControllerContext(overrides: Partial<InteractiveModeContext> = {}
 		todoPhases: [],
 		showError: () => {},
 		showStatus: () => {},
+		beginOAuthUrlForCopy: () => () => {},
+		hasOAuthUrlForCopy: () => false,
+		copyOAuthUrl: async () => {},
 		historyStorage: { getRecent: () => [] },
 		skillCommands: new Map(),
 		...overrides,
@@ -174,6 +177,49 @@ describe("G003 WS2 red-team: command palette", () => {
 		palette?.handleInput("\n");
 		await Promise.resolve();
 		expect(order).toEqual(["hide", "focus", "execute", "error"]);
+	});
+
+	it("emits no error events while building the palette and gates the OAuth URL-copy entry on lease availability", async () => {
+		const order: string[] = [];
+		let leaseActive = false;
+		let palette: CommandPalette | undefined;
+		const ctx = createControllerContext({
+			hasOAuthUrlForCopy: () => leaseActive,
+			copyOAuthUrl: async () => {
+				order.push("copy");
+				throw new Error("clipboard failed");
+			},
+			showError: (message: string) => order.push(`error:${message}`),
+			ui: {
+				showOverlay(component: CommandPalette) {
+					palette = component;
+					return { hide: () => order.push("hide") };
+				},
+				setFocus: () => {},
+				requestRender: () => {},
+			} as never,
+		});
+		const controller = new InputController(ctx);
+		controller.openCommandPalette();
+		expect(palette?.getEntries().some(entry => entry.id === "action:app.clipboard.copyOAuthUrl")).toBe(false);
+		expect(order).toEqual([]);
+
+		leaseActive = true;
+		await Promise.resolve();
+		controller.openCommandPalette();
+		const oauthEntry = palette?.getEntries().find(entry => entry.id === "action:app.clipboard.copyOAuthUrl");
+		expect(oauthEntry?.handler).toBeDefined();
+		expect(order).toEqual([]);
+
+		leaseActive = false;
+		await oauthEntry?.handler?.();
+		await Promise.resolve();
+		expect(order).toEqual([]);
+
+		leaseActive = true;
+		await oauthEntry?.handler?.();
+		await Promise.resolve();
+		expect(order).toEqual(["copy", "error:Action app.clipboard.copyOAuthUrl execution failed: clipboard failed"]);
 	});
 
 	it("does not expose idle queue submission through the draft palette", () => {

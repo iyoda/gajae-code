@@ -333,10 +333,9 @@ describe("Kimi K2 leaked tool-call healing", () => {
 		expect(result.stopReason).toBe("stop");
 	});
 
-	it("flags \\uXXXX-escaped arguments even though healing normalizes them away", async () => {
+	it("accepts valid \\uXXXX-escaped arguments after healing normalizes them", async () => {
 		// The healer round-trips the raw payload through JSON.parse/stringify, which
-		// decodes escapes into literal characters. Sampling after that always reports
-		// clean, so this asserts the signal survives the normalization.
+		// decodes escapes into their canonical literal characters.
 		const leaked =
 			"<|tool_calls_section_begin|>" +
 			"<|tool_call_begin|>functions.ask:0<|tool_call_argument_begin|>" +
@@ -349,8 +348,8 @@ describe("Kimi K2 leaked tool-call healing", () => {
 		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
 		expect(toolCalls).toHaveLength(1);
 		expect(toolCalls[0].arguments).toEqual({ question: "마지막 병목" });
-		expect(toolCalls[0].escapedNonAsciiArguments).toBe(true);
-		expect(toolCalls[0].escapedUnicodeArgumentEvidence).toMatchObject({ malformed: false, truncated: false });
+		expect(toolCalls[0].escapedNonAsciiArguments).toBeFalsy();
+		expect(toolCalls[0].escapedUnicodeArgumentEvidence).toBeUndefined();
 	});
 
 	it("does not flag healed arguments that were written as literal UTF-8", async () => {
