@@ -6,7 +6,7 @@
 import * as path from "node:path";
 import { resolveMCPOAuthResourceOrigin, resolveMCPOAuthTokenEndpoint } from "@gajae-code/ai/core";
 import { matchesKey, type OverlayHandle, Spacer, Text } from "@gajae-code/tui";
-import { getAgentDir, getMCPConfigPath, getProjectDir } from "@gajae-code/utils";
+import { getAgentDir, getMCPConfigPath } from "@gajae-code/utils";
 import type { SourceMeta } from "../../capability/types";
 import { analyzeAuthError, discoverOAuthEndpoints, MCPManager } from "../../runtime-mcp";
 import { listTools } from "../../runtime-mcp/client";

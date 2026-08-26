@@ -98,7 +98,6 @@ function synchronizePluginMcpStartup(): void {
 	});
 }
 
-
 async function waitForMcpSeal(manager: MCPManager | undefined): Promise<void> {
 	const deadline = Date.now() + 5_000;
 	while (Date.now() < deadline) {
