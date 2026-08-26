@@ -76,7 +76,9 @@ describe("empty .gjc-delete-* latch", () => {
 		const scan = await listCoordinatorJsonFiles(dir);
 		expect(scan.capped).toBe(false);
 		expect(scan.values).toHaveLength(2);
-	});
+		// Writing 10k+ debris files is I/O-bound: on Windows CI disks this exceeds
+		// the default 5s test timeout without being a behavioral failure.
+	}, 60000);
 
 	it("Test 1 post-filter cap: zero-byte canonical JSON does not consume the parse cap", async () => {
 		const dir = await tempRoot("gjc-postcap-");
