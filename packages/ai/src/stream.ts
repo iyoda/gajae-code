@@ -266,10 +266,18 @@ function pipeAssistantStream(
 	outer: AssistantMessageEventStream,
 	inner: AssistantMessageEventStream,
 	signal?: AbortSignal,
+	onStreamCreated?: () => void,
 ): void {
 	void (async () => {
 		try {
+			let admitted = false;
+			const markAdmission = (): void => {
+				if (admitted) return;
+				admitted = true;
+				onStreamCreated?.();
+			};
 			for await (const event of inner) {
+				markAdmission();
 				outer.push(event);
 				// The inner provider stream owns abort semantics (it receives the
 				// same signal), but stop forwarding as soon as the consumer
@@ -296,8 +304,7 @@ export function streamFromLazyImport(
 	void (async () => {
 		try {
 			const inner = await createInner();
-			onStreamCreated?.();
-			pipeAssistantStream(outer, inner, signal);
+			pipeAssistantStream(outer, inner, signal, onStreamCreated);
 		} catch (error) {
 			outer.fail(error);
 		}
