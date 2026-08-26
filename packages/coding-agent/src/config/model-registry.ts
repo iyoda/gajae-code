@@ -65,7 +65,7 @@ import {
 } from "../sdk/providers";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import type { ActiveSearchModelContext, WebSearchMode } from "../web/search/types";
-import { type ConfigError, ConfigFile } from "./config-file";
+import { ConfigError, ConfigFile } from "./config-file";
 import { isAuthenticated, kNoAuth } from "./model-auth";
 import { type ConfiguredModelBindings, ModelBindingsApplier } from "./model-bindings-applier";
 import { ModelDiscoveryManager, type ProviderDiscoveryState } from "./model-discovery-manager";
@@ -1783,7 +1783,6 @@ export class ModelRegistry {
 			profiles,
 			error: configError,
 		} = this.#loadCustomModels();
-		this.#configError = configError;
 		this.#keylessProviders = keylessProviders;
 		this.#discoveryManager.setProviders(discoverableProviders);
 		this.#configuredProviderIds = new Set(configuredProviders);
@@ -1798,6 +1797,13 @@ export class ModelRegistry {
 			this.#modelPresetRegistryAgentDir,
 			this.#modelPresetRegistryDependencies,
 		);
+		const acceptedRegistryError = acceptedPresets.error
+			? new ConfigError("model-preset-registry", undefined, {
+					err: new Error(acceptedPresets.error),
+					stage: "Registry",
+				})
+			: undefined;
+		this.#configError = configError ?? acceptedRegistryError;
 		this.#modelProfiles = mergeModelProfiles(profiles, acceptedPresets.profiles);
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);

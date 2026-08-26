@@ -20,6 +20,7 @@ import {
 	setModelPresetRegistryDisabled,
 	setModelPresetRegistryPin as setModelPresetRegistryPinImpl,
 } from "../src/config/model-preset-registry";
+import { validateModelProfileName } from "../src/config/model-profile-contract";
 import { mergeModelProfiles } from "../src/config/model-profiles";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
@@ -515,6 +516,29 @@ describe("signed model preset registry", () => {
 		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
 		expect(accepted.revision).toBe(1);
 		expect(accepted.profiles.has("stable")).toBe(true);
+	});
+
+	test("propagates corrupt accepted registry state through the local model registry error surface", async () => {
+		const data = await fixture();
+		await expect(
+			accept(data, signedRegistry(data.privateKey, 1, [registryProfile("registry-only")])),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(path.join(data.agentDir, "model-presets", "state.json"), '{"corrupt":true}');
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.getError()?.message).toMatch(/model-preset-registry|registry cache/i);
+			expect(() =>
+				validateModelProfileName("registry-only", modelRegistry.getModelProfiles(), modelRegistry.getError()),
+			).toThrow(/model profile registry/i);
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	test("rejects malicious roles, duplicate identities, noncanonical bytes, oversized streams, redirects, and timeout", async () => {
