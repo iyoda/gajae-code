@@ -643,6 +643,7 @@ function registrySelectorResolvesToModel(selector: string, models: readonly Mode
 function filterMaterializedRegistryProfiles(
 	profiles: ReadonlyMap<string, ModelProfileDefinition>,
 	models: readonly Model<Api>[],
+	dynamicProviders: ReadonlySet<string>,
 ): Map<string, ModelProfileDefinition> {
 	const filtered = new Map<string, ModelProfileDefinition>();
 	for (const [name, profile] of profiles) {
@@ -651,7 +652,13 @@ function filterMaterializedRegistryProfiles(
 			Object.values(profile.modelMapping).some(selectorValue => {
 				const selectors = normalizeModelSelectorValue(selectorValue);
 				return (
-					selectors.length > 0 && !selectors.some(selector => registrySelectorResolvesToModel(selector, models))
+					selectors.length > 0 &&
+					!selectors.some(selector => {
+						if (registrySelectorResolvesToModel(selector, models)) return true;
+						const suffix = splitSelectorThinkingSuffix(selector);
+						const parsed = parseModelString(suffix.thinkingLevel ? suffix.selector : selector);
+						return parsed !== undefined && dynamicProviders.has(parsed.provider);
+					})
 				);
 			})
 		) {
@@ -1887,7 +1894,11 @@ export class ModelRegistry {
 		this.#models = this.#finalizeModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
 		this.#modelProfiles = mergeModelProfiles(
 			profiles,
-			filterMaterializedRegistryProfiles(acceptedPresets.profiles, this.#models),
+			filterMaterializedRegistryProfiles(
+				acceptedPresets.profiles,
+				this.#models,
+				new Set(acceptedPresets.dynamicProviders),
+			),
 		);
 		this.#rebuildProviderActivity();
 		this.#rebuildCanonicalIndex();

@@ -327,7 +327,18 @@ const ThinkingSchema = z
 			.refine(values => new Set(values).size === values.length, "Expected unique thinking levels.")
 			.optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, context) => {
+		if (value.minLevel === undefined || value.maxLevel === undefined) {
+			context.addIssue({ code: "custom", message: "Thinking metadata requires minLevel and maxLevel." });
+		}
+		if (value.levels !== undefined && value.minLevel !== undefined && !value.levels.includes(value.minLevel)) {
+			context.addIssue({ code: "custom", message: "Thinking levels must include minLevel." });
+		}
+		if (value.levels !== undefined && value.maxLevel !== undefined && !value.levels.includes(value.maxLevel)) {
+			context.addIssue({ code: "custom", message: "Thinking levels must include maxLevel." });
+		}
+	});
 const LongContextPricingSchema = z.object({ threshold: z.number().int().positive(), cost: CostSchema }).strict();
 const RegistryPresetSchema = z
 	.object({
@@ -444,6 +455,7 @@ export interface ModelPresetRegistryDependencies {
 export interface AcceptedModelPresetRegistry {
 	profiles: Map<string, ModelProfileDefinition>;
 	presets: Model<Api>[];
+	dynamicProviders: string[];
 	revision?: number;
 	revisionId?: string;
 	manifestSha256?: string;
@@ -1147,6 +1159,7 @@ function acceptedRegistryFromState(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			disabled: false,
@@ -1156,6 +1169,7 @@ function acceptedRegistryFromState(
 	return {
 		profiles: generationProfiles(valid),
 		presets: generationPresets(valid),
+		dynamicProviders: [...new Set([...valid.retainedDynamicProviders, ...valid.profiles.dynamicProviders])],
 		revision: valid.manifest.signed.registryRevision,
 		revisionId: valid.manifest.signed.revision,
 		manifestSha256: valid.manifestSha256,
@@ -1176,6 +1190,7 @@ export function loadAcceptedModelPresetRegistry(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			disabled: true,
@@ -1187,6 +1202,7 @@ export function loadAcceptedModelPresetRegistry(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			error: safeError(error),
@@ -1198,6 +1214,7 @@ export function loadAcceptedModelPresetRegistry(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			disabled: true,
@@ -1209,6 +1226,7 @@ export function loadAcceptedModelPresetRegistry(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			error: safeError(error),
@@ -1231,6 +1249,7 @@ export async function loadAcceptedModelPresetRegistryAsync(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			disabled: true,
@@ -1242,6 +1261,7 @@ export async function loadAcceptedModelPresetRegistryAsync(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			error: safeError(error),
@@ -1253,6 +1273,7 @@ export async function loadAcceptedModelPresetRegistryAsync(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			disabled: true,
@@ -1264,6 +1285,7 @@ export async function loadAcceptedModelPresetRegistryAsync(
 		return {
 			profiles: new Map(),
 			presets: [],
+			dynamicProviders: [],
 			retainedProfiles: [],
 			retainedPresets: [],
 			error: safeError(error),

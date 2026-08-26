@@ -139,7 +139,7 @@ function signedRegistry(
 	privateKey: crypto.KeyObject,
 	revision: number,
 	profileEntries = [registryProfile("remote")],
-	presetEntries = [registryPreset("remote-model")],
+	presetEntries: ModelPresetRegistryPresets["presets"] = [registryPreset("remote-model")],
 	compatibility = { consumerContract: { minVersion: "1.0.0", maxVersion: "1.0.0" } },
 	dynamicProviders: string[] = [],
 	keyId = "test-key",
@@ -578,6 +578,36 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("retains registry profiles authorized for dynamic providers before discovery", async () => {
+		const data = await fixture();
+		const profile = registryProfile("dynamic-profile", "dynamic-provider/dynamic-model");
+		await expect(
+			accept(
+				data,
+				signedRegistry(
+					data.privateKey,
+					1,
+					[profile],
+					[],
+					{ consumerContract: { minVersion: "1.0.0", maxVersion: "1.0.0" } },
+					["dynamic-provider"],
+				),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "dynamic-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.getModelProfile("dynamic-profile")?.source).toBe("registry");
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("does not start recurring refresh for transient registries when disabled", async () => {
 		const data = await fixture();
 		let calls = 0;
@@ -622,6 +652,17 @@ describe("signed model preset registry", () => {
 			if (previous === undefined) delete process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED;
 			else process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED = previous;
 		}
+	});
+
+	test("rejects registry presets with incomplete thinking bounds", async () => {
+		const data = await fixture();
+		const partialThinking = {
+			...registryPreset("partial-thinking"),
+			thinking: { mode: "effort" as const, levels: ["low" as const] },
+		} as ModelPresetRegistryPresets["presets"][number];
+		await expect(accept(data, signedRegistry(data.privateKey, 1, [], [partialThinking]))).rejects.toThrow(
+			/minLevel and maxLevel/i,
+		);
 	});
 
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {
