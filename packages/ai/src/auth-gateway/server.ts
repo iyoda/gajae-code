@@ -617,7 +617,10 @@ async function markManagedGatewayCredentialFailure(
 		if (trigger.class === "auth") {
 			await storage.invalidateCredentialMatching(model.provider, apiKey, signal);
 		} else if (trigger.class === "quota" || trigger.class === "rate_limit") {
-			await storage.markUsageLimitReached(model.provider, undefined, {
+			// Gateway key selection has no session credential, so record the
+			// backoff against the exact captured key — the session-keyed variant
+			// is a no-op here and would leave the exhausted row eligible.
+			await storage.markCredentialUsageLimitReached(model.provider, apiKey, {
 				retryAfterMs: trigger.retryAfterMs,
 				signal,
 			});

@@ -5539,6 +5539,45 @@ export class AuthStorage {
 		);
 		return true;
 	}
+	/**
+	 * Marks the stored credential matching the captured API key as temporarily
+	 * blocked due to usage limits. Gateway dispatch has no session credential
+	 * (`markUsageLimitReached` is a no-op without one), so quota/rate-limit
+	 * failures must be recorded against the exact key that hit the limit or the
+	 * exhausted row stays eligible and fallback can redispatch it.
+	 */
+	async markCredentialUsageLimitReached(
+		provider: string,
+		apiKey: string,
+		options?: { retryAfterMs?: number; signal?: AbortSignal },
+	): Promise<boolean> {
+		const storageProvider = resolveOAuthStorageProvider(provider);
+		const stored = this.#getStoredCredentials(storageProvider);
+		for (let index = 0; index < stored.length; index++) {
+			const entry = stored[index];
+			if (!entry || !(await this.#credentialMatchesApiKey(storageProvider, entry.credential, apiKey))) {
+				continue;
+			}
+			const now = Date.now();
+			let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+			if (entry.credential.type === "oauth" && this.#rankingStrategyResolver?.(storageProvider)) {
+				const report = await this.#getUsageReport(storageProvider, entry.credential, options);
+				if (report && this.#isUsageLimitReached(report)) {
+					const resetAtMs = this.#getUsageResetAtMs(report, Date.now());
+					if (resetAtMs && resetAtMs > blockedUntil) {
+						blockedUntil = resetAtMs;
+					}
+				}
+			}
+			this.#markCredentialBlocked(
+				this.#getProviderTypeKey(storageProvider, entry.credential.type),
+				index,
+				blockedUntil,
+			);
+			return true;
+		}
+		return false;
+	}
 
 	// ─── Auth Broker integration ────────────────────────────────────────────
 

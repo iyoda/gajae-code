@@ -45,4 +45,27 @@ describe("AuthStorage api-key usage-limit fallback", () => {
 		expect(retryKey).not.toBe(firstKey);
 		expect(new Set([firstKey, retryKey]).size).toBe(2);
 	});
+	it("blocks the exact credential that hit the limit when no session exists", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		// Gateway dispatch has no session credential; the session-keyed variant
+		// is a no-op there, so the exhausted row must be blocked by key.
+		const sessionlessNoop = await authStorage.markUsageLimitReached("zai", undefined, { retryAfterMs: 60_000 });
+		expect(sessionlessNoop).toBe(false);
+
+		const firstKey = await authStorage.getApiKey("zai", undefined);
+		expect(firstKey).toBe("zai-key-1");
+
+		const blocked = await authStorage.markCredentialUsageLimitReached("zai", "zai-key-1", {
+			retryAfterMs: 60_000,
+		});
+		expect(blocked).toBe(true);
+
+		const retryKey = await authStorage.getApiKey("zai", undefined);
+		expect(retryKey).not.toBe("zai-key-1");
+		expect(retryKey).toBeDefined();
+
+		const unknown = await authStorage.markCredentialUsageLimitReached("zai", "zai-key-unknown");
+		expect(unknown).toBe(false);
+	});
 });
