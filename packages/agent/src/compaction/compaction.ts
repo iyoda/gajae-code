@@ -543,7 +543,11 @@ function collectMessageFragments(message: AgentMessage): { fragments: string[]; 
 					fragments.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					fragments.push(block.name);
-					fragments.push(JSON.stringify(block.arguments));
+					// `arguments` is typed non-null, but persisted history can carry a
+					// null/undefined payload from an aborted or malformed tool call;
+					// JSON.stringify returns undefined for those, and the token
+					// fingerprint below requires string fragments.
+					fragments.push(JSON.stringify(block.arguments) ?? "null");
 				}
 			}
 			break;
