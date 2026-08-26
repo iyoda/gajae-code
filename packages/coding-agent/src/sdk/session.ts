@@ -3740,11 +3740,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
 		const hasExplicitToolNames = options.toolNames !== undefined;
+		const hasExplicitEmptyToolSelection = hasExplicitToolNames && options.toolNames!.length === 0;
+		// `goal` is session state rather than a work tool, so it is folded into an
+		// explicit selection that already asks for tools. An *empty* explicit
+		// selection is the `--no-tools` contract ("Disable all built-in tools", see
+		// cli/root-flags.ts), and re-populating it with `goal` would leave exactly one
+		// built-in tool live against that promise.
+		const wantsGoalStateTool = hasExplicitToolNames && options.toolNames!.length > 0;
 		const requestedToolNames = hasExplicitToolNames
 			? [
 					...new Set([
 						...options.toolNames!.map(name => name.toLowerCase()),
-						...(settings.get("goal.enabled") ? ["goal"] : []),
+						...(wantsGoalStateTool && settings.get("goal.enabled") ? ["goal"] : []),
 					]),
 				]
 			: toolNamesFromRegistry;
@@ -3884,9 +3891,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				allowedDiscoveredBuiltinNames,
 				essentialBuiltinNames,
 			);
-			initialSelectedDiscoveredBuiltinToolNames = existingSession.hasPersistedDiscoveredBuiltinToolSelection
-				? restoredDiscoveredNames
-				: explicitlyRequestedDiscoveredBuiltinToolNames;
+			initialSelectedDiscoveredBuiltinToolNames = hasExplicitEmptyToolSelection
+				? []
+				: existingSession.hasPersistedDiscoveredBuiltinToolSelection
+					? restoredDiscoveredNames
+					: explicitlyRequestedDiscoveredBuiltinToolNames;
 			initialToolNames = [...new Set([...baselineInitialToolNames, ...initialSelectedDiscoveredBuiltinToolNames])];
 			hasExplicitDiscoveredBuiltinToolSelection =
 				hasExplicitToolNames &&
@@ -4243,6 +4252,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 			reloadSshTool,
 			requestedToolNames: requestedToolNameSet,
+			explicitEmptyToolSelection: hasExplicitEmptyToolSelection,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
 			mcpDiscoveryEnabled,
 			discoveryMode: effectiveDiscoveryMode,

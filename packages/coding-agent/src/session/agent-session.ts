@@ -900,6 +900,8 @@ export interface AgentSessionConfig {
 	initialMCPToolSelectionIsExplicit?: boolean;
 	/** Whether a discoverable built-in selection was explicitly supplied to the constructor, including an empty selection. */
 	initialDiscoveredBuiltinToolSelectionIsExplicit?: boolean;
+	/** Whether the caller explicitly disabled every built-in tool for this session. */
+	explicitEmptyToolSelection?: boolean;
 
 	/** Whether constructor-provided MCP selections should be persisted immediately. */
 	persistInitialMCPToolSelection?: boolean;
@@ -2660,6 +2662,7 @@ export class AgentSession {
 	/** Constructor authority applies only while this AgentSession instance remains alive. */
 	#constructorMCPToolSelection: string[] | undefined;
 	#constructorDiscoveredBuiltinToolSelection: string[] | undefined;
+	#explicitEmptyToolSelection = false;
 	#recoveryHydrationContext: RecoveryHydrationContext | undefined;
 	#memoryGuardClaimsLease: MemoryGuardClaimsLease | undefined;
 
@@ -3827,6 +3830,7 @@ export class AgentSession {
 		this.#networkPrewarmService = config.networkPrewarmService;
 		this.#onWorkspaceTreeReady = config.onWorkspaceTreeReady;
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
+		this.#explicitEmptyToolSelection = config.explicitEmptyToolSelection === true;
 		const configuredDiscoveryMode = config.settings.get("tools.discoveryMode");
 		this.#discoveryMode =
 			config.discoveryMode ??
@@ -8271,6 +8275,11 @@ export class AgentSession {
 		return this.agent.state.tools.map(t => t.name);
 	}
 
+	/** Whether this session explicitly requested zero built-in tools. */
+	isExplicitEmptyToolSelection(): boolean {
+		return this.#explicitEmptyToolSelection;
+	}
+
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit");
@@ -8902,9 +8911,11 @@ export class AgentSession {
 			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
 			: (constructorMCPToolNames ?? this.#getConfiguredDefaultSelectedMCPToolNames());
 		const constructorDiscoveredBuiltinToolNames = this.#resolveConstructorDiscoveredBuiltinToolSelection();
-		const restoredDiscoveredBuiltinToolNames = sessionContext.hasPersistedDiscoveredBuiltinToolSelection
-			? this.#selectRestorableDiscoveredBuiltinToolNames(sessionContext.selectedDiscoveredBuiltinToolNames ?? [])
-			: (constructorDiscoveredBuiltinToolNames ?? []);
+		const restoredDiscoveredBuiltinToolNames = this.#explicitEmptyToolSelection
+			? []
+			: sessionContext.hasPersistedDiscoveredBuiltinToolSelection
+				? this.#selectRestorableDiscoveredBuiltinToolNames(sessionContext.selectedDiscoveredBuiltinToolNames ?? [])
+				: (constructorDiscoveredBuiltinToolNames ?? []);
 		this.#selectedDiscoveredToolNames = new Set(restoredDiscoveredBuiltinToolNames);
 		await this.#applyActiveToolsByName(
 			[...nextActiveNonMCPToolNames, ...restoredMCPToolNames, ...restoredDiscoveredBuiltinToolNames],
@@ -9845,6 +9856,7 @@ export class AgentSession {
 	}
 
 	async #attachAskToolIfWorkflowActive(): Promise<void> {
+		if (this.#explicitEmptyToolSelection) return;
 		const sessionId = this.sessionManager.getSessionId();
 		const inMemoryActiveSkill =
 			this.#activeSkillState && (!this.#activeSkillState.sessionId || this.#activeSkillState.sessionId === sessionId)
@@ -9877,6 +9889,7 @@ export class AgentSession {
 	}
 
 	#attachAskTool(): void {
+		if (this.#explicitEmptyToolSelection) return;
 		const askTool = this.#toolRegistry.get("ask");
 		if (!askTool || this.getActiveToolNames().includes(askTool.name)) return;
 		this.#setGuardedAgentTools([...this.agent.state.tools, askTool]);
@@ -9959,6 +9972,7 @@ export class AgentSession {
 	}
 
 	async #activatePendingGjcGoalModeRequest(): Promise<boolean> {
+		if (this.#explicitEmptyToolSelection) return false;
 		if (!this.settings.get("goal.enabled")) return false;
 		const pendingGoal = await consumePendingGoalModeRequest(
 			this.sessionManager.getCwd(),
@@ -13906,7 +13920,12 @@ export class AgentSession {
 				? this.#modelRegistry.getModelProfile?.(this.#activeModelProfile)
 				: undefined,
 		});
-		if (eagerTasks && this.#toolRegistry.has("task") && !this.getActiveToolNames().includes("task")) {
+		if (
+			!this.#explicitEmptyToolSelection &&
+			eagerTasks &&
+			this.#toolRegistry.has("task") &&
+			!this.getActiveToolNames().includes("task")
+		) {
 			await this.activateDiscoveredTools(["task"]);
 		}
 		await this.refreshBaseSystemPrompt();
