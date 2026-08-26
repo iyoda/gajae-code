@@ -4541,7 +4541,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("race-cache", "stale-configured-model")).toBeUndefined();
 		});
 
-		test("does not cache full-refresh configured discovery after a targeted refresh is queued", async () => {
+		test("does not cache online full-refresh configured discovery after a targeted refresh is queued", async () => {
 			writeRawModelsJson({
 				"race-full": {
 					baseUrl: "https://race-full.example.com/v1",
@@ -4564,7 +4564,7 @@ describe("ModelRegistry", () => {
 			});
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
-			const fullRefresh = registry.refresh("online-if-uncached");
+			const fullRefresh = registry.refresh("online");
 			await firstRequest.promise;
 			const targetedRefresh = registry.refreshProvider("race-full", "online-if-uncached");
 			firstResponse.resolve(new Response(JSON.stringify({ data: [{ id: "stale-full-model" }] }), { status: 200 }));
@@ -8396,7 +8396,7 @@ describe("ModelRegistry", () => {
 			expect(registry.find("vllm", "new-descriptor-model")).toBeDefined();
 			expect(registry.find("vllm", "stale-descriptor-model")).toBeUndefined();
 		});
-		test("does not cache full-refresh descriptor discovery after a targeted refresh is queued", async () => {
+		test("does not cache online full-refresh descriptor discovery after a targeted refresh is queued", async () => {
 			authStorage.setRuntimeApiKey("vllm", "fresh-vllm-key");
 			const firstResponse = Promise.withResolvers<Response>();
 			const firstRequest = Promise.withResolvers<void>();
@@ -8412,7 +8412,7 @@ describe("ModelRegistry", () => {
 			});
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
-			const fullRefresh = registry.refresh("online-if-uncached");
+			const fullRefresh = registry.refresh("online");
 			await firstRequest.promise;
 			const targetedRefresh = registry.refreshProvider("vllm", "online-if-uncached");
 			firstResponse.resolve(

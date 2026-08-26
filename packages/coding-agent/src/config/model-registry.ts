@@ -2880,11 +2880,11 @@ export class ModelRegistry {
 			endpoint ===
 			this.#normalizeDiscoveryEvidenceEndpoint(this.#effectiveDiscoveryProviderConfig(providerConfig).baseUrl ?? "");
 		const isCurrentProviderRefresh = () =>
-			strategy !== "online-if-uncached" ||
 			providerRefresh === undefined ||
 			("providerId" in providerRefresh
-				? providerRefresh.providerId === provider &&
-					this.#providerRefreshGenerations.get(provider) === providerRefresh.generation
+				? strategy !== "online-if-uncached" ||
+					(providerRefresh.providerId === provider &&
+						this.#providerRefreshGenerations.get(provider) === providerRefresh.generation)
 				: (this.#providerRefreshGenerations.get(provider) ?? 0) ===
 					(providerRefresh.generations.get(provider) ?? 0));
 		const evidence = this.#configuredDiscoveryEvidence.get(provider);
@@ -3205,7 +3205,11 @@ export class ModelRegistry {
 			isCurrentDiscoveryContext() &&
 			(providerRefresh === undefined || "generations" in providerRefresh || isCurrentProviderRefresh());
 		const canPublishCache = () =>
-			isCurrentDiscoveryContext() && (strategy !== "online-if-uncached" || isCurrentProviderRefresh());
+			isCurrentDiscoveryContext() &&
+			(providerRefresh === undefined ||
+				("providerId" in providerRefresh
+					? strategy !== "online-if-uncached" || isCurrentDiscovery()
+					: isCurrentProviderRefresh()));
 		try {
 			const manager = createModelManager({
 				...options,
