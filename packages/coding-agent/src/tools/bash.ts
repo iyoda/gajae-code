@@ -1525,6 +1525,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			};
 			let latestText = "";
+			let bridgeJobId!: string;
 
 			const runToCompletion = async (
 				runSignal: AbortSignal | undefined,
@@ -1671,6 +1672,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								? `${summary.output}${summary.output.endsWith("\n") ? "" : "\n"}(output truncated)`
 								: summary.output;
 						latestText = pollText;
+						if (bridgeJobId) ownedManager?.appendOutput(bridgeJobId, pollText);
 						onUpdate?.({
 							content: [{ type: "text", text: pollText }],
 							details: { terminalId: handle.terminalId },
@@ -1751,7 +1753,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				return "resolved";
 			};
 
-			let bridgeJobId: string;
 			try {
 				bridgeJobId = bridgeManager.register(
 					"bash",
@@ -1935,6 +1936,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let ptyFoldResult: AgentToolResult<BashToolDetails> | undefined;
 		let ptyBackgrounded = false;
 		let lastPtyFoldKeyTime = 0;
+		let ptyJobId!: string;
 		const result: BashResult | BashInteractiveResult = interactiveUi
 			? await runInteractiveBashPty(interactiveUi, {
 					command,
@@ -1954,7 +1956,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						const ptyLabel = command.length > 120 ? `${command.slice(0, 117)}...` : command;
 						// The job's runner simply awaits the run that is ALREADY executing,
 						// so registering never re-executes the command.
-						let ptyJobId: string;
 						try {
 							ptyJobId = ptyManager.register(
 								"bash",
@@ -2036,6 +2037,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						}
 						lastPtyFoldKeyTime = 0;
 						return this.session.requestForegroundBashBackground?.() ?? false;
+					},
+					onOutput: chunk => {
+						if (ptyJobId) ownedManager?.appendOutput(ptyJobId, chunk);
 					},
 				}).catch(error => {
 					if (ptyAdmission) ownedManager?.releaseCapacity(ptyAdmission);
