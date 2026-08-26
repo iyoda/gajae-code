@@ -388,9 +388,12 @@ describe("empty .gjc-delete-* latch", () => {
 		// refuse the name before path.join, and the planted bytes must survive.
 		const name = ".gjc-delete-child\\..\\victim";
 		const planted = process.platform === "win32" ? path.join(dir, "victim") : path.join(dir, name);
-		await fs.writeFile(planted, "victim bytes");
+		await fs.writeFile(planted, "");
 		await removeVerifiedEmptyQuarantine(dir, name);
-		expect(await fs.readFile(planted, "utf8")).toBe("victim bytes");
+		// The victim is EMPTY on purpose: a non-empty file would be kept by the size
+		// gate even without the backslash guard, making this test vacuous. Only the
+		// single-component name guard can save an empty, single-link victim.
+		expect(await fs.readFile(planted, "utf8")).toBe("");
 	});
 
 	it("Test 2e: a stranded detached object fails closed with retained evidence", async () => {
@@ -415,7 +418,7 @@ describe("empty .gjc-delete-* latch", () => {
 		expect(await fs.readFile(target, "utf8")).toBe("");
 	});
 
-	it("Test 2f: the exact-unlink stand-in refuses a quarantine collision", async () => {
+	it("Test 2f: the native exact unlink refuses a quarantine collision", async () => {
 		const dir = await tempRoot("gjc-quarantine-collision-");
 		const target = path.join(dir, "victim");
 		const quarantine = ".gjc-delete-collision.json";
@@ -423,7 +426,7 @@ describe("empty .gjc-delete-* latch", () => {
 		await fs.writeFile(target, "");
 		await fs.writeFile(detached, "pre-existing quarantine occupant");
 		const stat = await fs.lstat(target, { bigint: true });
-		const result = exactIdentityNativeBindings.exactUnlinkDirect(target, {
+		const result = exactUnlinkDirect(target, {
 			dev: stat.dev,
 			ino: stat.ino,
 			nlink: stat.nlink,
@@ -439,17 +442,17 @@ describe("empty .gjc-delete-* latch", () => {
 		expect(await fs.readFile(detached, "utf8")).toBe("pre-existing quarantine occupant");
 	});
 
-	it("Test 2g: a dangling symlink at the quarantine name is still a collision", async () => {
+	it("Test 2g: a dangling symlink at the quarantine name is still a native collision", async () => {
 		const dir = await tempRoot("gjc-quarantine-dangling-");
 		const target = path.join(dir, "victim");
 		const quarantine = ".gjc-delete-dangling.json";
 		const detached = path.join(dir, quarantine);
 		await fs.writeFile(target, "");
 		// existsSync follows links and reports a DANGLING symlink as absent; the
-		// no-replace link exchange must still refuse to overwrite it.
+		// native rename-no-replace must still refuse to overwrite it.
 		await fs.symlink(path.join(dir, "nonexistent-target"), detached);
 		const stat = await fs.lstat(target, { bigint: true });
-		const result = exactIdentityNativeBindings.exactUnlinkDirect(target, {
+		const result = exactUnlinkDirect(target, {
 			dev: stat.dev,
 			ino: stat.ino,
 			nlink: stat.nlink,

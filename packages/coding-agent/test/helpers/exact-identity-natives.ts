@@ -78,7 +78,9 @@ function linkNoReplace(from: string, to: string): "ok" | "collision" | "not_foun
 		return "ok";
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "EEXIST" || code === "EPERM") return "collision";
+		// Only EEXIST is a collision verdict; EPERM and every other failure keep
+		// their diagnostic identity instead of being relabeled.
+		if (code === "EEXIST") return "collision";
 		return isEnoent(error) ? "not_found" : "io_error";
 	}
 }
@@ -103,7 +105,14 @@ function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): N
 	try {
 		fs.unlinkSync(target);
 	} catch (error) {
-		return isEnoent(error) ? { ok: false, code: "not_found" } : { ok: false, code: "io_error" };
+		// The link committed, so the object now lives at BOTH names. Any failure to
+		// drop the source — including a concurrent-cleaner ENOENT — leaves the
+		// detached name as retained evidence that must be reported, never swallowed.
+		return {
+			ok: false,
+			code: isEnoent(error) ? "not_found" : "io_error",
+			detachedPath: detached,
+		};
 	}
 	const result = exactUnlink(detached, identity);
 	if (result.ok) return { ok: true };
@@ -116,10 +125,12 @@ function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): N
 		if (restore === "ok") {
 			try {
 				fs.unlinkSync(detached);
+				return { ok: false, code: "identity_mismatch" };
 			} catch {
-				/* the restore verdict already stands */
+				// The restore link committed but the detached name could not be dropped:
+				// two links remain, and the detached name is retained evidence.
+				return { ok: false, code: "identity_mismatch", detachedPath: detached };
 			}
-			return { ok: false, code: "identity_mismatch" };
 		}
 		return { ok: false, code: "identity_mismatch", detachedPath: detached };
 	}
