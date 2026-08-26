@@ -92,11 +92,17 @@ function isEmptyDeleteReceiptName(name: string): boolean {
 	return EMPTY_DELETE_RECEIPT_PATTERN.test(name);
 }
 
+function rootProbePath(root: string): string {
+	const parsedRoot = path.parse(root).root;
+	const trimmed = root.replace(/[\\/]+$/u, "");
+	return trimmed.length === 0 || trimmed === parsedRoot.replace(/[\\/]+$/u, "") ? parsedRoot : trimmed;
+}
+
 export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDeleteGcRecord[]> {
 	const records: EmptyDeleteGcRecord[] = [];
 	let rootStat: BigIntStats;
 	try {
-		rootStat = await fs.lstat(root, { bigint: true });
+		rootStat = await fs.lstat(rootProbePath(root), { bigint: true });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return [{ root, path: root, action: "skipped", reason: "missing_root" }];

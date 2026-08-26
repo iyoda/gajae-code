@@ -184,6 +184,10 @@ describe("empty .gjc-delete-* latch", () => {
 		await fs.symlink(root, linked);
 		const viaLink = await runEmptyDeleteGc({ roots: [linked], prune: false });
 		expect(viaLink.records.some(r => r.reason === "symlink_root")).toBe(true);
+		const viaTrailingLink = await runEmptyDeleteGc({ roots: [`${linked}${path.sep}`], prune: false });
+		expect(viaTrailingLink.records).toEqual([
+			expect.objectContaining({ action: "skipped", reason: "symlink_root" }),
+		]);
 		const empty = path.join(root, ".gjc-delete-session-state-lock-ffffffff-ffff-ffff-ffff-ffffffffffff.json");
 		const shortHex = path.join(root, ".gjc-delete-session-state-lock-aaaaaaaa.json");
 		const gcMinted = path.join(root, ".gjc-delete-gc-33333333-3333-3333-3333-333333333333.json");
