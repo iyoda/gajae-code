@@ -578,6 +578,41 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("applies authHeader credentials to registry-only models", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(data.privateKey, 1, [], [{ ...registryPreset("header-model"), provider: "header-only" }]),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  header-only:
+    baseUrl: https://headers.example/v1
+    api: openai-completions
+    apiKey: issue-header-key
+    authHeader: true
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "header-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("header-only", "header-model")).toMatchObject({
+				baseUrl: "https://headers.example/v1",
+				headers: { Authorization: "Bearer issue-header-key" },
+			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("retains registry profiles authorized for dynamic providers before discovery", async () => {
 		const data = await fixture();
 		const profile = registryProfile("dynamic-profile", "dynamic-provider/dynamic-model");
