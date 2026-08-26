@@ -541,6 +541,37 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("preserves explicit OAuth shaping when registry metadata overlays an existing model", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(data.privateKey, 1, [], [{ ...registryPreset("gpt-4o-mini"), provider: "openai" }]),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  openai:
+    baseUrl: https://oauth-openai.example/v1
+    api: openai-completions
+    auth: oauth
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("openai", "gpt-4o-mini")).toMatchObject({ isOAuth: true });
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("rejects malicious roles, duplicate identities, noncanonical bytes, oversized streams, redirects, and timeout", async () => {
 		const data = await fixture();
 		const invalidRole = signedRegistry(data.privateKey, 1);

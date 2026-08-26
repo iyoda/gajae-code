@@ -604,6 +604,18 @@ function hasMatchingRegistryTransport(left: Model<Api>, right: Model<Api> | Prov
 	);
 }
 
+function commonRegistryTransportCompat(models: readonly Model<Api>[]): Model<Api>["compat"] | undefined {
+	if (models.length === 0) return undefined;
+	const records = models.map(model => model.compat as Record<string, unknown> | undefined);
+	const keys = new Set(records.flatMap(record => (record ? Object.keys(record) : [])));
+	const common: Record<string, unknown> = {};
+	for (const key of keys) {
+		const value = records[0]?.[key];
+		if (records.every(record => record !== undefined && isDeepStrictEqual(record[key], value))) common[key] = value;
+	}
+	return Object.keys(common).length > 0 ? (common as Model<Api>["compat"]) : undefined;
+}
+
 const PROVIDER_BASE_URL_ENV_ALIASES: Record<string, readonly string[]> = {
 	anthropic: ["ANTHROPIC_BASE_URL"],
 	google: ["GOOGLE_BASE_URL", "GEMINI_BASE_URL"],
@@ -1817,11 +1829,12 @@ export class ModelRegistry {
 			cachedDiscoveries,
 		);
 		const resolvedDefaults = this.#mergeRegistryModelMetadata(resolvedProviderCatalog, registryModels, overrides);
-		this.#registryModelKeys = new Set(
+		const materializedRegistryModelKeys = new Set(
 			resolvedDefaults
 				.map(model => `${model.provider}\u0000${model.id}`)
 				.filter(key => acceptedRegistryModelKeys.has(key)),
 		);
+		this.#registryModelKeys = materializedRegistryModelKeys;
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
 		// Merge runtime extension models so they survive refresh() cycles
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
@@ -1960,6 +1973,9 @@ export class ModelRegistry {
 				if (!explicitTransportMatches && transportTemplates.length > 0 && !templatesAgree) continue;
 				if (!transportTemplate && !explicitTransportMatches) continue;
 				const transportSource = explicitTransportMatches ? explicitTransport : transportTemplate!;
+				const inheritedCompat = explicitTransportMatches
+					? explicitTransport?.compat
+					: commonRegistryTransportCompat(transportTemplates);
 				merged.push({
 					...registryModel,
 					baseUrl: transportSource.baseUrl!,
@@ -1969,8 +1985,8 @@ export class ModelRegistry {
 					cacheRetention: transportSource.cacheRetention,
 					isOAuth: transportSource.isOAuth,
 					compat:
-						transportTemplate?.compat || registryModel.compat || explicitTransport?.compat
-							? { ...transportTemplate?.compat, ...registryModel.compat, ...explicitTransport?.compat }
+						inheritedCompat || registryModel.compat || explicitTransport?.compat
+							? { ...inheritedCompat, ...registryModel.compat, ...explicitTransport?.compat }
 							: undefined,
 				});
 				indexByKey.set(key, merged.length - 1);
@@ -1986,7 +2002,7 @@ export class ModelRegistry {
 				transport: existing.transport,
 				requestTransform: existing.requestTransform,
 				cacheRetention: existing.cacheRetention,
-				isOAuth: existing.isOAuth,
+				isOAuth: explicitTransport?.isOAuth ?? existing.isOAuth,
 				wireModelId: existing.wireModelId,
 				compat:
 					existing.compat || registryModel.compat || explicitTransport?.compat
