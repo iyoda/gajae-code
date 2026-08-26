@@ -4449,6 +4449,61 @@ describe("ModelRegistry", () => {
 			expect(registry.find("race", "old-model")).toBeUndefined();
 		});
 
+		test("does not invalidate an in-flight full refresh when a provider refresh is queued", async () => {
+			writeRawModelsJson({
+				"race-a": {
+					baseUrl: "https://race-a.example.com/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "openai-models-list" },
+				},
+				"race-b": {
+					baseUrl: "https://race-b.example.com/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "openai-models-list" },
+				},
+			});
+			const firstAResponse = Promise.withResolvers<Response>();
+			const firstBResponse = Promise.withResolvers<Response>();
+			const firstRequest = Promise.withResolvers<void>();
+			let aRequests = 0;
+			let bRequests = 0;
+			using _hook = hookFetch(input => {
+				const url = String(input);
+				if (url === "https://race-a.example.com/v1/models") {
+					aRequests += 1;
+					if (aRequests === 1) {
+						firstRequest.resolve();
+						return firstAResponse.promise;
+					}
+					return new Response(JSON.stringify({ data: [{ id: "a-targeted" }] }), { status: 200 });
+				}
+				if (url === "https://race-b.example.com/v1/models") {
+					bRequests += 1;
+					if (bRequests === 1) return firstBResponse.promise;
+					throw new Error(`Unexpected second race-b request: ${url}`);
+				}
+				throw new Error(`Unexpected request: ${url}`);
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const fullRefresh = registry.refresh("online");
+			await firstRequest.promise;
+			const targetedRefresh = registry.refreshProvider("race-a", "online");
+			await Bun.sleep(0);
+			firstAResponse.resolve(new Response(JSON.stringify({ data: [{ id: "a-full" }] }), { status: 200 }));
+			firstBResponse.resolve(new Response(JSON.stringify({ data: [{ id: "b-full" }] }), { status: 200 }));
+			await fullRefresh;
+			await targetedRefresh;
+
+			expect(registry.find("race-a", "a-targeted")).toBeDefined();
+			expect(registry.find("race-a", "a-full")).toBeDefined();
+			expect(registry.find("race-b", "b-full")).toBeDefined();
+			expect(aRequests).toBe(2);
+			expect(bRequests).toBe(1);
+		});
+
 		test("discovery failure does not fail model registry refresh", async () => {
 			writeRawModelsJson({
 				ollama: {

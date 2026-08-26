@@ -1432,6 +1432,7 @@ export class ModelRegistry {
 	#catalogMutationTail: Promise<void> = Promise.resolve();
 	#pendingCatalogMutations = 0;
 	#catalogRefreshGeneration = 0;
+	#providerRefreshGenerations = new Map<string, number>();
 	#disposed = false;
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
@@ -1542,9 +1543,9 @@ export class ModelRegistry {
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		if (this.#disposed) return;
-		const refreshGeneration = ++this.#catalogRefreshGeneration;
 		await this.#enqueueCatalogMutation(async () => {
 			if (this.#disposed) return;
+			const refreshGeneration = ++this.#catalogRefreshGeneration;
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
@@ -1577,9 +1578,11 @@ export class ModelRegistry {
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
 		if (this.#disposed) return;
-		const refreshGeneration = ++this.#catalogRefreshGeneration;
+		const providerRefreshGeneration = (this.#providerRefreshGenerations.get(providerId) ?? 0) + 1;
+		this.#providerRefreshGenerations.set(providerId, providerRefreshGeneration);
 		await this.#enqueueCatalogMutation(async () => {
 			if (this.#disposed) return;
+			const refreshGeneration = this.#catalogRefreshGeneration;
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
@@ -1588,8 +1591,16 @@ export class ModelRegistry {
 						this.#suppressedSelectors.delete(selector);
 					}
 				}
-				await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]), refreshGeneration);
-				if (refreshGeneration === this.#catalogRefreshGeneration) this.#modelBindingsApplier.apply();
+				await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]), refreshGeneration, {
+					providerId,
+					generation: providerRefreshGeneration,
+				});
+				if (
+					refreshGeneration === this.#catalogRefreshGeneration &&
+					this.#providerRefreshGenerations.get(providerId) === providerRefreshGeneration
+				) {
+					this.#modelBindingsApplier.apply();
+				}
 			} finally {
 				this.#resumeRebuild();
 			}
@@ -2564,6 +2575,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 		refreshGeneration = this.#catalogRefreshGeneration,
+		providerRefresh?: { providerId: string; generation: number },
 	): Promise<void> {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
@@ -2581,7 +2593,13 @@ export class ModelRegistry {
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
-		if (refreshGeneration !== this.#catalogRefreshGeneration) return;
+		if (
+			refreshGeneration !== this.#catalogRefreshGeneration ||
+			(providerRefresh !== undefined &&
+				this.#providerRefreshGenerations.get(providerRefresh.providerId) !== providerRefresh.generation)
+		) {
+			return;
+		}
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.map(result => {
 			const providerConfig = selectedDiscoverableProviders.find(provider => provider.provider === result.provider);
 			const current =

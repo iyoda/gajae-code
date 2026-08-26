@@ -39,6 +39,12 @@ function itWithTempRoot(name: string, prefix: string, run: (root: string) => Pro
 }
 
 describe("CLI help load order", () => {
+	it("keeps model preset command out of the eager CLI module graph", async () => {
+		const source = await fs.readFile(cliEntry, "utf8");
+		expect(source).not.toContain('import ModelPresets from "./commands/model-presets"');
+		expect(source).toContain('{ name: "model-presets", load: () => import("./commands/model-presets")');
+	});
+
 	itWithTempRoot(
 		"loads the root help command without tripping config/model-registry cycles",
 		"gjc-help-load-order-",
