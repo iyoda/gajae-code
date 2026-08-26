@@ -66,6 +66,7 @@ async function createContext(options?: {
 	busyPromptMode?: "steer" | "queue";
 	followUpKeys?: string[];
 	ircSidebarToggleKeys?: string[];
+	oauthCopyKeys?: string[];
 }) {
 	let editorText = "";
 	const keyMap: Record<string, string[]> = {
@@ -79,6 +80,7 @@ async function createContext(options?: {
 		"tui.select.cancel": ["escape"],
 		"tui.editor.deleteCharBackward": ["backspace"],
 		"app.todo.toggle": ["alt+shift+t"],
+		"app.clipboard.copyOAuthUrl": options?.oauthCopyKeys ?? ["alt+shift+u"],
 		"app.session.tree": ["alt+shift+s"],
 		"app.session.fork": ["alt+shift+f"],
 		"app.session.resume": ["alt+shift+r"],
@@ -91,6 +93,8 @@ async function createContext(options?: {
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBashCommand = vi.fn(async () => {});
 	const showStatus = vi.fn();
+	const hasOAuthUrlForCopy = vi.fn(() => false);
+	const copyOAuthUrl = vi.fn(async () => {});
 	const onInputCallback = vi.fn();
 	const showHookSelector = vi.fn(async () => "Attach images" as string | undefined);
 	const toggleIrcSidebar = vi.fn();
@@ -217,6 +221,7 @@ async function createContext(options?: {
 		ui: {
 			requestRender: vi.fn(),
 			setFocus: vi.fn(),
+			addInputListener: vi.fn(() => () => {}),
 			followLiveViewport: vi.fn(),
 			scrollViewportPages: vi.fn(),
 		} as unknown as InteractiveModeContext["ui"],
@@ -325,6 +330,9 @@ async function createContext(options?: {
 		showWarning: vi.fn(),
 		showStatus,
 		showError: vi.fn(),
+		beginOAuthUrlForCopy: vi.fn(() => vi.fn()),
+		hasOAuthUrlForCopy,
+		copyOAuthUrl,
 		showHookSelector,
 
 		hasActiveBtw: vi.fn(() => false),
@@ -345,6 +353,8 @@ async function createContext(options?: {
 			handleBashCommand,
 			showStatus,
 			showHookSelector,
+			hasOAuthUrlForCopy,
+			copyOAuthUrl,
 			queueCompactionMessage,
 			popLastQueuedMessage,
 			clearQueue,
@@ -392,6 +402,49 @@ describe("InputController keybinding setup", () => {
 		ctx.editor.setText("queue this");
 		await Promise.resolve();
 		expect(controller.actionRegistry.isAvailable("app.message.queue")).toBe(true);
+	});
+
+	it("exposes OAuth copy only while a pending URL is available", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		expect(controller.actionRegistry.isAvailable("app.clipboard.copyOAuthUrl")).toBe(false);
+		spies.hasOAuthUrlForCopy.mockReturnValue(true);
+		await Promise.resolve();
+		expect(controller.actionRegistry.isAvailable("app.clipboard.copyOAuthUrl")).toBe(true);
+
+		expect(await controller.actionRegistry.execute("app.clipboard.copyOAuthUrl")).toBe(true);
+		expect(spies.copyOAuthUrl).toHaveBeenCalledTimes(1);
+	});
+
+	it("copies a pending OAuth URL from the global shortcut without changing focus", async () => {
+		const { InputController, ctx, spies } = await createContext({ oauthCopyKeys: ["alt+shift+k"] });
+		new InputController(ctx);
+		spies.hasOAuthUrlForCopy.mockReturnValue(true);
+		const addInputListener = ctx.ui.addInputListener as Mock<InteractiveModeContext["ui"]["addInputListener"]>;
+		const listener = addInputListener.mock.calls[0]?.[0] as (data: string) => { consume: boolean } | undefined;
+
+		expect(listener("\x1bK")).toEqual({ consume: true });
+		await Promise.resolve();
+		expect(spies.copyOAuthUrl).toHaveBeenCalledTimes(1);
+		expect(ctx.ui.setFocus as Mock<InteractiveModeContext["ui"]["setFocus"]>).not.toHaveBeenCalled();
+	});
+
+	it("does not let a remapped OAuth copy chord steal Ctrl+C cancellation", async () => {
+		for (const [copyKey, input] of [
+			["ctrl+c", "\x03"],
+			["escape", "\x1b"],
+		] as const) {
+			const { InputController, ctx, spies } = await createContext({ oauthCopyKeys: [copyKey] });
+			new InputController(ctx);
+			spies.hasOAuthUrlForCopy.mockReturnValue(true);
+			const addInputListener = ctx.ui.addInputListener as Mock<InteractiveModeContext["ui"]["addInputListener"]>;
+			const listener = addInputListener.mock.calls[0]?.[0] as (data: string) => { consume: boolean } | undefined;
+
+			expect(listener(input)).toBeUndefined();
+			await Promise.resolve();
+			expect(spies.copyOAuthUrl).not.toHaveBeenCalled();
+		}
 	});
 
 	it("enables model cycling from configured role candidates without a model scope", async () => {
@@ -470,7 +523,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 
-		const registration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
+		const registration = (editor.setCustomKeyHandler as Mock<FakeEditor["setCustomKeyHandler"]>).mock.calls.find(
 			([key]) => key === "alt+i",
 		);
 		expect(registration).toBeDefined();
@@ -486,7 +539,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 
-		const registration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
+		const registration = (editor.setCustomKeyHandler as Mock<FakeEditor["setCustomKeyHandler"]>).mock.calls.find(
 			([key]) => key === "ctrl+alt+i",
 		);
 		expect(registration).toBeDefined();
@@ -537,9 +590,9 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const followUpRegistration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
-			([key]) => key === "ctrl+enter",
-		);
+		const followUpRegistration = (
+			editor.setCustomKeyHandler as Mock<FakeEditor["setCustomKeyHandler"]>
+		).mock.calls.find(([key]) => key === "ctrl+enter");
 		expect(followUpRegistration).toBeDefined();
 		const handler = followUpRegistration?.[1] as () => boolean | undefined;
 
@@ -555,9 +608,9 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const followUpRegistration = (editor.setCustomKeyHandler as ReturnType<typeof vi.fn>).mock.calls.find(
-			([key]) => key === "ctrl+enter",
-		);
+		const followUpRegistration = (
+			editor.setCustomKeyHandler as Mock<FakeEditor["setCustomKeyHandler"]>
+		).mock.calls.find(([key]) => key === "ctrl+enter");
 		const handler = followUpRegistration?.[1] as () => boolean | undefined;
 
 		expect(handler()).toBe(true);

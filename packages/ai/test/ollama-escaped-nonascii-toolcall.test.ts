@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOllama } from "../src/providers/ollama";
 import type { AssistantMessage, Context, Model, ToolCall } from "../src/types";
-import { unicodeEscapeScalarTag } from "../src/utils/json-parse";
 
 const originalFetch = global.fetch;
 
@@ -62,25 +61,23 @@ afterEach(() => {
 });
 
 describe("Ollama ASCII-escaped non-ASCII tool arguments", () => {
-	it("flags a call whose arguments spell Hangul as \\uXXXX escapes", async () => {
+	it("accepts a call whose arguments spell Hangul as \\uXXXX escapes", async () => {
 		const result = await run(String.raw`{"question":"\ub9c8\uc9c0\ub9c9 \ubcd1\ubaa9"}`);
 		const tool = firstTool(result);
 
 		expect(tool?.arguments).toEqual({ question: "마지막 병목" });
-		expect(tool?.escapedNonAsciiArguments).toBe(true);
-		expect(tool?.escapedUnicodeArgumentEvidence).toMatchObject({ malformed: false, truncated: false });
+		expect(tool?.escapedNonAsciiArguments).toBeFalsy();
+		expect(tool?.escapedUnicodeArgumentEvidence).toBeUndefined();
 		expect(tool && "partialJson" in tool).toBe(false);
 	});
 
-	it("retains printable ASCII escape evidence from a one-nibble landing", async () => {
+	it("accepts printable ASCII escapes", async () => {
 		const result = await run(String.raw`{"question":"\u0077 \u0026"}`);
 		const tool = firstTool(result);
 
 		expect(tool?.arguments).toEqual({ question: "w &" });
-		expect(tool?.escapedNonAsciiArguments).toBe(true);
-		expect(tool?.escapedUnicodeArgumentEvidence?.positions.map(position => position.scalarTag)).toEqual(
-			[0x77, 0x26].map(unicodeEscapeScalarTag),
-		);
+		expect(tool?.escapedNonAsciiArguments).toBeFalsy();
+		expect(tool?.escapedUnicodeArgumentEvidence).toBeUndefined();
 	});
 
 	it("does not flag literal UTF-8 arguments", async () => {

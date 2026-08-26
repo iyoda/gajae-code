@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { type Component, renderMetrics, TUI } from "@gajae-code/tui";
+import { type Component, renderMetrics, Text, TUI } from "@gajae-code/tui";
 import {
 	__textHelperPerfCounters,
 	Ellipsis,
@@ -37,6 +37,20 @@ describe("text utils", () => {
 	it("ignores OSC hyperlinks in visible width", () => {
 		const text = "\x1b]8;;https://example.com\x07link\x1b]8;;\x07";
 		expect(visibleWidth(text)).toBe(4);
+	});
+
+	it("captures the padded fragments that make long URLs unsafe to copy from tmux", () => {
+		const url = `https://example.test/oauth/authorize/${"x".repeat(90)}`;
+		const rows = new Text(url, 1, 0).render(24).filter(row => visibleWidth(row) > 0);
+		const captured = rows.join("\n");
+
+		expect(rows.length).toBeGreaterThan(1);
+		expect(rows.map(visibleWidth)).toEqual(rows.map(() => 24));
+		expect(rows.slice(0, -1).every(row => row.endsWith(" "))).toBe(true);
+		expect(captured).not.toBe(url);
+		expect(captured.replaceAll(" ", "").replaceAll("\n", "")).toBe(url);
+		expect(rows.join("")).not.toBe(url);
+		expect(rows.join("").replaceAll(" ", "")).toBe(url);
 	});
 
 	it("truncates ANSI text with ellipsis", () => {

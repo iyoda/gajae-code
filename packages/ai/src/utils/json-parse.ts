@@ -484,9 +484,54 @@ export function collectUnicodeEscapeEvidence(json: string): UnicodeEscapeEvidenc
 	return createUnicodeEscapeEvidence(positions, totalPositions, truncated, false);
 }
 
-/** Attach bounded raw evidence while preserving the existing call-level guard flag. */
+function hasUnpairedUnicodeSurrogate(value: unknown): boolean {
+	const pending: unknown[] = [value];
+	const seen = new WeakSet<object>();
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (typeof current === "string") {
+			if (!current.isWellFormed()) return true;
+			continue;
+		}
+		if (typeof current !== "object" || current === null || seen.has(current)) continue;
+		seen.add(current);
+		if (Array.isArray(current)) {
+			for (const child of current) pending.push(child);
+			continue;
+		}
+		for (const [key, child] of Object.entries(current)) {
+			if (!key.isWellFormed()) return true;
+			pending.push(child);
+		}
+	}
+	return false;
+}
+
+/**
+ * Return evidence only when decoded tool arguments are unsafe to execute.
+ *
+ * Valid JSON escapes and literal UTF-8 have the same canonical decoded value.
+ * Malformed JSON, duplicate/deep evidence, and unpaired UTF-16 surrogates keep
+ * the existing fail-closed path.
+ */
+export function collectUnsafeUnicodeEscapeEvidence(json: string): UnicodeEscapeEvidence | undefined {
+	const hasUnicodeEscape = json.includes("\\u");
+	if (!hasUnicodeEscape && json.isWellFormed()) return undefined;
+	const evidence = hasUnicodeEscape ? collectUnicodeEscapeEvidence(json) : undefined;
+	if (evidence?.malformed) return evidence;
+	try {
+		if (hasUnpairedUnicodeSurrogate(JSON.parse(json))) {
+			return createUnicodeEscapeEvidence([], 0, false, true);
+		}
+	} catch {
+		return createUnicodeEscapeEvidence([], 0, false, true);
+	}
+	return undefined;
+}
+
+/** Attach unsafe raw evidence while preserving the existing call-level guard flag. */
 export function captureUnicodeEscapeEvidence(target: UnicodeEscapeEvidenceTarget, json: string): boolean {
-	const evidence = collectUnicodeEscapeEvidence(json);
+	const evidence = collectUnsafeUnicodeEscapeEvidence(json);
 	if (!evidence) return false;
 	attachUnicodeEscapeEvidence(target, evidence);
 	return true;

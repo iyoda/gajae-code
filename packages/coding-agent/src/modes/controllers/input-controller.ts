@@ -39,6 +39,7 @@ import { CommandPalette, type CommandPaletteAction, type CommandPaletteEntry } f
 import type { PasteTextContext } from "../components/custom-editor";
 import { QueuePaneComponent } from "../components/queue-pane";
 import { type QueuedMessageMoveDirection, QueuedMessageSelectorComponent } from "../components/queued-message-selector";
+import { matchesAppInterrupt } from "../utils/keybinding-matchers";
 
 const QUEUE_SELECTOR_NAVIGATION_ACTIONS = [
 	"tui.select.up",
@@ -114,6 +115,7 @@ export class InputController {
 			showError: actionId => this.ctx.showError(actionId),
 		});
 		this.#registerActions();
+		this.#installOAuthCopyListener();
 	}
 
 	#registerActions(): void {
@@ -145,6 +147,7 @@ export class InputController {
 			},
 			"app.clipboard.copyLine": () => this.handleCopyCurrentLine(),
 			"app.clipboard.copyPrompt": () => this.handleCopyPrompt(),
+			"app.clipboard.copyOAuthUrl": () => this.ctx.copyOAuthUrl(),
 			"app.session.new": async () => {
 				await this.ctx.handleClearCommand();
 			},
@@ -221,6 +224,8 @@ export class InputController {
 				);
 			case "app.clipboard.copyPrompt":
 				return this.ctx.editor.getText().length > 0;
+			case "app.clipboard.copyOAuthUrl":
+				return this.ctx.hasOAuthUrlForCopy();
 			case "app.session.tree":
 			case "app.session.fork":
 				return this.ctx.session.messages.length > 0;
@@ -330,12 +335,28 @@ export class InputController {
 	}
 
 	#globalInterruptUnsubscribe: (() => void) | undefined;
+	#oauthCopyUnsubscribe: (() => void) | undefined;
 	#draftClearEscapeText: string | undefined;
 
 	#resetEscapeGestures(): void {
 		this.ctx.lastEscapeTime = 0;
 		this.ctx.lastComposerClearEscapeTime = 0;
 		this.#draftClearEscapeText = undefined;
+	}
+
+	#installOAuthCopyListener(): void {
+		if (typeof this.ctx.ui.addInputListener !== "function") return;
+		this.#oauthCopyUnsubscribe?.();
+		this.#oauthCopyUnsubscribe = this.ctx.ui.addInputListener(data => {
+			if (this.ctx.hasOAuthUrlForCopy?.() !== true) return;
+			// Focused overlays own cancellation. In particular, a user remap of
+			// copyOAuthUrl to Ctrl+C/Escape must not steal the wizard's interrupt.
+			if (data === "\x03" || matchesAppInterrupt(data)) return;
+			if (this.ctx.keybindings.getKeys("app.clipboard.copyOAuthUrl").some(key => matchesKey(data, key))) {
+				this.#executeAction("app.clipboard.copyOAuthUrl");
+				return { consume: true };
+			}
+		});
 	}
 
 	#armDraftClearEscape(text: string, now: number): void {
@@ -586,6 +607,7 @@ export class InputController {
 			return bypassAutocomplete;
 		};
 		this.#installGlobalInterruptListener();
+		this.#installOAuthCopyListener();
 
 		// An open btw panel must stay dismissable with Esc even while another
 		// controller (auto-compaction, auto-retry, manual compaction, etc.) has
@@ -733,6 +755,7 @@ export class InputController {
 		);
 		this.ctx.editor.onCopyPrompt = () => this.#executeAction("app.clipboard.copyPrompt");
 		this.#registerCommandPaletteAction("app.clipboard.copyPrompt", copyPrompt);
+		this.#registerCommandPaletteAction("app.clipboard.copyOAuthUrl", () => this.ctx.copyOAuthUrl(), true);
 		this.ctx.editor.onPasteText = (text, context) => this.handleTextPaste(text, context);
 		this.ctx.editor.onPastePendingInputCleared = (reason, restoredInputCount) => {
 			const reasonText = reason === "timeout" ? "timed out" : "exceeded the input queue limit";
@@ -2211,7 +2234,16 @@ export class InputController {
 
 		const actions = [...this.#commandPaletteActions.entries()]
 			.filter(([id]) => !this.#availabilityGatedPaletteActions.has(id) || this.actionRegistry.isAvailable(id))
-			.map(([, action]) => action);
+			.map(([id, action]) =>
+				this.#availabilityGatedPaletteActions.has(id)
+					? {
+							...action,
+							handler: async () => {
+								await this.actionRegistry.executeFresh(id);
+							},
+						}
+					: action,
+			);
 		const slashCommands = [...(this.ctx.getSlashCommands?.() ?? this.#slashCommands)];
 		if (!this.ctx.showCommandPalette) {
 			let overlayHandle: ReturnType<typeof this.ctx.ui.showOverlay> | undefined;

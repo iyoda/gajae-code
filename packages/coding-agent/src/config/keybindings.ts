@@ -38,6 +38,7 @@ interface AppKeybindings {
 	"app.clipboard.pasteText": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.clipboard.copyOAuthUrl": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -171,6 +172,10 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	"app.clipboard.copyOAuthUrl": {
+		defaultKeys: "alt+shift+u",
+		description: "Copy OAuth URL",
 	},
 	"app.session.new": {
 		defaultKeys: "ctrl+n",

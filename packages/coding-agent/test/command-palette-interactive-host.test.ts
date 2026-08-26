@@ -317,6 +317,18 @@ async function dispatchAndWait(host: InteractivePaletteHost, query: string, disp
 }
 
 describe("command palette InteractiveMode host", () => {
+	it("restores an older OAuth URL lease when a newer flow ends", async () => {
+		const host = await createHost();
+		const releaseFirst = host.mode.beginOAuthUrlForCopy("https://example.test/oauth/first");
+		const releaseSecond = host.mode.beginOAuthUrlForCopy("https://example.test/oauth/second");
+
+		expect(host.mode.hasOAuthUrlForCopy()).toBe(true);
+		releaseSecond();
+		expect(host.mode.hasOAuthUrlForCopy()).toBe(true);
+		releaseFirst();
+		expect(host.mode.hasOAuthUrlForCopy()).toBe(false);
+	});
+
 	it("merges builtin, extension, custom, and skill entries while rejecting duplicate command names", async () => {
 		const host = await createHost();
 		const palette = await openPalette(host);

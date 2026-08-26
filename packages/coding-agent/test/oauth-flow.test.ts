@@ -560,6 +560,44 @@ describe("MCP 2026-07-28 authorization conformance", () => {
 		expect(credentials.access).toBe("access-token");
 	});
 
+	it("passes cancellation through token exchange fetch", async () => {
+		const callbackPort = allocateCallbackPort();
+		const controller = new AbortController();
+		const tokenStarted = Promise.withResolvers<void>();
+		using _hook = hookFetch(async (input, init) => {
+			if (String(input) !== "https://provider.example/token") return new Response("not found", { status: 404 });
+			tokenStarted.resolve();
+			const { promise: aborted, reject } = Promise.withResolvers<never>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("token exchange aborted")), { once: true });
+			await aborted;
+			throw new Error("unreachable");
+		});
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				callbackPort,
+			},
+			{
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					queueMicrotask(() => {
+						void dispatchLocalCallback(
+							`${authUrl.searchParams.get("redirect_uri")}?code=test-code&state=${authUrl.searchParams.get("state")}`,
+						);
+					});
+				},
+				signal: controller.signal,
+			},
+		);
+
+		const operation = flow.login();
+		await tokenStarted.promise;
+		controller.abort(new Error("cancelled"));
+		await expect(operation).rejects.toThrow("token exchange aborted");
+	});
+
 	it("canonicalizes MCP resource URIs per RFC 8707", () => {
 		expect(canonicalMCPResourceUri("https://mcp.example.com/")).toBe("https://mcp.example.com");
 		expect(canonicalMCPResourceUri("https://mcp.example.com/mcp#frag")).toBe("https://mcp.example.com/mcp");

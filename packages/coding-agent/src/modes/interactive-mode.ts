@@ -431,6 +431,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookEditor: HookEditorComponent | undefined = undefined;
 	lastStatusSpacer: Spacer | undefined = undefined;
 	lastStatusText: Text | undefined = undefined;
+	#oauthUrlForCopyLeases: Array<{ token: symbol; url: string }> = [];
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
@@ -1836,6 +1837,42 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showWarning(message: string): void {
 		this.#uiHelpers.showWarning(message);
+	}
+
+	beginOAuthUrlForCopy(url: string): () => void {
+		const token = Symbol("oauth-url-copy");
+		this.#oauthUrlForCopyLeases.push({ token, url });
+		return () => {
+			const index = this.#oauthUrlForCopyLeases.findIndex(lease => lease.token === token);
+			if (index === -1) return;
+			this.#oauthUrlForCopyLeases.splice(index, 1);
+		};
+	}
+
+	hasOAuthUrlForCopy(): boolean {
+		return this.#oauthUrlForCopyLeases.length > 0;
+	}
+
+	async copyOAuthUrl(): Promise<void> {
+		const pending = this.#oauthUrlForCopyLeases.at(-1);
+		if (pending === undefined) {
+			this.showStatus("No OAuth URL is available to copy.");
+			return;
+		}
+		try {
+			const outcome = await copyToClipboard(pending.url);
+			if (outcome.status === "verified") {
+				this.showStatus("OAuth URL copied to clipboard.");
+			} else if (outcome.reason.includes("failed") || outcome.reason.includes("rejected")) {
+				this.showWarning(
+					`OAuth URL delivery was not confirmed (${outcome.transport}). Use the visible link or copy it manually.`,
+				);
+			} else {
+				this.showStatus(`OAuth URL delivery attempted via ${outcome.transport}; verify it arrived before pasting.`);
+			}
+		} catch {
+			this.showWarning("Failed to copy OAuth URL to clipboard.");
+		}
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
