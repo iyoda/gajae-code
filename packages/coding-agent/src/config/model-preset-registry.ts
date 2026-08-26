@@ -1172,6 +1172,14 @@ export function loadAcceptedModelPresetRegistry(
 	agentDir = getAgentDir(),
 	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
 ): AcceptedModelPresetRegistry {
+	if (environmentDisabled())
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			disabled: true,
+		};
 	let control: RegistryControl;
 	try {
 		control = loadControlSync(agentDir);
@@ -1219,6 +1227,14 @@ export async function loadAcceptedModelPresetRegistryAsync(
 	agentDir = getAgentDir(),
 	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
 ): Promise<AcceptedModelPresetRegistry> {
+	if (environmentDisabled())
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			disabled: true,
+		};
 	let control: RegistryControl;
 	try {
 		control = await loadControlBun(agentDir);
@@ -1649,6 +1665,7 @@ async function refreshModelPresetRegistryInner(
 		return await withFileLock(
 			paths.transaction,
 			async () => {
+				if (environmentDisabled()) return { status: "disabled", revision: undefined } as const;
 				const allowTestUrls = modelPresetRegistryTestUrlsAllowed(agentDir);
 				const control = loadControlSync(agentDir);
 				if (control.disabled || environmentDisabled())
@@ -1992,6 +2009,18 @@ export function getModelPresetRegistryStatus(
 	dependencies: ModelPresetRegistryDependencies = {},
 ): ModelPresetRegistryStatus {
 	const agentDir = effectiveAgentDir(dependencies);
+	if (environmentDisabled())
+		return {
+			contractVersion: MODEL_PRESET_REGISTRY_CONTRACT_VERSION,
+			source: "embedded",
+			cacheHealth: "empty",
+			disabled: true,
+			retainedProfiles: [],
+			retainedPresets: [],
+			historyRevisions: [],
+			profileCount: 0,
+			presetCount: 0,
+		};
 	let control: RegistryControl = { version: 1, disabled: false };
 	let state: RegistryState = { version: 1, history: [] };
 	let cacheHealth: ModelPresetRegistryStatus["cacheHealth"] = "empty";

@@ -1112,6 +1112,12 @@ function createQuerySurface(
 				getAvailable: () => availableModels,
 				getApiKey: (model: Model<Api>, sessionId?: string) =>
 					ctx.modelRegistry.getApiKeyForProvider(model.provider, sessionId, model.baseUrl),
+				resolveCanonicalModel: ctx.modelRegistry.resolveCanonicalModel?.bind(ctx.modelRegistry),
+				getCanonicalVariants: ctx.modelRegistry.getCanonicalVariants?.bind(ctx.modelRegistry),
+				getCanonicalId: ctx.modelRegistry.getCanonicalId?.bind(ctx.modelRegistry),
+				resolveModelByLookupAlias: ctx.modelRegistry.resolveModelByLookupAlias?.bind(ctx.modelRegistry),
+				lookupAliasExists: ctx.modelRegistry.lookupAliasExists?.bind(ctx.modelRegistry),
+				clearCanonicalVariant: ctx.modelRegistry.clearCanonicalVariant?.bind(ctx.modelRegistry),
 			};
 			let defaultModel: Model<Api> | undefined;
 			for (const assignment of assignments) {

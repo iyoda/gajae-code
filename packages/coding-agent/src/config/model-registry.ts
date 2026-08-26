@@ -651,8 +651,7 @@ function filterMaterializedRegistryProfiles(
 			Object.values(profile.modelMapping).some(selectorValue => {
 				const selectors = normalizeModelSelectorValue(selectorValue);
 				return (
-					selectors.length > 0 &&
-					!selectors.some(selector => registrySelectorResolvesToModel(selector, models))
+					selectors.length > 0 && !selectors.some(selector => registrySelectorResolvesToModel(selector, models))
 				);
 			})
 		) {

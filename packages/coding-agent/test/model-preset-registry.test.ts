@@ -606,6 +606,26 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("honors environment disable before reading corrupt control state", async () => {
+		const data = await fixture();
+		await Bun.write(path.join(data.agentDir, "model-presets", "control.json"), "{");
+		const previous = process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED;
+		process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED = "1";
+		try {
+			const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
+			expect(accepted).toMatchObject({ disabled: true });
+			expect(accepted.error).toBeUndefined();
+			expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
+				disabled: true,
+				source: "embedded",
+				cacheHealth: "empty",
+			});
+		} finally {
+			if (previous === undefined) delete process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED;
+			else process.env.GJC_MODEL_PRESET_REGISTRY_DISABLED = previous;
+		}
+	});
+
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")]));
