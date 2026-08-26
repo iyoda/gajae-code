@@ -484,7 +484,6 @@ export function isWindowsSessionPathRegressionPath(changedPath: string): boolean
 		changedPath === "packages/coding-agent/src/gjc-runtime/empty-delete-gc.ts" ||
 		changedPath === "packages/coding-agent/src/gjc-runtime/gc-runtime.ts" ||
 		changedPath === "packages/coding-agent/test/empty-delete-receipt-latch.test.ts" ||
-		changedPath === "packages/coding-agent/test/session-state-lock.test.ts" ||
 		changedPath === "packages/coding-agent/test/helpers/exact-identity-natives.ts" ||
 		// Windows environment names are case-insensitive while the project-dotenv
 		// provenance snapshot is keyed exactly, so `canonicalEnvKey()` folds on

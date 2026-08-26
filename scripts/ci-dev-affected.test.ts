@@ -1278,7 +1278,6 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 			"packages/coding-agent/src/gjc-runtime/empty-delete-gc.ts",
 			"packages/coding-agent/src/gjc-runtime/gc-runtime.ts",
 			"packages/coding-agent/test/empty-delete-receipt-latch.test.ts",
-			"packages/coding-agent/test/session-state-lock.test.ts",
 			"packages/coding-agent/test/helpers/exact-identity-natives.ts",
 			// canonicalEnvKey() folds project-dotenv provenance keys on win32 only,
 			// so a Linux shard exercises an identity function and proves nothing.
