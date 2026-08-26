@@ -915,6 +915,91 @@ interface SessionIndexOpenGroup {
 	promise: Promise<void>;
 	closed: boolean;
 }
+
+type SessionIdentityExpectation = {
+	sessionId: string;
+	stateRoot: string;
+	endpointGeneration: number;
+	pid: number;
+	processIncarnation?: string;
+	hostIncarnation?: string;
+	endpointMtimeMs?: number;
+	lifecycleRequestId?: string;
+};
+
+function sameSessionTuple(
+	event: SessionIndexEvent,
+	expected: SessionIdentityExpectation,
+	expectedRoot: string,
+): boolean {
+	return (
+		event.sessionId === expected.sessionId &&
+		event.endpointGeneration === expected.endpointGeneration &&
+		resolveEquivalentPath(event.locator.stateRoot) === expectedRoot
+	);
+}
+
+function sameSessionIdentity(
+	event: SessionIndexEvent,
+	expected: SessionIdentityExpectation,
+	expectedRoot: string,
+): boolean {
+	return (
+		sameSessionTuple(event, expected, expectedRoot) &&
+		event.pid === expected.pid &&
+		event.processIncarnation === expected.processIncarnation &&
+		event.hostIncarnation === expected.hostIncarnation &&
+		event.endpointMtimeMs === expected.endpointMtimeMs &&
+		event.lifecycleRequestId === expected.lifecycleRequestId
+	);
+}
+
+function supersededAtForIdentity(
+	events: readonly SessionIndexEvent[],
+	expected: SessionIdentityExpectation,
+): number | undefined {
+	const expectedRoot = resolveEquivalentPath(expected.stateRoot);
+	const targetRegistration = events.findLast(
+		event => event.type === "host_registered" && sameSessionIdentity(event, expected, expectedRoot),
+	);
+	const targetAnchor =
+		targetRegistration?.indexSeq ??
+		events.find(event => sameSessionIdentity(event, expected, expectedRoot))?.indexSeq;
+	if (targetAnchor === undefined) return undefined;
+	return events
+		.filter(
+			event =>
+				event.type === "host_registered" &&
+				sameSessionTuple(event, expected, expectedRoot) &&
+				!sameSessionIdentity(event, expected, expectedRoot) &&
+				event.indexSeq > targetAnchor,
+		)
+		.map(event => event.indexSeq)
+		.sort((a, b) => a - b)[0];
+}
+
+function followsApplicableTombstone(
+	events: readonly SessionIndexEvent[],
+	candidate: SessionIndexEvent,
+	expected: SessionIdentityExpectation,
+	expectedRoot: string,
+): boolean {
+	const tombstone = events.findLast(
+		event =>
+			event.type === "session_deleted" &&
+			event.indexSeq < candidate.indexSeq &&
+			sameSessionIdentity(event, expected, expectedRoot),
+	);
+	if (tombstone === undefined) return false;
+	const reRegistration = events.findLast(
+		event =>
+			event.type === "host_registered" &&
+			event.indexSeq < candidate.indexSeq &&
+			sameSessionIdentity(event, expected, expectedRoot),
+	);
+	return reRegistration === undefined || reRegistration.indexSeq < tombstone.indexSeq;
+}
+
 export class SessionIndex {
 	static #operations = new Map<string, Promise<void>>();
 	static #openGroups = new Map<string, SessionIndexOpenGroup>();
@@ -1772,6 +1857,167 @@ export class SessionIndex {
 	 */
 	listSessionIdentities(probedIncarnations?: ReadonlyMap<string, string | undefined>): IndexedSession[] {
 		return reduceEvents(this.#events, this.#policy.clock(), this.#agentDir, probedIncarnations).identities;
+	}
+
+	/** Reconstructs a receipt-bound identity even when admission superseded it. */
+	findHistoricalSessionIdentity(expected: {
+		sessionId: string;
+		stateRoot: string;
+		endpointGeneration: number;
+		pid: number;
+		processIncarnation?: string;
+		hostIncarnation?: string;
+		endpointMtimeMs?: number;
+		lifecycleRequestId?: string;
+	}): IndexedSession | undefined {
+		const expectedRoot = resolveEquivalentPath(expected.stateRoot);
+		const supersededAt = supersededAtForIdentity(this.#events, expected);
+		const matching = this.#events.filter(
+			event =>
+				(supersededAt === undefined || event.indexSeq < supersededAt) &&
+				sameSessionIdentity(event, expected, expectedRoot),
+		);
+		const latest = matching.findLast(event => event.type !== "host_heartbeat");
+		if (latest === undefined) return undefined;
+		return projectIdentity(
+			{
+				identity: identityKey(latest),
+				latest,
+				heartbeat: matching.findLast(event => event.type === "host_heartbeat"),
+			},
+			false,
+			this.#policy.clock(),
+		);
+	}
+
+	/** Returns the latest identity-bound terminal event, if retained. */
+	findSessionTerminalEvidence(
+		expected: Pick<
+			IndexedSession,
+			| "sessionId"
+			| "locator"
+			| "endpointGeneration"
+			| "pid"
+			| "processIncarnation"
+			| "hostIncarnation"
+			| "endpointMtimeMs"
+			| "lifecycleRequestId"
+		>,
+	): { type: "host_unregistered" | "session_closed" | "session_deleted"; indexSeq: number } | undefined {
+		const expectedRoot = resolveEquivalentPath(expected.locator.stateRoot);
+		const expectedIncarnation = expected.hostIncarnation ?? expected.processIncarnation;
+		const supersededAt = supersededAtForIdentity(this.#events, {
+			sessionId: expected.sessionId,
+			stateRoot: expected.locator.stateRoot,
+			endpointGeneration: expected.endpointGeneration,
+			pid: expected.pid,
+			processIncarnation: expected.processIncarnation,
+			hostIncarnation: expected.hostIncarnation,
+			endpointMtimeMs: expected.endpointMtimeMs,
+			lifecycleRequestId: expected.lifecycleRequestId,
+		});
+		const event = this.#events.findLast(
+			event =>
+				(event.type === "host_unregistered" ||
+					event.type === "session_closed" ||
+					event.type === "session_deleted") &&
+				(event.hostIncarnation ?? event.processIncarnation) === expectedIncarnation &&
+				(supersededAt === undefined || event.indexSeq < supersededAt) &&
+				!followsApplicableTombstone(
+					this.#events,
+					event,
+					{
+						sessionId: expected.sessionId,
+						stateRoot: expected.locator.stateRoot,
+						endpointGeneration: expected.endpointGeneration,
+						pid: expected.pid,
+						processIncarnation: expected.processIncarnation,
+						hostIncarnation: expected.hostIncarnation,
+						endpointMtimeMs: expected.endpointMtimeMs,
+						lifecycleRequestId: expected.lifecycleRequestId,
+					},
+					expectedRoot,
+				) &&
+				sameSessionIdentity(
+					event,
+					{
+						sessionId: expected.sessionId,
+						stateRoot: expected.locator.stateRoot,
+						endpointGeneration: expected.endpointGeneration,
+						pid: expected.pid,
+						processIncarnation: expected.processIncarnation,
+						hostIncarnation: expected.hostIncarnation,
+						endpointMtimeMs: expected.endpointMtimeMs,
+						lifecycleRequestId: expected.lifecycleRequestId,
+					},
+					expectedRoot,
+				),
+		);
+		return event &&
+			(event.type === "host_unregistered" || event.type === "session_closed" || event.type === "session_deleted")
+			? { type: event.type, indexSeq: event.indexSeq }
+			: undefined;
+	}
+
+	/** Returns the latest identity-bound session_closed evidence, even after a tombstone. */
+	findSessionClosedEvidence(
+		expected: Pick<
+			IndexedSession,
+			| "sessionId"
+			| "locator"
+			| "endpointGeneration"
+			| "pid"
+			| "processIncarnation"
+			| "hostIncarnation"
+			| "endpointMtimeMs"
+			| "lifecycleRequestId"
+		>,
+	): number | undefined {
+		const expectedRoot = resolveEquivalentPath(expected.locator.stateRoot);
+		const supersededAt = supersededAtForIdentity(this.#events, {
+			sessionId: expected.sessionId,
+			stateRoot: expected.locator.stateRoot,
+			endpointGeneration: expected.endpointGeneration,
+			pid: expected.pid,
+			processIncarnation: expected.processIncarnation,
+			hostIncarnation: expected.hostIncarnation,
+			endpointMtimeMs: expected.endpointMtimeMs,
+			lifecycleRequestId: expected.lifecycleRequestId,
+		});
+		return this.#events.findLast(
+			event =>
+				event.type === "session_closed" &&
+				(supersededAt === undefined || event.indexSeq < supersededAt) &&
+				!followsApplicableTombstone(
+					this.#events,
+					event,
+					{
+						sessionId: expected.sessionId,
+						stateRoot: expected.locator.stateRoot,
+						endpointGeneration: expected.endpointGeneration,
+						pid: expected.pid,
+						processIncarnation: expected.processIncarnation,
+						hostIncarnation: expected.hostIncarnation,
+						endpointMtimeMs: expected.endpointMtimeMs,
+						lifecycleRequestId: expected.lifecycleRequestId,
+					},
+					expectedRoot,
+				) &&
+				sameSessionIdentity(
+					event,
+					{
+						sessionId: expected.sessionId,
+						stateRoot: expected.locator.stateRoot,
+						endpointGeneration: expected.endpointGeneration,
+						pid: expected.pid,
+						processIncarnation: expected.processIncarnation,
+						hostIncarnation: expected.hostIncarnation,
+						endpointMtimeMs: expected.endpointMtimeMs,
+						lifecycleRequestId: expected.lifecycleRequestId,
+					},
+					expectedRoot,
+				),
+		)?.indexSeq;
 	}
 
 	/**

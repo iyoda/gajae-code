@@ -13,6 +13,8 @@ import {
 	type SessionLifecycleClientRequestOptions,
 	type SessionLifecycleOperation,
 	SessionLifecycleService,
+	type SessionReconcileUncertainTarget,
+	validateSessionLifecycleMutationRequest,
 } from "../src/sdk/lifecycle";
 import { AgentDirSessionLifecycleClient } from "../src/sdk/lifecycle/broker-client";
 
@@ -718,5 +720,124 @@ describe("SessionLifecycleService", () => {
 			listSpy.mockRestore();
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("requires complete identity-bound proof for uncertain retirement", () => {
+		const result = validateSessionLifecycleMutationRequest({
+			operation: "session.reconcile_uncertain",
+			actor,
+			capability: "session.reconcile_uncertain",
+			requestKey: "retire-request",
+			target: { sessionId: "retired-session" },
+		});
+		expect(result).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+	});
+
+	it("forwards typed proof and strips internal retirement identity from the result", async () => {
+		const target: SessionReconcileUncertainTarget = {
+			sessionId: "retired-session",
+			cwd: "/tmp/workspace",
+			stateRoot: "/tmp/workspace/.gjc/state",
+			endpointGeneration: 2,
+			endpointMtimeMs: 1,
+			processIncarnation: "linux:123",
+			hostIncarnation: "host:123",
+			lifecycleRequestId: "retire-effect",
+			remoteCreateKey: "remote-create-key",
+		};
+		const client = new FakeLifecycleClient();
+		client.response = {
+			ok: true,
+			result: {
+				sessionId: target.sessionId,
+				retired: true,
+				ledgerState: "terminal_error",
+				indexType: "session_closed",
+				stateRoot: target.stateRoot,
+				endpointGeneration: target.endpointGeneration,
+				endpointMtimeMs: target.endpointMtimeMs,
+				processIncarnation: target.processIncarnation,
+				hostIncarnation: target.hostIncarnation,
+				lifecycleRequestId: target.lifecycleRequestId,
+				remoteCreateKey: target.remoteCreateKey,
+			},
+		};
+		const result = await new SessionLifecycleService(client).reconcileUncertain({
+			actor,
+			capability: "session.reconcile_uncertain",
+			requestKey: "retire-request",
+			target,
+		});
+		expect(result).toMatchObject({
+			ok: true,
+			operation: "session.reconcile_uncertain",
+			result: { sessionId: target.sessionId },
+		});
+		expect(result.ok && result.result).not.toHaveProperty("stateRoot");
+		expect(result.ok && result.result).not.toHaveProperty("processIncarnation");
+		expect(client.calls[0]?.input).toEqual({ ...target });
+	});
+
+	it("rejects a proofless successful broker envelope", async () => {
+		const client = new FakeLifecycleClient();
+		client.response = { ok: true, result: { sessionId: "retired-session" } };
+		const result = await new SessionLifecycleService(client).reconcileUncertain({
+			actor,
+			capability: "session.reconcile_uncertain",
+			requestKey: "retire-proofless",
+			target: {
+				sessionId: "retired-session",
+				cwd: "/tmp/workspace",
+				stateRoot: "/tmp/workspace/.gjc/state",
+				endpointGeneration: 2,
+				endpointMtimeMs: 1,
+				processIncarnation: "linux:123",
+				hostIncarnation: "host:123",
+				lifecycleRequestId: "retire-effect",
+				remoteCreateKey: "remote-create-key",
+			},
+		});
+		expect(result).toMatchObject({ ok: false, certainty: "uncertain", error: { code: "malformed_response" } });
+	});
+
+	it("canonicalizes equivalent proof paths before transport", async () => {
+		const client = new FakeLifecycleClient();
+		client.response = {
+			ok: true,
+			result: {
+				sessionId: "retired.session",
+				retired: true,
+				ledgerState: "terminal_error",
+				indexType: "session_closed",
+				stateRoot: "/tmp/workspace/.gjc/state",
+				endpointGeneration: 2,
+				endpointMtimeMs: 1,
+				processIncarnation: "linux:123",
+				hostIncarnation: "host:123",
+				lifecycleRequestId: "retire-effect",
+				remoteCreateKey: "remote-create-key",
+			},
+		};
+		const result = await new SessionLifecycleService(client).reconcileUncertain({
+			actor,
+			capability: "session.reconcile_uncertain",
+			requestKey: "retire-canonicalize",
+			target: {
+				sessionId: "retired.session",
+				cwd: "/tmp/workspace/../workspace",
+				stateRoot: "/tmp/workspace/../workspace/.gjc/state",
+				endpointGeneration: 2,
+				endpointMtimeMs: 1,
+				processIncarnation: "linux:123",
+				hostIncarnation: "host:123",
+				lifecycleRequestId: "retire-effect",
+				remoteCreateKey: "remote-create-key",
+			},
+		});
+		expect(result).toMatchObject({ ok: true, result: { sessionId: "retired.session" } });
+		expect(client.calls[0]?.input).toMatchObject({
+			cwd: "/tmp/workspace",
+			stateRoot: "/tmp/workspace/.gjc/state",
+		});
 	});
 });

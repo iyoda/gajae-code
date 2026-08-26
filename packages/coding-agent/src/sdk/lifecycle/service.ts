@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import {
 	SessionListTraversalError,
 	type SessionListTraversalPage,
@@ -12,6 +13,7 @@ export type SessionLifecycleOperation =
 	| "session.resume"
 	| "session.close"
 	| "session.delete"
+	| "session.reconcile_uncertain"
 	| "session.list";
 
 export interface SessionLifecycleActor {
@@ -117,6 +119,18 @@ export interface SessionCloseTarget {
 	readonly endpointIncarnation?: string;
 }
 
+export interface SessionReconcileUncertainTarget {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly stateRoot: string;
+	readonly endpointGeneration: number;
+	readonly endpointMtimeMs: number;
+	readonly processIncarnation: string;
+	readonly hostIncarnation: string;
+	readonly lifecycleRequestId: string;
+	readonly remoteCreateKey: string;
+}
+
 export interface SessionDeleteTarget {
 	readonly sessionId: string;
 	readonly cwd?: string;
@@ -146,6 +160,10 @@ export type SessionForkRequest = SessionLifecycleMutationRequestBase<"session.fo
 export type SessionResumeRequest = SessionLifecycleMutationRequestBase<"session.resume", SessionResumeTarget>;
 export type SessionCloseRequest = SessionLifecycleMutationRequestBase<"session.close", SessionCloseTarget>;
 export type SessionDeleteRequest = SessionLifecycleMutationRequestBase<"session.delete", SessionDeleteTarget>;
+export type SessionReconcileUncertainRequest = SessionLifecycleMutationRequestBase<
+	"session.reconcile_uncertain",
+	SessionReconcileUncertainTarget
+>;
 export interface SessionListRequest {
 	readonly operation: "session.list";
 	readonly actor: SessionLifecycleActor;
@@ -161,7 +179,8 @@ export type SessionLifecycleMutationRequest =
 	| SessionForkRequest
 	| SessionResumeRequest
 	| SessionCloseRequest
-	| SessionDeleteRequest;
+	| SessionDeleteRequest
+	| SessionReconcileUncertainRequest;
 
 export type SessionLifecycleCertainty = "terminal" | "retryable" | "cleanup_pending" | "uncertain";
 
@@ -213,6 +232,11 @@ export interface SessionDeleteResult {
 	readonly operation: "session.delete";
 	readonly result: SessionLifecycleSessionResult;
 }
+export interface SessionReconcileUncertainResult {
+	readonly ok: true;
+	readonly operation: "session.reconcile_uncertain";
+	readonly result: SessionLifecycleSessionResult;
+}
 export interface SessionListSuccessResult {
 	readonly ok: true;
 	readonly operation: "session.list";
@@ -254,6 +278,12 @@ export type SessionDeleteFailure = {
 	readonly certainty: SessionLifecycleCertainty;
 	readonly error: SessionLifecycleError;
 };
+export type SessionReconcileUncertainFailure = {
+	readonly ok: false;
+	readonly operation: "session.reconcile_uncertain";
+	readonly certainty: SessionLifecycleCertainty;
+	readonly error: SessionLifecycleError;
+};
 export type SessionListFailure = {
 	readonly ok: false;
 	readonly operation: "session.list";
@@ -266,6 +296,7 @@ export type SessionForkOutcome = SessionForkResult | SessionForkFailure;
 export type SessionResumeOutcome = SessionResumeResult | SessionResumeFailure;
 export type SessionCloseOutcome = SessionCloseResult | SessionCloseFailure;
 export type SessionDeleteOutcome = SessionDeleteResult | SessionDeleteFailure;
+export type SessionReconcileUncertainOutcome = SessionReconcileUncertainResult | SessionReconcileUncertainFailure;
 export type SessionListOutcome = SessionListSuccessResult | SessionListFailure;
 export type SessionLifecycleResult =
 	| SessionCreateOutcome
@@ -273,6 +304,7 @@ export type SessionLifecycleResult =
 	| SessionResumeOutcome
 	| SessionCloseOutcome
 	| SessionDeleteOutcome
+	| SessionReconcileUncertainOutcome
 	| SessionListOutcome;
 
 /** Shared, side-effect-free validation for lifecycle mutation requests. */
@@ -288,7 +320,8 @@ export type SessionLifecycleMutationValidation =
 	| SessionForkFailure
 	| SessionResumeFailure
 	| SessionCloseFailure
-	| SessionDeleteFailure;
+	| SessionDeleteFailure
+	| SessionReconcileUncertainFailure;
 
 const RETRYABLE_BROKER_ERRORS = new Set([
 	"unavailable",
@@ -338,6 +371,7 @@ function operationOf(value: unknown): SessionLifecycleOperation {
 		value === "session.resume" ||
 		value === "session.close" ||
 		value === "session.delete" ||
+		value === "session.reconcile_uncertain" ||
 		value === "session.list"
 	)
 		return value;
@@ -376,6 +410,33 @@ function validTarget(target: unknown): target is Readonly<Record<string, unknown
 	return isRecord(target);
 }
 
+export function validateSessionReconcileUncertainTarget(value: unknown): value is SessionReconcileUncertainTarget {
+	if (!isRecord(value)) return false;
+	const target = value;
+	const bounded = (value: unknown, max: number): value is string =>
+		typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+	return (
+		bounded(target.sessionId, 256) &&
+		/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(target.sessionId) &&
+		bounded(target.cwd, 4096) &&
+		path.isAbsolute(target.cwd) &&
+		bounded(target.stateRoot, 4096) &&
+		path.isAbsolute(target.stateRoot) &&
+		path.resolve(target.stateRoot) === path.join(path.resolve(target.cwd), ".gjc", "state") &&
+		typeof target.endpointGeneration === "number" &&
+		Number.isSafeInteger(target.endpointGeneration) &&
+		target.endpointGeneration > 0 &&
+		typeof target.endpointMtimeMs === "number" &&
+		Number.isFinite(target.endpointMtimeMs) &&
+		target.endpointMtimeMs > 0 &&
+		bounded(target.processIncarnation, 256) &&
+		bounded(target.hostIncarnation, 256) &&
+		bounded(target.lifecycleRequestId, 128) &&
+		/^[A-Za-z0-9._-]+$/u.test(target.lifecycleRequestId) &&
+		bounded(target.remoteCreateKey, 256)
+	);
+}
+
 /** Validates lifecycle authority and shape without contacting the Broker. */
 export function validateSessionLifecycleMutationRequest(request: unknown): SessionLifecycleMutationValidation {
 	const record = isRecord(request) ? request : {};
@@ -390,6 +451,13 @@ export function validateSessionLifecycleMutationRequest(request: unknown): Sessi
 		return failure(operation, "terminal", "capability_denied", `capability does not authorize ${operation}`);
 	if (!validTarget(record.target))
 		return failure(operation, "terminal", "invalid_request", "target must be an object");
+	if (operation === "session.reconcile_uncertain" && !validateSessionReconcileUncertainTarget(record.target))
+		return failure(
+			operation,
+			"terminal",
+			"invalid_request",
+			"session.reconcile_uncertain target must carry complete identity-bound retirement proof",
+		);
 	return {
 		ok: true,
 		operation,
@@ -437,6 +505,28 @@ function sessionResult(value: unknown, expectedSessionId?: string): SessionLifec
 	if (typeof record.reused === "boolean") result.reused = record.reused;
 	if (typeof record.note === "string") result.note = record.note;
 	return result;
+}
+
+function reconcileUncertainResult(
+	value: unknown,
+	target: SessionReconcileUncertainTarget,
+): SessionLifecycleSessionResult | undefined {
+	if (!isRecord(value)) return undefined;
+	if (
+		value.sessionId !== target.sessionId ||
+		value.retired !== true ||
+		value.ledgerState !== "terminal_error" ||
+		value.indexType !== "session_closed" ||
+		value.stateRoot !== target.stateRoot ||
+		value.endpointGeneration !== target.endpointGeneration ||
+		value.endpointMtimeMs !== target.endpointMtimeMs ||
+		value.processIncarnation !== target.processIncarnation ||
+		value.hostIncarnation !== target.hostIncarnation ||
+		value.lifecycleRequestId !== target.lifecycleRequestId ||
+		value.remoteCreateKey !== target.remoteCreateKey
+	)
+		return undefined;
+	return { sessionId: target.sessionId, endpointGeneration: target.endpointGeneration };
 }
 
 function savedSessionTranscriptIdentity(value: unknown): SessionLifecycleSavedSessionIdentity | undefined {
@@ -588,20 +678,39 @@ export class SessionLifecycleService {
 		this.#client = client;
 	}
 
-	async execute(
+	async #execute(
 		request: SessionLifecycleMutationRequest,
+		idempotencyKeyOverride?: string,
 	): Promise<
-		SessionCreateOutcome | SessionForkOutcome | SessionResumeOutcome | SessionCloseOutcome | SessionDeleteOutcome
+		| SessionCreateOutcome
+		| SessionForkOutcome
+		| SessionResumeOutcome
+		| SessionCloseOutcome
+		| SessionDeleteOutcome
+		| SessionReconcileUncertainOutcome
 	> {
 		const validation = validateSessionLifecycleMutationRequest(request);
 		if (!validation.ok) return validation;
 		const { operation, actor, requestKey, target } = validation;
-		const idempotencyKey = deriveSessionLifecycleIdempotencyKey(actor, requestKey, operation);
+		const normalizedTarget =
+			operation === "session.reconcile_uncertain"
+				? {
+						...target,
+						cwd: path.resolve((target as unknown as SessionReconcileUncertainTarget).cwd),
+						stateRoot: path.join(
+							path.resolve((target as unknown as SessionReconcileUncertainTarget).cwd),
+							".gjc",
+							"state",
+						),
+					}
+				: target;
+		const idempotencyKey =
+			idempotencyKeyOverride ?? deriveSessionLifecycleIdempotencyKey(actor, requestKey, operation);
 		let response: unknown;
 		try {
 			response = await this.#client.global(
 				operation,
-				{ ...target },
+				{ ...normalizedTarget },
 				{
 					idempotencyKey,
 					...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
@@ -619,12 +728,21 @@ export class SessionLifecycleService {
 		if (!isRecord(response) || response.ok !== true)
 			return failure(operation, "uncertain", "malformed_response", "lifecycle broker returned a malformed response");
 		const expectedSessionId =
-			operation === "session.resume" || operation === "session.close" || operation === "session.delete"
-				? typeof target.sessionId === "string"
-					? target.sessionId
+			operation === "session.resume" ||
+			operation === "session.close" ||
+			operation === "session.delete" ||
+			operation === "session.reconcile_uncertain"
+				? typeof normalizedTarget.sessionId === "string"
+					? normalizedTarget.sessionId
 					: undefined
 				: undefined;
-		const parsed = sessionResult(brokerSuccess(response), expectedSessionId);
+		const parsed =
+			operation === "session.reconcile_uncertain"
+				? reconcileUncertainResult(
+						brokerSuccess(response),
+						normalizedTarget as unknown as SessionReconcileUncertainTarget,
+					)
+				: sessionResult(brokerSuccess(response), expectedSessionId);
 		if (!parsed)
 			return failure(
 				operation,
@@ -637,7 +755,35 @@ export class SessionLifecycleService {
 			| SessionForkOutcome
 			| SessionResumeOutcome
 			| SessionCloseOutcome
-			| SessionDeleteOutcome;
+			| SessionDeleteOutcome
+			| SessionReconcileUncertainOutcome;
+	}
+
+	async execute(
+		request: SessionLifecycleMutationRequest,
+	): Promise<
+		| SessionCreateOutcome
+		| SessionForkOutcome
+		| SessionResumeOutcome
+		| SessionCloseOutcome
+		| SessionDeleteOutcome
+		| SessionReconcileUncertainOutcome
+	> {
+		return this.#execute(request);
+	}
+
+	async executeWithIdempotencyKey(
+		request: SessionLifecycleMutationRequest,
+		idempotencyKey: string,
+	): Promise<
+		| SessionCreateOutcome
+		| SessionForkOutcome
+		| SessionResumeOutcome
+		| SessionCloseOutcome
+		| SessionDeleteOutcome
+		| SessionReconcileUncertainOutcome
+	> {
+		return this.#execute(request, idempotencyKey);
 	}
 
 	async create(request: Omit<SessionCreateRequest, "operation">): Promise<SessionCreateOutcome> {
@@ -658,6 +804,15 @@ export class SessionLifecycleService {
 
 	async delete(request: Omit<SessionDeleteRequest, "operation">): Promise<SessionDeleteOutcome> {
 		return (await this.execute({ ...request, operation: "session.delete" })) as SessionDeleteOutcome;
+	}
+
+	async reconcileUncertain(
+		request: Omit<SessionReconcileUncertainRequest, "operation">,
+	): Promise<SessionReconcileUncertainOutcome> {
+		return (await this.execute({
+			...request,
+			operation: "session.reconcile_uncertain",
+		})) as SessionReconcileUncertainOutcome;
 	}
 
 	async list(request: Omit<SessionListRequest, "operation">): Promise<SessionListOutcome> {
