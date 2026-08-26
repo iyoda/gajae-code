@@ -383,7 +383,7 @@ describe("auth-broker wire surface", () => {
 		expect(res.status).toBe(401);
 	});
 
-	test("SSE stream emits initial snapshot then upsert delta", async () => {
+	test("SSE stream emits initial snapshot then a full snapshot per generation", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const controller = new AbortController();
 		const iter = client.openSnapshotStream({ signal: controller.signal });
@@ -398,13 +398,15 @@ describe("auth-broker wire surface", () => {
 
 			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 
-			const next = await nextMatching(iter, event => event.kind === "entry");
-			if (next.kind !== "entry") throw new Error("expected entry frame");
-			expect(next.entry.provider).toBe("anthropic");
-			expect(next.entry.credential.type).toBe("oauth");
-			if (next.entry.credential.type === "oauth") {
-				expect(next.entry.credential.access).toBe("access-b");
-				expect(next.entry.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
+			const next = await nextMatching(iter, event => event.kind === "snapshot");
+			if (next.kind !== "snapshot") throw new Error("expected snapshot frame");
+			expect(next.credentials).toHaveLength(2);
+			const upserted = next.credentials.find(
+				entry => entry.credential.type === "oauth" && entry.credential.access === "access-b",
+			);
+			expect(upserted).toBeDefined();
+			if (upserted && upserted.credential.type === "oauth") {
+				expect(upserted.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
 			}
 		} finally {
 			controller.abort();
@@ -412,7 +414,7 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
-	test("SSE stream pushes entry frame on refresh", async () => {
+	test("SSE stream pushes refreshed credential via full snapshot frame", async () => {
 		const refreshed = {
 			access: "access-rotated",
 			refresh: "refresh-rotated",
@@ -437,19 +439,26 @@ describe("auth-broker wire surface", () => {
 
 			const next = await nextMatching(
 				iter,
-				event => event.kind === "entry" && event.entry.credential.type === "oauth" && event.entry.id === id,
+				event =>
+					event.kind === "snapshot" &&
+					event.credentials.some(
+						entry => entry.credential.type === "oauth" && entry.credential.access === "access-rotated",
+					),
 			);
-			if (next.kind !== "entry") throw new Error("expected entry frame");
-			if (next.entry.credential.type !== "oauth") throw new Error("expected oauth credential");
-			expect(next.entry.credential.access).toBe("access-rotated");
-			expect(next.entry.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
+			if (next.kind !== "snapshot") throw new Error("expected snapshot frame");
+			const refreshedEntry = next.credentials.find(entry => entry.id === id);
+			if (refreshedEntry?.credential.type !== "oauth") {
+				throw new Error("expected refreshed oauth credential");
+			}
+			expect(refreshedEntry.credential.access).toBe("access-rotated");
+			expect(refreshedEntry.credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
 		} finally {
 			controller.abort();
 			await iter.return(undefined).catch(() => {});
 		}
 	});
 
-	test("SSE stream pushes removed frame on disable", async () => {
+	test("SSE stream removes disabled credential via full snapshot frame", async () => {
 		const initialSnapshot = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
 		if (initialSnapshot.status !== 200) throw new Error("expected snapshot");
 		const id = initialSnapshot.snapshot.credentials[0].id;
@@ -464,9 +473,9 @@ describe("auth-broker wire surface", () => {
 			const disabled = storage!.disableCredentialById(id, "revoked by test");
 			expect(disabled).toBe(true);
 
-			const next = await nextMatching(iter, event => event.kind === "removed");
-			if (next.kind !== "removed") throw new Error("expected removed frame");
-			expect(next.id).toBe(id);
+			const next = await nextMatching(iter, event => event.kind === "snapshot");
+			if (next.kind !== "snapshot") throw new Error("expected snapshot frame");
+			expect(next.credentials.some(entry => entry.id === id)).toBe(false);
 		} finally {
 			controller.abort();
 			await iter.return(undefined).catch(() => {});
