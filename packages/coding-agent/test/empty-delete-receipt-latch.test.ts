@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,12 +12,14 @@ import {
 	reclaimStaleSessionStateLock,
 	removeVerifiedEmptyQuarantine,
 	SessionStateLockTestHooks,
+	SessionStateLockUnavailableError,
+	setSessionStateLockNativeBindings,
 } from "../src/gjc-runtime/session-state-lock";
 import {
 	GJC_COORDINATOR_SESSION_STATE_FILE_ENV,
 	persistCoordinatorRuntimeStateFromEvent,
 } from "../src/gjc-runtime/session-state-sidecar";
-import { installExactIdentityNatives } from "./helpers/exact-identity-natives";
+import { exactIdentityNativeBindings, installExactIdentityNatives } from "./helpers/exact-identity-natives";
 
 const tempDirs: string[] = [];
 installExactIdentityNatives();
@@ -26,6 +29,8 @@ afterEach(async () => {
 	SessionStateLockTestHooks.lastQuarantineName = undefined;
 	SessionStateLockTestHooks.forcedQuarantineName = undefined;
 	SessionStateLockTestHooks.probeProcessSignal = undefined;
+	setSessionStateLockNativeBindings(undefined);
+	installExactIdentityNatives();
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -285,24 +290,150 @@ describe("empty .gjc-delete-* latch", () => {
 		);
 		expect(manifest.status).toBe(2);
 		expect(manifest.stderr).toContain("missing_manifest");
+		// A declared SHORT option is just as much an option token: `-j` must be a
+		// missing operand, never a root path that lets a normal prune proceed.
+		const shortRoot = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--root", "-j"],
+			root,
+			process.env,
+			[],
+		);
+		expect(shortRoot.status).toBe(2);
+		expect(shortRoot.stderr).toContain("missing_root");
+		const shortManifest = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--manifest", "-h"],
+			root,
+			process.env,
+			[],
+		);
+		expect(shortManifest.status).toBe(2);
+		expect(shortManifest.stderr).toContain("missing_manifest");
 	});
 
-	it("Test 2c: replacement planted under a verified quarantine name survives cleanup", async () => {
+	it("Test 4f CLI: every supplied manifest is validated, not just the last", async () => {
+		const root = await tempRoot("gjc-gc-dupmanifest-");
+		const malformed = path.join(root, "malformed.json");
+		const valid = path.join(root, "valid.json");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-66666666-6666-6666-6666-666666666666.json");
+		await fs.writeFile(malformed, "{");
+		await fs.writeFile(valid, JSON.stringify({ roots: [root] }));
+		await fs.writeFile(empty, "");
+		const result = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--manifest", malformed, "--manifest", valid],
+			root,
+			process.env,
+			[],
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("manifest_invalid");
+		// The malformed first manifest failed the preflight: the receipt is intact.
+		expect(await fs.readFile(empty, "utf8")).toBe("");
+	});
+
+	it("Test 4g CLI: root/manifest operands without --empty-delete-receipts are a usage error", async () => {
+		const root = await tempRoot("gjc-gc-orphan-");
+		const manifest = path.join(root, "manifest.json");
+		const empty = path.join(root, ".gjc-delete-session-state-lock-77777777-7777-7777-7777-777777777777.json");
+		await fs.writeFile(manifest, JSON.stringify({ roots: [root] }));
+		await fs.writeFile(empty, "");
+		const orphanRoot = await runGjcGcCommand(["--prune", "--root", root], root, process.env, []);
+		expect(orphanRoot.status).toBe(2);
+		expect(orphanRoot.stderr).toContain("empty_delete_operands_require_feature_flag");
+		const orphanManifest = await runGjcGcCommand(["--prune", "--manifest", manifest], root, process.env, []);
+		expect(orphanManifest.status).toBe(2);
+		expect(orphanManifest.stderr).toContain("empty_delete_operands_require_feature_flag");
+		// Neither run reached any prune: the receipt is intact.
+		expect(await fs.readFile(empty, "utf8")).toBe("");
+	});
+
+	it("Test 4h CLI: a null manifest is a structured shape error, not a crash", async () => {
+		const root = await tempRoot("gjc-gc-nullmanifest-");
+		const manifest = path.join(root, "manifest.json");
+		await fs.writeFile(manifest, "null");
+		const result = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--manifest", manifest],
+			root,
+			process.env,
+			[],
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("manifest_shape_invalid");
+	});
+
+	it("Test 2c: replacement swapped in inside the cleanup race window survives", async () => {
 		const dir = await tempRoot("gjc-quarantine-toctou-");
 		const reserved = ".gjc-delete-session-state-lock-55555555-5555-5555-5555-555555555555.json";
 		const target = path.join(dir, reserved);
 		await fs.writeFile(target, "");
-		// Observe the empty leftover, then swap in a replacement before cleanup runs.
-		const observed = await fs.lstat(target, { bigint: true });
-		await Bun.sleep(20);
-		await fs.unlink(target);
-		await fs.writeFile(target, "operator payload");
-		const stat = await fs.lstat(target, { bigint: true });
-		expect(stat.mtimeNs).not.toBe(observed.mtimeNs);
+		// Inject the replacement INSIDE the race window: the production lstat has
+		// already captured the empty identity when the bytes change underneath it.
+		// A lstat-then-plain-unlink implementation would delete the payload here; the
+		// identity-bound direct unlink must refuse and leave every byte in place.
+		setSessionStateLockNativeBindings(() => ({
+			...exactIdentityNativeBindings,
+			exactUnlinkDirect: (targetPath, identity) => {
+				fsSync.writeFileSync(targetPath, "operator payload");
+				return exactIdentityNativeBindings.exactUnlinkDirect(targetPath, identity);
+			},
+		}));
 		await removeVerifiedEmptyQuarantine(dir, reserved);
-		// The replacement is NOT the verified-empty object, so identity-bound cleanup
-		// must refuse it and leave every byte in place.
 		expect(await fs.readFile(target, "utf8")).toBe("operator payload");
+	});
+
+	it("Test 2d: a backslash traversal quarantine name is refused before any join", async () => {
+		const dir = await tempRoot("gjc-quarantine-backslash-");
+		// On POSIX the backslash is a literal filename character, so plant the literal
+		// file: a platform-independent single-component guard must refuse to touch it.
+		const literal = ".gjc-delete-..\\victim";
+		await fs.writeFile(path.join(dir, literal), "");
+		await removeVerifiedEmptyQuarantine(dir, literal);
+		expect(await fs.readFile(path.join(dir, literal), "utf8")).toBe("");
+	});
+
+	it("Test 2e: a stranded detached object fails closed with retained evidence", async () => {
+		const dir = await tempRoot("gjc-quarantine-retained-");
+		const reserved = ".gjc-delete-session-state-lock-88888888-8888-8888-8888-888888888888.json";
+		const target = path.join(dir, reserved);
+		await fs.writeFile(target, "");
+		const stranded = path.join(dir, ".gjc-delete-cleanup-stranded.json");
+		setSessionStateLockNativeBindings(() => ({
+			...exactIdentityNativeBindings,
+			exactUnlinkDirect: () => ({ ok: false, code: "identity_mismatch", detachedPath: stranded }),
+		}));
+		const failure = await removeVerifiedEmptyQuarantine(dir, reserved).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(SessionStateLockUnavailableError);
+		const cause = (failure as { cause?: Error }).cause;
+		expect(cause?.message).toContain("identity_mismatch");
+		expect(cause?.message).toContain(stranded);
+		// The verified-empty leftover is untouched for operator recovery.
+		expect(await fs.readFile(target, "utf8")).toBe("");
+	});
+
+	it("Test 2f: the exact-unlink stand-in refuses a quarantine collision", async () => {
+		const dir = await tempRoot("gjc-quarantine-collision-");
+		const target = path.join(dir, "victim");
+		const quarantine = ".gjc-delete-collision.json";
+		const detached = path.join(dir, quarantine);
+		await fs.writeFile(target, "");
+		await fs.writeFile(detached, "pre-existing quarantine occupant");
+		const stat = await fs.lstat(target, { bigint: true });
+		const result = exactIdentityNativeBindings.exactUnlinkDirect(target, {
+			dev: stat.dev,
+			ino: stat.ino,
+			nlink: stat.nlink,
+			size: stat.size,
+			mtimeNs: stat.mtimeNs,
+			sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			quarantineName: quarantine,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.code).toBe("quarantine_collision");
+		// No-replace semantics: BOTH objects survive untouched.
+		expect(await fs.readFile(target, "utf8")).toBe("");
+		expect(await fs.readFile(detached, "utf8")).toBe("pre-existing quarantine occupant");
 	});
 
 	it("Test 5: atomic write leaves no 0-byte canonical on crash-before-rename", async () => {

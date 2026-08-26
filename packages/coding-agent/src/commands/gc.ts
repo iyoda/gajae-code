@@ -42,7 +42,8 @@ export default class Gc extends Command {
 			multiple: true,
 		}),
 		manifest: Flags.string({
-			description: 'JSON {"roots":[...]} file for --empty-delete-receipts',
+			description: 'JSON {"roots":[...]} file for --empty-delete-receipts (repeatable)',
+			multiple: true,
 		}),
 	};
 

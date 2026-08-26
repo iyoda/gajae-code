@@ -73,10 +73,14 @@ function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): N
 		quarantine === "" ||
 		quarantine === "." ||
 		quarantine === ".." ||
-		quarantine.includes("/")
+		quarantine.includes("/") ||
+		quarantine.includes("\\")
 	)
 		return { ok: false, code: "invalid_request" };
 	const detached = path.join(path.dirname(target), quarantine);
+	// The native detaches with rename-no-replace: a pre-existing quarantine name is a
+	// collision verdict, never an overwrite of the object already sitting there.
+	if (fs.existsSync(detached)) return { ok: false, code: "quarantine_collision" };
 	try {
 		fs.renameSync(target, detached);
 	} catch (error) {
@@ -85,12 +89,21 @@ function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): N
 	const result = exactUnlink(detached, identity);
 	if (result.ok) return { ok: true };
 	if (result.code === "identity_mismatch") {
+		// Mirror the native no-replace exchange: when the original pathname is still
+		// vacant the detached object is restored and the verdict carries NO retained
+		// path; only a failed restore strands the object at the quarantine name.
+		let restored = false;
 		try {
-			if (!fs.existsSync(target)) fs.renameSync(detached, target);
+			if (!fs.existsSync(target)) {
+				fs.renameSync(detached, target);
+				restored = true;
+			}
 		} catch {
 			/* the mismatch verdict already stands */
 		}
-		return { ok: false, code: "identity_mismatch", detachedPath: detached };
+		return restored
+			? { ok: false, code: "identity_mismatch" }
+			: { ok: false, code: "identity_mismatch", detachedPath: detached };
 	}
 	return { ...result, detachedPath: detached };
 }

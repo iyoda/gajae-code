@@ -973,7 +973,17 @@ async function reclaimStaleOwnerRecord(
  * and deletion has a different inode identity and is refused by construction.
  */
 export async function removeVerifiedEmptyQuarantine(directory: string, name: string): Promise<void> {
-	if (!name.startsWith(".gjc-delete-") || name.includes("/") || name.includes("\0")) return;
+	// The name must be a single path component on every supported platform: both
+	// separator forms and drive/colon syntax are rejected before path.join, so a
+	// caller-controlled name can never escape the lock directory (Windows included).
+	if (
+		!name.startsWith(".gjc-delete-") ||
+		name.includes("/") ||
+		name.includes("\\") ||
+		name.includes(":") ||
+		name.includes("\0")
+	)
+		return;
 	const target = path.join(directory, name);
 	let stat: fsSync.BigIntStats;
 	try {
@@ -992,11 +1002,27 @@ export async function removeVerifiedEmptyQuarantine(directory: string, name: str
 		sha256: EMPTY_FILE_SHA256,
 		quarantineName: `.gjc-delete-cleanup-${randomUUID()}.json`,
 	});
-	// not_found is an ordinary concurrent-cleanup race; identity_mismatch means a
-	// replacement owns the pathname now and must be left alone. Any other failure
-	// leaves the (empty, verified) leftover in place for the next cycle rather than
-	// falling back to a pathname delete.
-	if (!result.ok && result.code !== "not_found" && result.code !== "identity_mismatch") return;
+	if (result.ok) return;
+	const retained = [
+		result.detachedPath,
+		result.retainedSuccessorPath,
+		result.retainedPlaceholderPath,
+		result.retainedUnknownPath,
+	].filter((value): value is string => typeof value === "string");
+	// not_found is an ordinary concurrent-cleanup race; identity_mismatch without a
+	// retained path means the native restored the verified object to its original
+	// name and a replacement owns the pathname now — both leave nothing hidden.
+	if (retained.length === 0 && (result.code === "not_found" || result.code === "identity_mismatch")) return;
+	// Anything else is fail-closed and observable: the stale reclaim must not proceed
+	// while recovery evidence (a stranded detached object, a retained successor, or an
+	// unrecovered placeholder) would otherwise vanish silently.
+	throw new SessionStateLockUnavailableError(
+		new Error(
+			`Verified empty quarantine cleanup did not complete (${result.code ?? "unknown"})` +
+				(retained.length > 0 ? `; retained: ${retained.join(", ")}` : "") +
+				".",
+		),
+	);
 }
 
 async function releaseTransitionClaim(

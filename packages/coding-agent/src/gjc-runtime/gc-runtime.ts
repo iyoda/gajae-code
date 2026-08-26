@@ -279,7 +279,7 @@ interface ParsedGcArgs {
 	help: boolean;
 	emptyDeleteReceipts: boolean;
 	emptyDeleteRoots: string[];
-	emptyDeleteManifest?: string;
+	emptyDeleteManifests: string[];
 }
 
 class GcUsageError extends Error {}
@@ -293,7 +293,7 @@ function parseGcArgs(argv: string[]): ParsedGcArgs {
 	let help = false;
 	let emptyDeleteReceipts = false;
 	const emptyDeleteRoots: string[] = [];
-	let emptyDeleteManifest: string | undefined;
+	const emptyDeleteManifests: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
 		switch (arg) {
@@ -323,15 +323,17 @@ function parseGcArgs(argv: string[]): ParsedGcArgs {
 				break;
 			case "--root": {
 				const value = argv[++i];
-				// A following option token is a missing operand, not a root path.
-				if (!value || value.startsWith("--")) throw new GcUsageError("missing_root");
+				// A following option token is a missing operand, not a root path. Any
+				// dash-prefixed value is rejected (short flags like -j included); spell a
+				// genuinely dash-prefixed path as ./-name so it is unambiguous.
+				if (!value || value.startsWith("-")) throw new GcUsageError("missing_root");
 				emptyDeleteRoots.push(value);
 				break;
 			}
 			case "--manifest": {
 				const value = argv[++i];
-				if (!value || value.startsWith("--")) throw new GcUsageError("missing_manifest");
-				emptyDeleteManifest = value;
+				if (!value || value.startsWith("-")) throw new GcUsageError("missing_manifest");
+				emptyDeleteManifests.push(value);
 				break;
 			}
 			default:
@@ -339,9 +341,11 @@ function parseGcArgs(argv: string[]): ParsedGcArgs {
 		}
 	}
 	if (repairSessionIndex && prune) throw new GcUsageError("repair_session_index_cannot_combine_with_prune");
+	if (!emptyDeleteReceipts && (emptyDeleteRoots.length > 0 || emptyDeleteManifests.length > 0))
+		throw new GcUsageError("empty_delete_operands_require_feature_flag");
 	if (repairSessionIndex && dryRun) throw new GcUsageError("repair_session_index_cannot_combine_with_dry_run");
 	if (dryRun) prune = false;
-	return { json, prune, repairSessionIndex, disk, help, emptyDeleteReceipts, emptyDeleteRoots, emptyDeleteManifest };
+	return { json, prune, repairSessionIndex, disk, help, emptyDeleteReceipts, emptyDeleteRoots, emptyDeleteManifests };
 }
 
 /**
@@ -509,19 +513,25 @@ export async function runGjcGcCommand(
 	let emptyDeleteRoots: string[] = [];
 	if (parsed.emptyDeleteReceipts) {
 		emptyDeleteRoots = [...parsed.emptyDeleteRoots];
-		if (parsed.emptyDeleteManifest) {
-			let parsedManifest: { roots?: unknown };
+		// Every supplied manifest is validated, not just the last: a malformed earlier
+		// manifest must fail the run before any store collection or prune can mutate.
+		for (const manifestPath of parsed.emptyDeleteManifests) {
+			let parsedManifest: unknown;
 			try {
-				const raw = await fsp.readFile(parsed.emptyDeleteManifest, "utf8");
-				parsedManifest = JSON.parse(raw) as { roots?: unknown };
+				const raw = await fsp.readFile(manifestPath, "utf8");
+				parsedManifest = JSON.parse(raw);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { stdout: "", stderr: `gjc gc: manifest_invalid: ${message}\n`, status: 2 };
 			}
-			if (!Array.isArray(parsedManifest.roots)) {
+			if (typeof parsedManifest !== "object" || parsedManifest === null || Array.isArray(parsedManifest)) {
+				return { stdout: "", stderr: "gjc gc: manifest_shape_invalid\n", status: 2 };
+			}
+			const manifestRoots = (parsedManifest as { roots?: unknown }).roots;
+			if (!Array.isArray(manifestRoots)) {
 				return { stdout: "", stderr: "gjc gc: manifest_roots_required\n", status: 2 };
 			}
-			for (const root of parsedManifest.roots) {
+			for (const root of manifestRoots) {
 				if (typeof root !== "string" || root.length === 0) {
 					return { stdout: "", stderr: "gjc gc: manifest_root_invalid\n", status: 2 };
 				}
@@ -577,7 +587,11 @@ export function gcHelpText(): string {
 		"  --disk            Also report on-disk retention (sessions, blobs, artifacts, natives, backups)",
 		"  --empty-delete-receipts  Report/prune empty .gjc-delete-* under --root / --manifest",
 		"  --root <dir>      Operand root for --empty-delete-receipts (repeatable)",
-		'  --manifest <file> JSON {"roots":[...]} for --empty-delete-receipts',
+		'  --manifest <file> JSON {"roots":[...]} for --empty-delete-receipts (repeatable)',
+		"",
+		"  Operand values starting with '-' are rejected as missing operands; spell a",
+		"  dash-prefixed path as ./-name. --root/--manifest without --empty-delete-receipts",
+		"  is a usage error, and every supplied manifest is validated before any prune.",
 		"",
 		"Liveness-only: a record is removed only when its owning process is dead",
 		"(ESRCH). Live / permission-denied / unknown processes are always kept.",
