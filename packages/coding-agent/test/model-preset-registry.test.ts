@@ -715,6 +715,19 @@ describe("signed model preset registry", () => {
 		await expect(accept(data, signedRegistry(data.privateKey, 1, [], [contradictory]))).rejects.toThrow(
 			/minLevel must not exceed maxLevel|defaultLevel must be within/i,
 		);
+		const outOfRange = {
+			...registryPreset("out-of-range-thinking"),
+			thinking: {
+				mode: "effort" as const,
+				minLevel: "low" as const,
+				maxLevel: "high" as const,
+				defaultLevel: "minimal" as const,
+				levels: ["minimal", "low", "high"] as const,
+			},
+		} as ModelPresetRegistryPresets["presets"][number];
+		await expect(accept(data, signedRegistry(data.privateKey, 1, [], [outOfRange]))).rejects.toThrow(
+			/Thinking levels must stay within/i,
+		);
 	});
 
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {

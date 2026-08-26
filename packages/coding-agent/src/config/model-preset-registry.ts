@@ -343,6 +343,13 @@ const ThinkingSchema = z
 		if (value.levels !== undefined && value.maxLevel !== undefined && !value.levels.includes(value.maxLevel)) {
 			context.addIssue({ code: "custom", message: "Thinking levels must include maxLevel." });
 		}
+		if (value.levels !== undefined && value.minLevel !== undefined && value.maxLevel !== undefined) {
+			for (const level of value.levels) {
+				if (rank(level) < rank(value.minLevel) || rank(level) > rank(value.maxLevel)) {
+					context.addIssue({ code: "custom", message: "Thinking levels must stay within minLevel and maxLevel." });
+				}
+			}
+		}
 		if (
 			value.defaultLevel !== undefined &&
 			(value.levels !== undefined
