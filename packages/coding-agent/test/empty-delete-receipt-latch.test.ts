@@ -382,12 +382,15 @@ describe("empty .gjc-delete-* latch", () => {
 
 	it("Test 2d: a backslash traversal quarantine name is refused before any join", async () => {
 		const dir = await tempRoot("gjc-quarantine-backslash-");
-		// On POSIX the backslash is a literal filename character, so plant the literal
-		// file: a platform-independent single-component guard must refuse to touch it.
-		const literal = ".gjc-delete-..\\victim";
-		await fs.writeFile(path.join(dir, literal), "");
-		await removeVerifiedEmptyQuarantine(dir, literal);
-		expect(await fs.readFile(path.join(dir, literal), "utf8")).toBe("");
+		// The victim is planted at the RESOLVED location so the fixture runs on both
+		// platforms: on Windows the child\..\ form traverses to dir/victim; on POSIX
+		// it is a literal backslash filename inside dir. Either way the guard must
+		// refuse the name before path.join, and the planted bytes must survive.
+		const name = ".gjc-delete-child\\..\\victim";
+		const planted = process.platform === "win32" ? path.join(dir, "victim") : path.join(dir, name);
+		await fs.writeFile(planted, "victim bytes");
+		await removeVerifiedEmptyQuarantine(dir, name);
+		expect(await fs.readFile(planted, "utf8")).toBe("victim bytes");
 	});
 
 	it("Test 2e: a stranded detached object fails closed with retained evidence", async () => {
@@ -434,6 +437,32 @@ describe("empty .gjc-delete-* latch", () => {
 		// No-replace semantics: BOTH objects survive untouched.
 		expect(await fs.readFile(target, "utf8")).toBe("");
 		expect(await fs.readFile(detached, "utf8")).toBe("pre-existing quarantine occupant");
+	});
+
+	it("Test 2g: a dangling symlink at the quarantine name is still a collision", async () => {
+		const dir = await tempRoot("gjc-quarantine-dangling-");
+		const target = path.join(dir, "victim");
+		const quarantine = ".gjc-delete-dangling.json";
+		const detached = path.join(dir, quarantine);
+		await fs.writeFile(target, "");
+		// existsSync follows links and reports a DANGLING symlink as absent; the
+		// no-replace link exchange must still refuse to overwrite it.
+		await fs.symlink(path.join(dir, "nonexistent-target"), detached);
+		const stat = await fs.lstat(target, { bigint: true });
+		const result = exactIdentityNativeBindings.exactUnlinkDirect(target, {
+			dev: stat.dev,
+			ino: stat.ino,
+			nlink: stat.nlink,
+			size: stat.size,
+			mtimeNs: stat.mtimeNs,
+			sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			quarantineName: quarantine,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.code).toBe("quarantine_collision");
+		// Both the victim and the dangling symlink survive untouched.
+		expect(await fs.readFile(target, "utf8")).toBe("");
+		expect((await fs.lstat(detached)).isSymbolicLink()).toBe(true);
 	});
 
 	it("Test 5: atomic write leaves no 0-byte canonical on crash-before-rename", async () => {

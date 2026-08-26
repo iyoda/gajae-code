@@ -65,7 +65,24 @@ function exactUnlink(target: string, identity: NativeExactFileIdentity): NativeE
  * is never consumed; a mismatch at the quarantine name restores the detached object
  * whenever the original pathname is still vacant, mirroring the native no-replace
  * exchange semantics.
+ *
+ * Node has no rename-no-replace, so both namespace moves are hard-link exchanges:
+ * `linkSync` fails with EEXIST when the destination holds ANY object — including a
+ * dangling symlink that `existsSync` would miss — which is exactly the native
+ * no-replace verdict. Both names are always in the same directory and the targets
+ * are validated regular files, so the exchange never crosses devices or types.
  */
+function linkNoReplace(from: string, to: string): "ok" | "collision" | "not_found" | "io_error" {
+	try {
+		fs.linkSync(from, to);
+		return "ok";
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "EEXIST" || code === "EPERM") return "collision";
+		return isEnoent(error) ? "not_found" : "io_error";
+	}
+}
+
 function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): NativeExactUnlinkResult {
 	const quarantine = identity.quarantineName;
 	if (
@@ -78,32 +95,33 @@ function exactUnlinkDirect(target: string, identity: NativeExactFileIdentity): N
 	)
 		return { ok: false, code: "invalid_request" };
 	const detached = path.join(path.dirname(target), quarantine);
-	// The native detaches with rename-no-replace: a pre-existing quarantine name is a
-	// collision verdict, never an overwrite of the object already sitting there.
-	if (fs.existsSync(detached)) return { ok: false, code: "quarantine_collision" };
+	// The native detaches with rename-no-replace: a pre-existing quarantine name —
+	// even a dangling symlink — is a collision verdict, never an overwrite.
+	const detach = linkNoReplace(target, detached);
+	if (detach === "collision") return { ok: false, code: "quarantine_collision" };
+	if (detach !== "ok") return { ok: false, code: detach };
 	try {
-		fs.renameSync(target, detached);
+		fs.unlinkSync(target);
 	} catch (error) {
 		return isEnoent(error) ? { ok: false, code: "not_found" } : { ok: false, code: "io_error" };
 	}
 	const result = exactUnlink(detached, identity);
 	if (result.ok) return { ok: true };
 	if (result.code === "identity_mismatch") {
-		// Mirror the native no-replace exchange: when the original pathname is still
-		// vacant the detached object is restored and the verdict carries NO retained
-		// path; only a failed restore strands the object at the quarantine name.
-		let restored = false;
-		try {
-			if (!fs.existsSync(target)) {
-				fs.renameSync(detached, target);
-				restored = true;
+		// Mirror the native no-replace exchange: a successor at the original pathname
+		// (again including a dangling symlink) is never replaced; only a genuinely
+		// vacant name takes the detached object back, and the verdict carries NO
+		// retained path exactly when that restore committed.
+		const restore = linkNoReplace(detached, target);
+		if (restore === "ok") {
+			try {
+				fs.unlinkSync(detached);
+			} catch {
+				/* the restore verdict already stands */
 			}
-		} catch {
-			/* the mismatch verdict already stands */
+			return { ok: false, code: "identity_mismatch" };
 		}
-		return restored
-			? { ok: false, code: "identity_mismatch" }
-			: { ok: false, code: "identity_mismatch", detachedPath: detached };
+		return { ok: false, code: "identity_mismatch", detachedPath: detached };
 	}
 	return { ...result, detachedPath: detached };
 }

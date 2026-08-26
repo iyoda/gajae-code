@@ -20,6 +20,11 @@ function resolveDiskPolicyFromSettings(): Partial<GcDiskPolicy> | undefined {
 export default class Gc extends Command {
 	static description = "Garbage-collect stale GJC session/PID records (dry-run by default)";
 	static strict = false;
+	// The hand parser in gc-runtime owns the real syntax (repeatable space-form
+	// operands, dash-prefix rejection, orphan-operand rules); delegate help so the
+	// public output is the authoritative gcHelpText() instead of generic flag
+	// metadata that would advertise unsupported `--flag=<value>` forms.
+	static delegateHelp = true;
 	static flags = {
 		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON", default: false }),
 		prune: Flags.boolean({ description: "Remove stale records (default: report only)", default: false }),
