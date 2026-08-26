@@ -1529,9 +1529,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			let retainedAcpSnapshot = "";
 			const appendAcpSnapshot = (snapshot: string): void => {
 				if (!bridgeJobId || !snapshot) return;
-				const delta = snapshot.startsWith(retainedAcpSnapshot)
-					? snapshot.slice(retainedAcpSnapshot.length)
-					: snapshot;
+				const limit = Math.min(retainedAcpSnapshot.length, snapshot.length);
+				let overlap = 0;
+				for (let size = limit; size > 0; size -= 1) {
+					if (retainedAcpSnapshot.endsWith(snapshot.slice(0, size))) {
+						overlap = size;
+						break;
+					}
+				}
+				const delta = snapshot.slice(overlap);
 				if (delta) ownedManager?.appendOutput(bridgeJobId, delta);
 				retainedAcpSnapshot = snapshot;
 			};
@@ -1681,7 +1687,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								? `${summary.output}${summary.output.endsWith("\n") ? "" : "\n"}(output truncated)`
 								: summary.output;
 						latestText = pollText;
-						appendAcpSnapshot(pollText);
+						appendAcpSnapshot(pollOutput.output);
 						onUpdate?.({
 							content: [{ type: "text", text: pollText }],
 							details: { terminalId: handle.terminalId },
