@@ -138,6 +138,7 @@ export class MCPAddWizard extends Container {
 	#healthCheckSpinner?: NodeJS.Timeout;
 	#healthCheckTimeout?: NodeJS.Timeout;
 	#asyncGeneration = 0;
+	readonly #agentDir?: string;
 
 	constructor(
 		onComplete: (name: string, config: MCPServerConfig, scope: Scope) => void,
@@ -153,6 +154,7 @@ export class MCPAddWizard extends Container {
 		onTestConnection?: (config: MCPServerConfig) => Promise<void>,
 		onRender?: () => void,
 		initialName?: string,
+		agentDir?: string,
 	) {
 		super();
 		this.#onCompleteCallback = onComplete;
@@ -160,6 +162,7 @@ export class MCPAddWizard extends Container {
 		this.#onOAuthCallback = onOAuth ?? null;
 		this.#onTestConnectionCallback = onTestConnection ?? null;
 		this.#onRenderCallback = onRender ?? null;
+		this.#agentDir = agentDir;
 		if (initialName && initialName.trim().length > 0) {
 			this.#state.name = initialName.trim();
 			this.#currentStep = "transport";
@@ -436,7 +439,7 @@ export class MCPAddWizard extends Container {
 
 		const cwd = getProjectDir();
 
-		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd));
+		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd, this.#agentDir));
 		const projectPathLabel = shortenPath(getMCPConfigPath("project", cwd));
 		const options = [
 			{ value: "user" as const, label: `User level (${userPathLabel})` },
