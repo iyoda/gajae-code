@@ -18,7 +18,7 @@ import { processIncarnation } from "../../src/sdk/broker/process-incarnation";
 import { runSdkSessionCli } from "../../src/sdk/cli/session-cli";
 import { SdkClient } from "../../src/sdk/client";
 import { createSdkMcpServer } from "../../src/sdk/mcp";
-import { type Adapter, OPERATIONS, type Operation } from "../../src/sdk/protocol/operation-registry";
+import { ADAPTERS, type Adapter, OPERATIONS, type Operation } from "../../src/sdk/protocol/operation-registry";
 import type { SessionAttachment } from "../../src/sdk/router";
 import { startProductionSdkHost } from "../helpers/sdk-production-host";
 
@@ -44,7 +44,10 @@ const parityRowsCache: ParityRow[] = (
 		rows: ParityRow[];
 	}
 ).rows;
-expect(parityRowsCache).toHaveLength(588);
+// Derived from the registry (one row per operation per adapter, plus the C36
+// secret-input receipt per adapter) so registry growth cannot silently strand a
+// stale hand-maintained count here the way it did in issue #4992.
+expect(parityRowsCache).toHaveLength(ADAPTERS.length * (OPERATIONS.length + 1));
 
 export const parityPrefix: Record<Adapter, string> = {
 	telegram: "T",

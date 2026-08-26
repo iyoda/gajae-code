@@ -410,7 +410,7 @@ describe("ModelRegistry", () => {
 			writeRawModelsJson({
 				openai: {
 					modelOverrides: {
-						"gpt-4o": { contextWindow: -5 },
+						"gpt-4o": { contextWindow: -5, maxTokens: -5 },
 						"gpt-4.1": { contextWindow: Number.NaN },
 					},
 				},
@@ -2809,6 +2809,23 @@ describe("ModelRegistry", () => {
 			expect(sonnetModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
+		test("same-ID custom maxTokens remains authoritative after replacement", () => {
+			writeRawModelsJson({
+				openrouter: {
+					baseUrl: "https://my-proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					models: [{ id: "anthropic/claude-sonnet-4", maxTokens: 65_536 }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("openrouter", "anthropic/claude-sonnet-4");
+
+			expect(model?.maxTokens).toBe(65_536);
+			expect(model?.maxTokensSource).toBe("configured");
+		});
+
 		test("custom same-id replacement does not keep bundled headers", () => {
 			writeRawModelsJson({
 				"github-copilot": {
@@ -3368,6 +3385,7 @@ describe("ModelRegistry", () => {
 			expect(model?.name).toBe("DeepSeek V4 Flash via ClinePass");
 			expect(model?.contextWindow).toBe(1_000_000);
 			expect(model?.maxTokens).toBe(384_000);
+			expect(model?.maxTokensSource).toBeUndefined();
 			expect(model?.reasoning).toBe(true);
 			expect(model?.baseUrl).toBe("https://api.cline.bot/api/v1");
 		});
@@ -3394,6 +3412,7 @@ describe("ModelRegistry", () => {
 			expect(model?.id).toBe("cline-pass/totally-unknown-model-xyz");
 			expect(model?.contextWindow).toBe(128_000);
 			expect(model?.maxTokens).toBe(16_384);
+			expect(model?.maxTokensSource).toBeUndefined();
 		});
 
 		test("#3856: explicit contextWindow on namespaced custom model is preserved", () => {
@@ -3419,6 +3438,7 @@ describe("ModelRegistry", () => {
 			const model = registry.find("clinepass", "cline-pass/deepseek-v4-flash");
 			expect(model?.contextWindow).toBe(512_000);
 			expect(model?.maxTokens).toBe(32_000);
+			expect(model?.maxTokensSource).toBe("configured");
 		});
 
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
@@ -4210,7 +4230,7 @@ describe("ModelRegistry", () => {
 
 			using _hook = hookFetch(input => {
 				expect(String(input)).toBe("https://proxy.example.com/v1/models");
-				return new Response(JSON.stringify({ data: [{ id: "gpt-5.4" }] }), {
+				return new Response(JSON.stringify({ data: [{ id: "gpt-5.4", max_output_tokens: 66_000 }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
@@ -4222,6 +4242,8 @@ describe("ModelRegistry", () => {
 
 			expect(getOpenAICompat(model)?.supportsReasoningEffort).toBe(true);
 			expect(model?.thinking).toBeDefined();
+			expect(model?.maxTokens).toBe(66_000);
+			expect(model?.maxTokensSource).toBe("discovered");
 			expect(model ? getSupportedEfforts(model) : []).toContain(Effort.High);
 		});
 

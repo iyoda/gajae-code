@@ -141,7 +141,7 @@ describe("SDK operation matrix", () => {
 		const registryById = new Map(OPERATIONS.map(operation => [operation.id, operation]));
 		const inventoryIds = registryInventory.map(row => row.sourceId.replace("registry:", ""));
 		expect(new Set(inventoryIds)).toEqual(new Set(registryById.keys()));
-		expect(registryInventory).toHaveLength(97);
+		expect(registryInventory).toHaveLength(OPERATIONS.length);
 
 		for (const row of registryInventory) {
 			const id = row.sourceId.startsWith("registry:") ? row.sourceId.slice("registry:".length) : row.sourceId;

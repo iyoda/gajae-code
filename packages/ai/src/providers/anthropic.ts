@@ -3320,7 +3320,22 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, model:
 	const maxTokens = params.max_tokens ?? 0;
 	const requiredMaxTokens = budgetTokens + OUTPUT_FALLBACK_BUFFER;
 	if (maxTokens < requiredMaxTokens) {
-		params.max_tokens = Math.min(requiredMaxTokens, model.maxTokens);
+		const modelMaxTokens =
+			Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0
+				? model.maxTokens
+				: Math.max(maxTokens, requiredMaxTokens);
+		params.max_tokens = Math.min(requiredMaxTokens, modelMaxTokens);
+	}
+	// Anthropic requires budget_tokens strictly below max_tokens; when the cap
+	// cannot fit the requested budget plus the output buffer, shrink the budget
+	// (or disable thinking) instead of sending an invalid pair.
+	const cappedBudget = params.max_tokens - OUTPUT_FALLBACK_BUFFER;
+	if (cappedBudget < budgetTokens) {
+		if (cappedBudget <= 0) {
+			params.thinking = { type: "disabled" };
+		} else {
+			params.thinking = { type: "enabled", budget_tokens: cappedBudget };
+		}
 	}
 }
 
