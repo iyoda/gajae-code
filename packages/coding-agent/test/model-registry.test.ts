@@ -4504,6 +4504,43 @@ describe("ModelRegistry", () => {
 			expect(bRequests).toBe(1);
 		});
 
+		test("does not cache stale configured discovery during overlapping online-if-uncached refreshes", async () => {
+			writeRawModelsJson({
+				"race-cache": {
+					baseUrl: "https://race-cache.example.com/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "openai-models-list" },
+				},
+			});
+			const firstResponse = Promise.withResolvers<Response>();
+			const firstRequest = Promise.withResolvers<void>();
+			let requests = 0;
+			using _hook = hookFetch(input => {
+				expect(String(input)).toBe("https://race-cache.example.com/v1/models");
+				requests += 1;
+				if (requests === 1) {
+					firstRequest.resolve();
+					return firstResponse.promise;
+				}
+				return new Response(JSON.stringify({ data: [{ id: "new-configured-model" }] }), { status: 200 });
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const firstRefresh = registry.refreshProvider("race-cache", "online-if-uncached");
+			await firstRequest.promise;
+			const secondRefresh = registry.refreshProvider("race-cache", "online-if-uncached");
+			firstResponse.resolve(
+				new Response(JSON.stringify({ data: [{ id: "stale-configured-model" }] }), { status: 200 }),
+			);
+			await firstRefresh;
+			await secondRefresh;
+
+			expect(requests).toBe(2);
+			expect(registry.find("race-cache", "new-configured-model")).toBeDefined();
+			expect(registry.find("race-cache", "stale-configured-model")).toBeUndefined();
+		});
+
 		test("discovery failure does not fail model registry refresh", async () => {
 			writeRawModelsJson({
 				ollama: {
@@ -8289,6 +8326,35 @@ describe("ModelRegistry", () => {
 			await refresh;
 
 			expect(activeRowsFor(registry, ["vllm"])).toEqual([]);
+		});
+		test("does not cache stale descriptor discovery during overlapping online-if-uncached refreshes", async () => {
+			authStorage.setRuntimeApiKey("vllm", "fresh-vllm-key");
+			const firstResponse = Promise.withResolvers<Response>();
+			const firstRequest = Promise.withResolvers<void>();
+			let requests = 0;
+			using _hook = hookFetch(input => {
+				expect(String(input)).toBe("http://127.0.0.1:8000/v1/models");
+				requests += 1;
+				if (requests === 1) {
+					firstRequest.resolve();
+					return firstResponse.promise;
+				}
+				return new Response(JSON.stringify({ data: [{ id: "new-descriptor-model" }] }), { status: 200 });
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const firstRefresh = registry.refreshProvider("vllm", "online-if-uncached");
+			await firstRequest.promise;
+			const secondRefresh = registry.refreshProvider("vllm", "online-if-uncached");
+			firstResponse.resolve(
+				new Response(JSON.stringify({ data: [{ id: "stale-descriptor-model" }] }), { status: 200 }),
+			);
+			await firstRefresh;
+			await secondRefresh;
+
+			expect(requests).toBe(2);
+			expect(registry.find("vllm", "new-descriptor-model")).toBeDefined();
+			expect(registry.find("vllm", "stale-descriptor-model")).toBeUndefined();
 		});
 		test("serializes descriptor discovery publication before a newer failed probe", async () => {
 			authStorage.setRuntimeApiKey("vllm", "fresh-vllm-key");

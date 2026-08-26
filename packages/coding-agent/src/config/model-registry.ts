@@ -2587,11 +2587,13 @@ export class ModelRegistry {
 			selectedDiscoverableProviders.length === 0
 				? Promise.resolve([] as ConfiguredDiscoveryResult[])
 				: Promise.all(
-						selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
+						selectedDiscoverableProviders.map(provider =>
+							this.#discoverProviderModels(provider, strategy, providerRefresh),
+						),
 					);
 		const [configuredDiscoveryResults, builtInDiscovered] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, providerFilter, providerRefresh),
 		]);
 		if (
 			refreshGeneration !== this.#catalogRefreshGeneration ||
@@ -2766,6 +2768,7 @@ export class ModelRegistry {
 	async #discoverProviderModels(
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
+		providerRefresh?: { providerId: string; generation: number },
 	): Promise<ConfiguredDiscoveryResult> {
 		const provider = providerConfig.provider;
 		const preflightEpoch = this.#optionalAuthPreflightEpoch;
@@ -2870,6 +2873,11 @@ export class ModelRegistry {
 		const isCurrentEndpoint = () =>
 			endpoint ===
 			this.#normalizeDiscoveryEvidenceEndpoint(this.#effectiveDiscoveryProviderConfig(providerConfig).baseUrl ?? "");
+		const isCurrentProviderRefresh = () =>
+			strategy !== "online-if-uncached" ||
+			providerRefresh === undefined ||
+			(providerRefresh.providerId === provider &&
+				this.#providerRefreshGenerations.get(provider) === providerRefresh.generation);
 		const evidence = this.#configuredDiscoveryEvidence.get(provider);
 		const cacheDynamicModelProvenance = fingerprintConfiguredDiscoveryRequestShape(
 			effectiveProviderConfig,
@@ -2918,7 +2926,7 @@ export class ModelRegistry {
 				),
 			getEvidenceGeneration: provider => this.#getProviderEvidenceGeneration(provider.provider, preflightApiKey),
 			cacheDynamicModelProvenance: cacheLookupProvenance,
-			canPublishCache: isCurrentEndpoint,
+			canPublishCache: () => isCurrentEndpoint() && isCurrentProviderRefresh(),
 		});
 		const authGeneration =
 			mergeInput.authGeneration ??
@@ -3004,6 +3012,7 @@ export class ModelRegistry {
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
+		providerRefresh?: { providerId: string; generation: number },
 	): Promise<Model<Api>[]> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoveryManager.providers.map(p => p.provider));
@@ -3021,7 +3030,7 @@ export class ModelRegistry {
 			return [];
 		}
 		const discoveries = await Promise.all(
-			managerOptions.map(entry => this.#discoverWithModelManager(entry, strategy)),
+			managerOptions.map(entry => this.#discoverWithModelManager(entry, strategy, providerRefresh)),
 		);
 		return discoveries.flat();
 	}
@@ -3149,6 +3158,7 @@ export class ModelRegistry {
 	async #discoverWithModelManager(
 		{ options, authGeneration, apiKey, endpoint, endpointContainsUserinfo }: ModelManagerDiscoveryOptions,
 		strategy: ModelRefreshStrategy,
+		providerRefresh?: { providerId: string; generation: number },
 	): Promise<Model<Api>[]> {
 		const generation = (this.#descriptorDiscoveryGenerations.get(options.providerId) ?? 0) + 1;
 		this.#descriptorDiscoveryGenerations.set(options.providerId, generation);
@@ -3169,18 +3179,25 @@ export class ModelRegistry {
 		// stale fallback, and online-if-uncached reuse all fail closed.
 		const cacheDynamicModelProvenance =
 			reusableCacheProvenance ?? `gajae:non-cacheable-endpoint:${crypto.randomUUID()}`;
-		const isCurrentDiscovery = () =>
+		const isCurrentDiscoveryContext = () =>
 			(this.#descriptorDiscoveryGenerations.get(options.providerId) ?? 0) === generation &&
 			this.#getProviderEvidenceGeneration(options.providerId, apiKey) === authGeneration &&
 			(endpoint ===
 				this.#normalizeDiscoveryEvidenceEndpoint(this.#getProviderBaseUrlForDiscovery(options.providerId) ?? "") ||
 				(canUseCredentialDerivedXiaomiEndpoint && credentialDerivedEndpoint !== undefined));
+		const isCurrentDiscovery = () =>
+			isCurrentDiscoveryContext() &&
+			(providerRefresh === undefined ||
+				(providerRefresh.providerId === options.providerId &&
+					this.#providerRefreshGenerations.get(options.providerId) === providerRefresh.generation));
+		const canPublishCache = () =>
+			isCurrentDiscoveryContext() && (strategy !== "online-if-uncached" || isCurrentDiscovery());
 		try {
 			const manager = createModelManager({
 				...options,
 				cacheDbPath: this.#cacheDbPath,
 				cacheDynamicModelProvenance,
-				canPublishCache: isCurrentDiscovery,
+				canPublishCache,
 				...(options.fetchDynamicModels
 					? {
 							fetchDynamicModels: async () => {
