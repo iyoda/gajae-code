@@ -1563,10 +1563,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// instead of waiting for the next `currentOutput()` to return.
 				const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
 				const deadlineAt = Date.now() + timeoutMs;
-				const readOutput = (limitMs: number): Promise<ClientBridgeTerminalOutput | undefined> =>
+				const readOutput = (
+					limitMs: number,
+					includeAbort = true,
+				): Promise<ClientBridgeTerminalOutput | undefined> =>
 					Promise.race([
 						handle.currentOutput(),
-						abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined),
+						...(includeAbort ? [abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined)] : []),
 						Bun.sleep(Math.max(1, limitMs)).then(() => undefined as ClientBridgeTerminalOutput | undefined),
 					]);
 				let killPromise: Promise<void> | undefined;
@@ -1589,7 +1592,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						let current: ClientBridgeTerminalOutput = { output: "", truncated: false };
 						let readDiagnostic: string | undefined;
 						try {
-							current = (await readOutput(1_000)) ?? current;
+							current = (await readOutput(1_000, false)) ?? current;
 						} catch (error) {
 							readDiagnostic = boundArtifactSaveDiagnostic(error);
 							logger.warn("ACP terminal aborted output read failed", {
@@ -1620,7 +1623,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							let current: ClientBridgeTerminalOutput = { output: "", truncated: false };
 							let readDiagnostic: string | undefined;
 							try {
-								current = (await readOutput(1_000)) ?? current;
+								current = (await readOutput(1_000, false)) ?? current;
 							} catch (error) {
 								readDiagnostic = boundArtifactSaveDiagnostic(error);
 								logger.warn("ACP terminal aborted output read failed", {
@@ -1644,7 +1647,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							let current: ClientBridgeTerminalOutput = { output: "", truncated: false };
 							let readDiagnostic: string | undefined;
 							try {
-								current = (await readOutput(1_000)) ?? current;
+								current = (await readOutput(1_000, false)) ?? current;
 							} catch (error) {
 								readDiagnostic = boundArtifactSaveDiagnostic(error);
 								logger.warn("ACP terminal final output read failed", {
@@ -1712,7 +1715,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					let current: ClientBridgeTerminalOutput = { output: "", truncated: false };
 					let readDiagnostic: string | undefined;
 					try {
-						current = (await readOutput(1_000)) ?? current;
+						current = (await readOutput(1_000, false)) ?? current;
 					} catch (error) {
 						readDiagnostic = boundArtifactSaveDiagnostic(error);
 						logger.warn("ACP terminal aborted output read failed", {
@@ -1799,7 +1802,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						} catch (error) {
 							const message = error instanceof Error ? error.message : String(error);
 							latestText = message;
-							bridgeManager.appendOutput(jobId, message);
 							if (!bridgeBackgrounded) settleBridgeForeground();
 							bridgeCompletion.resolve({ kind: "failed", error });
 							await reportProgress(
