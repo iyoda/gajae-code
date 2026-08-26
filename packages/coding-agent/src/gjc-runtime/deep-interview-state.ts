@@ -197,7 +197,7 @@ const HOISTED_STATE_FIELDS = [
  * removes, permanently corrupting the shape. They are stripped from `state` on
  * normalize so the canonical envelope self-heals on the next write.
  */
-const ENVELOPE_RESERVED_STATE_KEYS = [
+export const ENVELOPE_RESERVED_STATE_KEYS = [
 	"state",
 	"receipt",
 	"skill",
@@ -206,6 +206,8 @@ const ENVELOPE_RESERVED_STATE_KEYS = [
 	"active",
 	"current_phase",
 	"state_revision",
+	"source_state_revision",
+	"last_applied_draft_id",
 	"session_id",
 ] as const;
 

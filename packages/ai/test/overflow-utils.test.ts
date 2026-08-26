@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@gajae-code/ai";
+import { transportFailureFacts } from "@gajae-code/ai/utils/fallback-transport";
 import { classifyContextOverflow, isContextOverflow } from "@gajae-code/ai/utils/overflow";
 
 function createErrorMessage(errorMessage: string): AssistantMessage {
@@ -196,5 +197,173 @@ describe("classifyContextOverflow - authoritative transport facts", () => {
 		const message = createErrorMessage("context_length_exceeded: context window exceeded");
 		message.errorStatus = 418;
 		expect(classifyContextOverflow(message, { kind: "transport", status: 418 })).toBe(true);
+	});
+});
+
+describe("classifyContextOverflow - generic invalid_request_error envelope", () => {
+	it("classifies Anthropic prompt-too-long wrapped in invalid_request_error as overflow", () => {
+		const message = createErrorMessage(
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1158066 tokens > 1000000 maximum"}}',
+		);
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+				providerCode: "invalid_request_error",
+			}),
+		).toBe(true);
+	});
+
+	it("keeps a genuine invalid_request_error without overflow prose non-overflow", () => {
+		const message = createErrorMessage(
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.5.content.1: Invalid `signature` in `thinking` block"}}',
+		);
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+				providerCode: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("keeps a specific non-overflow cause authoritative over overflow prose", () => {
+		const message = createErrorMessage("rate limited; prompt is too long");
+		message.errorStatus = 429;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "rate_limit_error",
+			}),
+		).toBe(false);
+	});
+	it("does not let loose overflow prose override the envelope", () => {
+		// `too many tokens` is in OVERFLOW_PATTERNS but carries no measurement,
+		// so a tool result or model-authored string cannot flip classification.
+		const message = createErrorMessage("Tool failed: too many tokens in the uploaded document");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("rejects a measurement that does not verify against itself", () => {
+		// Injected text mimicking the measured form, but the numbers assert no overage.
+		const message = createErrorMessage("prompt is too long: 10 tokens > 1000000 maximum");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+	it("accepts a measurement with numbers beyond safe-integer range", () => {
+		// Float coercion keeps the comparison true; precision loss cannot flip an overage into equality.
+		const message = createErrorMessage("prompt is too long: 99999999999999999999 tokens > 1000000 maximum");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(true);
+	});
+
+	it.each([
+		{ label: "equal used and maximum", text: "prompt is too long: 1000 tokens > 1000 maximum" },
+		{ label: "zero maximum", text: "prompt is too long: 5 tokens > 0 maximum" },
+	])("rejects a measurement that does not state an overage: $label", ({ text }) => {
+		const message = createErrorMessage(text);
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("accepts a measurement with irregular token-count spacing", () => {
+		const message = createErrorMessage("prompt is too long: 12   tokens  >  10  maximum");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(true);
+	});
+
+	it("extracts a nested measured overflow from quoted or fenced error text", () => {
+		const message = createErrorMessage("upstream said:\n```\nprompt is too long: 99 tokens > 98 maximum\n```");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(true);
+	});
+
+	it("keeps a typed quota code authoritative over the measured overflow form", () => {
+		const message = createErrorMessage("prompt is too long: 9 tokens > 8 maximum");
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+				providerCode: "quota_exceeded",
+			}),
+		).toBe(false);
+	});
+
+	it("does not let a non-error stopReason satisfy the measured overflow form", () => {
+		const message = createErrorMessage("prompt is too long: 9 tokens > 8 maximum");
+		message.stopReason = "stop";
+		message.errorStatus = 400;
+		expect(
+			classifyContextOverflow(message, {
+				kind: "transport",
+				status: 400,
+				anthropicErrorType: "invalid_request_error",
+			}),
+		).toBe(false);
+	});
+
+	it("keeps silent usage accounting overflow detection intact", () => {
+		const message = createErrorMessage("");
+		message.stopReason = "stop";
+		message.usage.input = 1158066;
+		expect(classifyContextOverflow(message, undefined, 1000000)).toBe(true);
+	});
+	it("transport-provenance end-to-end: real transportFailureFacts from an Anthropic-shaped error object", () => {
+		// The provider path builds errors as { status, error: { type, message } };
+		// facts extraction must surface anthropicErrorType for the classifier.
+		const facts = transportFailureFacts({
+			status: 400,
+			error: { type: "invalid_request_error", message: "prompt is too long: 1158066 tokens > 1000000 maximum" },
+		});
+		expect(facts?.anthropicErrorType).toBe("invalid_request_error");
+		const message = createErrorMessage(
+			'{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1158066 tokens > 1000000 maximum"}}',
+		);
+		message.errorStatus = 400;
+		expect(classifyContextOverflow(message, facts)).toBe(true);
 	});
 });

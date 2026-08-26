@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { runNativeDeepInterviewCommand } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-runtime";
 import { deepInterviewDraftPath } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-stage";
+import { ENVELOPE_RESERVED_STATE_KEYS } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-state";
 import { modeStatePath } from "@gajae-code/coding-agent/gjc-runtime/session-layout";
 
 const TEST_SESSION_ID = "stage-test-session";
@@ -790,6 +791,55 @@ describe("deep-interview staged transitions", () => {
 		expect(state.intent_contract).toBeUndefined();
 		expect(state.intent_review).toBeUndefined();
 		expect(state.note).toBe("payload with fabricated contract");
+	});
+
+	it("reports nested envelope-reserved keys instead of dropping them silently", async () => {
+		for (const key of ENVELOPE_RESERVED_STATE_KEYS) {
+			const root = await tempDir();
+			await seed(root);
+			const before = await readState(root);
+			const staged = parse(
+				(
+					await run(root, [
+						"write",
+						"--input",
+						JSON.stringify({ state: { [key]: "discarded", note: "survives" } }),
+						"--json",
+					])
+				).stdout,
+			);
+			expect(staged.ok).toBe(true);
+			// The discard must be named: an unqualified success would misreport the write.
+			expect(staged.ignored_runtime_owned_keys).toEqual(expect.arrayContaining([`state.${key}`]));
+			const after = await readState(root);
+			// Envelope lifecycle is unchanged, and unreserved payload keys still land.
+			expect(after.current_phase).toBe(before.current_phase);
+			expect(after.active).toBe(true);
+			expect((after.state as Record<string, unknown>)[key]).toBeUndefined();
+			expect((after.state as Record<string, unknown>).note).toBe("survives");
+		}
+	});
+
+	it("still rejects an oversized nested reserved value instead of reporting it away", async () => {
+		for (const key of ENVELOPE_RESERVED_STATE_KEYS) {
+			const root = await tempDir();
+			await seed(root);
+			const before = await readState(root);
+			// Naming a discarded key must not strip it before the structured-size check:
+			// an oversized value has to keep failing rather than turn into a quiet ignore.
+			const result = await run(root, [
+				"write",
+				"--input",
+				JSON.stringify({ state: { [key]: "x".repeat(200_000) } }),
+				"--json",
+			]);
+			expect(result.status).not.toBe(0);
+			const failure = parse(result.stderr && result.stderr.trim() !== "" ? result.stderr : (result.stdout ?? ""));
+			expect(failure.ok).toBe(false);
+			expect(failure.code).toBe("DI_STAGE_INPUT_INVALID");
+			const after = await readState(root);
+			expect(after.state_revision).toBe(before.state_revision);
+		}
 	});
 
 	it("self-heals a poisoned intent contract in persisted state instead of bricking", async () => {
