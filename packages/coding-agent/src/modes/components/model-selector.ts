@@ -534,6 +534,7 @@ export class ModelSelectorComponent extends Container {
 			this.#unsubscribeCatalogChanged = this.#modelRegistry.onCatalogChanged(() => {
 				if (this.#disposed) return;
 				if (this.#viewMode === "presets") {
+					this.#refreshCatalogView();
 					this.#clampPresetCursor();
 					void this.#refreshProviderAuth();
 					this.#renderPresetLanding();

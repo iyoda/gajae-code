@@ -174,10 +174,12 @@ describe("model selector profiles", () => {
 	test("catalog changes rebuild the active preset landing instead of switching to model view", async () => {
 		installTestTheme();
 		const profiles = new Map<string, ModelProfileDefinition>([[profile.name, profile]]);
+		const models = [defaultModel, alternateModel, aliasModel, providerBDefault];
 		let catalogChanged: (() => void) | undefined;
 		const registry = createRegistry() as unknown as TestModelRegistry & {
 			onCatalogChanged: (listener: () => void) => () => void;
 		};
+		registry.getAvailable = () => models;
 		registry.getModelProfiles = () => new Map(profiles);
 		registry.getModelProfile = (name: string) => profiles.get(name);
 		registry.getAvailableModelProfileNames = () => [...profiles.keys()];
@@ -195,11 +197,15 @@ describe("model selector profiles", () => {
 			modelMapping: { default: "provider-a/default" },
 			source: "registry",
 		});
+		models.push(model("provider-a", "fresh-registry-model"));
 		catalogChanged?.();
-		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		let rendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(rendered).toContain("Model presets");
 		expect(rendered).toContain("REGISTRY LIVE");
 		expect(rendered).not.toContain("Models (all)");
+		selector.handleInput("f");
+		rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("fresh-registry-model");
 	});
 
 	test("renders a registry preset unavailable when its configured proxy lacks the model", async () => {
