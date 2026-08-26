@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { logger } from "@gajae-code/utils";
 import {
 	createSessionReaper,
 	type ReapableSession,
@@ -152,6 +153,39 @@ describe("createSessionReaper scheduler", () => {
 			vi.advanceTimersByTime(300_000);
 			expect(sweeps).toBe(0);
 		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("logs a refused sweep and reschedules the next attempt", async () => {
+		vi.useFakeTimers();
+		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			let listCalls = 0;
+			const reaper = createSessionReaper(
+				{
+					listSessions: async () => {
+						listCalls += 1;
+						if (listCalls === 1) throw new Error("coordinator_projection_scan_incomplete");
+						return [];
+					},
+					reapSession: async () => {},
+					now: () => NOW,
+				},
+				{ idleTtlMs: TTL, sweepIntervalMs: 60_000 },
+			);
+			reaper.start();
+			vi.advanceTimersByTime(60_000);
+			for (let i = 0; i < 6; i++) await Promise.resolve();
+			expect(listCalls).toBe(1);
+			expect(warning).toHaveBeenCalledWith("session-reaper: sweep refused: coordinator_projection_scan_incomplete");
+			expect(reaper.running).toBe(true);
+			vi.advanceTimersByTime(60_000);
+			for (let i = 0; i < 6; i++) await Promise.resolve();
+			expect(listCalls).toBe(2);
+			reaper.stop();
+		} finally {
+			warning.mockRestore();
 			vi.useRealTimers();
 		}
 	});

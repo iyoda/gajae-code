@@ -80,16 +80,11 @@ describe("empty .gjc-delete-* latch", () => {
 		// the default 5s test timeout without being a behavioral failure.
 	}, 60000);
 
-	it("Test 1 post-filter cap: zero-byte canonical JSON does not consume the parse cap", async () => {
+	it("Test 1: zero-byte canonical JSON fails closed instead of being ignored", async () => {
 		const dir = await tempRoot("gjc-postcap-");
 		await fs.writeFile(path.join(dir, "live.json"), JSON.stringify({ session_id: "live" }));
-		for (let i = 0; i < 12; i++) {
-			await fs.writeFile(path.join(dir, `empty-${i}.json`), "");
-		}
-		const scan = await listCoordinatorJsonFiles(dir, undefined, 10);
-		expect(scan.capped).toBe(false);
-		expect(scan.values).toHaveLength(1);
-		expect(scan.skippedEmpty).toBe(12);
+		await fs.writeFile(path.join(dir, "empty.json"), "");
+		await expect(listCoordinatorJsonFiles(dir, undefined, 10)).rejects.toThrow("Unexpected EOF");
 	});
 
 	it("Test 2: leftover empty at reserved name is removed before exchange", async () => {
@@ -186,6 +181,8 @@ describe("empty .gjc-delete-* latch", () => {
 		expect(viaLink.records.some(r => r.reason === "symlink_root")).toBe(true);
 		const viaTrailingLink = await runEmptyDeleteGc({ roots: [`${linked}${path.sep}`], prune: false });
 		expect(viaTrailingLink.records).toEqual([expect.objectContaining({ action: "skipped", reason: "symlink_root" })]);
+		const viaDotLink = await runEmptyDeleteGc({ roots: [`${linked}${path.sep}.`], prune: false });
+		expect(viaDotLink.records).toEqual([expect.objectContaining({ action: "skipped", reason: "symlink_root" })]);
 		const empty = path.join(root, ".gjc-delete-session-state-lock-ffffffff-ffff-ffff-ffff-ffffffffffff.json");
 		const shortHex = path.join(root, ".gjc-delete-session-state-lock-aaaaaaaa.json");
 		const gcMinted = path.join(root, ".gjc-delete-gc-33333333-3333-3333-3333-333333333333.json");

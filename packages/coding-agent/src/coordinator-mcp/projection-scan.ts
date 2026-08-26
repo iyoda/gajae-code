@@ -69,7 +69,7 @@ export async function listCoordinatorJsonFiles(
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
 			throw error;
 		}
-		if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
+		if (stat.isSymbolicLink() || !stat.isFile()) {
 			skippedEmpty += 1;
 			continue;
 		}
