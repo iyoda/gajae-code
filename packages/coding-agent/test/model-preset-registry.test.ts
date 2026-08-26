@@ -363,7 +363,7 @@ describe("signed model preset registry", () => {
 						automaticRefresh: false,
 					}),
 			);
-			expect(modelRegistry.getModelProfile("remote")?.source).toBe("registry");
+			expect(modelRegistry.getModelProfile("remote")).toBeUndefined();
 			expect(
 				modelRegistry.getAll().find(model => model.provider === "provider" && model.id === "remote-model"),
 			).toBe(undefined);
@@ -488,6 +488,119 @@ describe("signed model preset registry", () => {
 				baseUrl: "https://oauth.example/v1",
 				isOAuth: true,
 			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	test("does not combine API-specific registry metadata with an explicit API transport", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(
+					data.privateKey,
+					1,
+					[],
+					[
+						{
+							...registryPreset("gpt-4o-mini", 64_000),
+							provider: "openai",
+							compat: { supportsDeveloperRole: true },
+						},
+					],
+				),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  openai:
+    baseUrl: https://openai-proxy.example/v1
+    api: anthropic-messages
+    auth: none
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "mismatched-api-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			const model = modelRegistry.find("openai", "gpt-4o-mini");
+			expect(model).toMatchObject({
+				api: "anthropic-messages",
+				contextWindow: 64_000,
+				baseUrl: "https://openai-proxy.example/v1",
+			});
+			expect(model?.compat?.supportsDeveloperRole).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	test("hydrates registry-only models from an openaiCompat transport", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(
+					data.privateKey,
+					1,
+					[],
+					[{ ...registryPreset("compat-model"), provider: "compat-provider" }],
+				),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  compat-provider:
+    openaiCompat:
+      baseUrl: http://127.0.0.1:1234
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "openai-compat-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("compat-provider", "compat-model")).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:1234/v1",
+				compat: expect.objectContaining({ supportsStore: false }),
+			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	test("does not start recurring refresh for transient registries when disabled", async () => {
+		const data = await fixture();
+		let calls = 0;
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "transient-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+						manifestUrl,
+						startupDelayMs: 0,
+						refreshIntervalMs: 1,
+						fetch: (async () => {
+							calls++;
+							return new Response(null, { status: 304 });
+						}) as unknown as typeof fetch,
+					}),
+			);
+			await Bun.sleep(20);
+			expect(calls).toBe(0);
+			modelRegistry.dispose();
 		} finally {
 			authStorage.close();
 		}
@@ -848,6 +961,19 @@ describe("signed model preset registry", () => {
 		expect(recoveredState.highestSeenManifestSha256).toBe(state.history[0].manifestSha256);
 	});
 
+	test("rejects same-revision equivocation after recovering a verified checkpoint", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.highestSeenRevision = 99_999_999;
+		state.highestSeenManifestSha256 = "f".repeat(64);
+		await Bun.write(statePath, JSON.stringify(state));
+		await expect(accept(data, signedRegistry(data.privateKey, 1, [registryProfile("equivocated")]))).rejects.toThrow(
+			/equivocation/i,
+		);
+	});
+
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
 		const data = await fixture();
 		expect(loadAcceptedModelPresetRegistry(data.agentDir).profiles.size).toBe(0);
@@ -1021,6 +1147,15 @@ describe("signed model preset registry", () => {
 	test("never awaits startup network and publishes a later accepted catalog to the live registry", async () => {
 		const data = await fixture();
 		const remote = signedRegistry(data.privateKey, 1, [registryProfile("background-profile")]);
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  provider:
+    baseUrl: https://provider.example/v1
+    api: openai-completions
+    auth: none
+`,
+		);
 		let calls = 0;
 		const fetchImpl = registryFetch(remote);
 		const countingFetch = (async (input, init) => {
@@ -1092,6 +1227,15 @@ describe("signed model preset registry", () => {
 				[registryProfile("selected", "provider/model-2")],
 				[registryPreset("model-2")],
 			),
+		);
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  provider:
+    baseUrl: https://provider.example/v1
+    api: openai-completions
+    auth: none
+`,
 		);
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "offline-controls-auth.db"));
 		const modelRegistry = data.run(

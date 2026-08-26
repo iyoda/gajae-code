@@ -56,7 +56,7 @@ function normalizeVllmApiKey(provider: string, apiKey: string | undefined): stri
 import { registerOAuthProvider, unregisterOAuthProviders } from "@gajae-code/ai/utils/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@gajae-code/ai/utils/oauth/types";
 import { $pickCredentialEnv, $rotatingCredentialEnv, getAgentDir, isRecord, logger } from "@gajae-code/utils";
-import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
+import { parseModelString, resolveProviderModelReference, splitSelectorThinkingSuffix } from "../config/model-resolver";
 import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
 import {
 	type ActiveProviderDescriptor,
@@ -91,6 +91,7 @@ import {
 	type ModelProfileDefinition,
 	mergeModelProfiles,
 } from "./model-profiles";
+import { normalizeModelSelectorValue } from "./model-selector-value";
 import {
 	GJC_MODEL_ASSIGNMENT_TARGET_IDS,
 	type ModelOverride,
@@ -614,6 +615,51 @@ function commonRegistryTransportCompat(models: readonly Model<Api>[]): Model<Api
 		if (records.every(record => record !== undefined && isDeepStrictEqual(record[key], value))) common[key] = value;
 	}
 	return Object.keys(common).length > 0 ? (common as Model<Api>["compat"]) : undefined;
+}
+
+function registryModelMetadataWithoutApiSpecificFields(model: Model<Api>): Partial<Model<Api>> {
+	const metadata: Partial<Model<Api>> = {
+		name: model.name,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+	};
+	if (model.longContextPricing !== undefined) metadata.longContextPricing = model.longContextPricing;
+	if (model.premiumMultiplier !== undefined) metadata.premiumMultiplier = model.premiumMultiplier;
+	if (model.priority !== undefined) metadata.priority = model.priority;
+	if (model.contextPromotionTarget !== undefined) metadata.contextPromotionTarget = model.contextPromotionTarget;
+	return metadata;
+}
+
+function registrySelectorResolvesToModel(selector: string, models: readonly Model<Api>[]): boolean {
+	if (models.some(model => model.id === selector || `${model.provider}/${model.id}` === selector)) return true;
+	const suffix = splitSelectorThinkingSuffix(selector);
+	const baseSelector = suffix.thinkingLevel === undefined ? selector : suffix.selector;
+	const parsed = parseModelString(baseSelector);
+	if (parsed) return models.some(model => model.provider === parsed.provider && model.id === parsed.id);
+	return models.some(model => model.id === baseSelector || model.id.endsWith(`/${baseSelector}`));
+}
+
+function filterMaterializedRegistryProfiles(
+	profiles: ReadonlyMap<string, ModelProfileDefinition>,
+	models: readonly Model<Api>[],
+): Map<string, ModelProfileDefinition> {
+	const filtered = new Map<string, ModelProfileDefinition>();
+	for (const [name, profile] of profiles) {
+		if (
+			profile.source === "registry" &&
+			Object.values(profile.modelMapping).some(selectorValue => {
+				const selectors = normalizeModelSelectorValue(selectorValue);
+				return (
+					selectors.length > 0 && !selectors.some(selector => registrySelectorResolvesToModel(selector, models))
+				);
+			})
+		) {
+			continue;
+		}
+		filtered.set(name, profile);
+	}
+	return filtered;
 }
 
 const PROVIDER_BASE_URL_ENV_ALIASES: Record<string, readonly string[]> = {
@@ -1816,7 +1862,6 @@ export class ModelRegistry {
 				})
 			: undefined;
 		this.#configError = configError ?? acceptedRegistryError;
-		this.#modelProfiles = mergeModelProfiles(profiles, acceptedPresets.profiles);
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
@@ -1840,6 +1885,10 @@ export class ModelRegistry {
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(combined, this.#modelOverrides);
 		this.#models = this.#finalizeModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
+		this.#modelProfiles = mergeModelProfiles(
+			profiles,
+			filterMaterializedRegistryProfiles(acceptedPresets.profiles, this.#models),
+		);
 		this.#rebuildProviderActivity();
 		this.#rebuildCanonicalIndex();
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
@@ -1993,9 +2042,14 @@ export class ModelRegistry {
 				continue;
 			}
 			const existing = merged[existingIndex]!;
+			const effectiveApi = explicitTransport?.api ?? existing.api;
+			const registryApiMatchesEffectiveTransport = registryModel.api === effectiveApi;
+			const registryMetadata = registryApiMatchesEffectiveTransport
+				? registryModel
+				: registryModelMetadataWithoutApiSpecificFields(registryModel);
 			merged[existingIndex] = {
 				...existing,
-				...registryModel,
+				...registryMetadata,
 				api: explicitTransport?.api ?? existing.api,
 				baseUrl: existing.baseUrl,
 				headers: existing.headers,
@@ -2005,8 +2059,14 @@ export class ModelRegistry {
 				isOAuth: explicitTransport?.isOAuth ?? existing.isOAuth,
 				wireModelId: existing.wireModelId,
 				compat:
-					existing.compat || registryModel.compat || explicitTransport?.compat
-						? { ...existing.compat, ...registryModel.compat, ...explicitTransport?.compat }
+					existing.compat ||
+					(registryApiMatchesEffectiveTransport ? registryModel.compat : undefined) ||
+					explicitTransport?.compat
+						? {
+								...existing.compat,
+								...(registryApiMatchesEffectiveTransport ? registryModel.compat : undefined),
+								...explicitTransport?.compat,
+							}
 						: undefined,
 			};
 		}

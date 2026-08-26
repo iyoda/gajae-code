@@ -1670,6 +1670,9 @@ async function refreshModelPresetRegistryInner(
 				const trustedHighestSeenRevision = stateIsVerified
 					? state.highestSeenRevision
 					: recoveryGeneration?.manifest.signed.registryRevision;
+				const trustedHighestSeenManifestSha256 = stateIsVerified
+					? state.highestSeenManifestSha256
+					: recoveryGeneration?.manifestSha256;
 				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
 						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
@@ -1732,9 +1735,8 @@ async function refreshModelPresetRegistryInner(
 						throw new Error("Registry revision downgrade rejected.");
 					if (
 						manifest.signed.registryRevision === trustedHighestSeenRevision &&
-						stateIsVerified &&
-						state.highestSeenManifestSha256 !== undefined &&
-						manifestSha256 !== state.highestSeenManifestSha256
+						trustedHighestSeenManifestSha256 !== undefined &&
+						manifestSha256 !== trustedHighestSeenManifestSha256
 					)
 						throw new Error("Registry revision equivocation rejected.");
 				}
