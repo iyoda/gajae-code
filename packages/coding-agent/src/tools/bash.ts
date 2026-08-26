@@ -1787,7 +1787,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				let finalReadDiagnostic: string | undefined;
 				let finalOutput: ClientBridgeTerminalOutput;
 				try {
-					finalOutput = (await readOutput(1_000, false)) ?? retainedAcpOutput();
+					const recovered = await readOutput(1_000, false);
+					if (recovered === undefined) {
+						finalOutput = retainedAcpOutput();
+						finalReadDiagnostic = "terminal/output read timed out";
+					} else {
+						finalOutput = recovered;
+					}
 				} catch (error) {
 					finalOutput = retainedAcpOutput();
 					finalReadDiagnostic = boundArtifactSaveDiagnostic(error);
@@ -1798,7 +1804,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 				if (runSignal?.aborted) {
 					await boundedKill();
-					throw new ToolAbortError("ACP terminal cancelled during final output recovery.");
+					appendAcpSnapshot(finalOutput.output);
+					const prepared = await prepareClientTerminalOutput(this.session, finalOutput);
+					throw new ToolAbortError(
+						formatClientTerminalAbortFailure(prepared, finalReadDiagnostic, pendingNotices),
+					);
 				}
 
 				// Map exit status: null exitCode with a signal → treat as signal kill (137).
