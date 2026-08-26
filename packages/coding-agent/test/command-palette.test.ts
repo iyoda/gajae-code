@@ -204,6 +204,9 @@ describe("CommandPalette", () => {
 			handlePlanModeCommand: () => {},
 			showError: () => {},
 			showStatus: () => {},
+			beginOAuthUrlForCopy: () => () => {},
+			hasOAuthUrlForCopy: () => true,
+			copyOAuthUrl: async () => {},
 			historyStorage: { getRecent: () => [] },
 			skillCommands: new Map([["skill:demo", { description: "Demo skill" }]]),
 			getSlashCommands: () => liveCommands,
@@ -211,7 +214,7 @@ describe("CommandPalette", () => {
 		} as unknown as InteractiveModeContext;
 		new InputController(ctx).openCommandPalette();
 		expect(overlay?.getEntries().map(entry => entry.label)).toEqual(
-			expect.arrayContaining(["/clear", "/extension:demo", "/custom:demo", "/skill:demo"]),
+			expect.arrayContaining(["/clear", "/extension:demo", "/custom:demo", "/skill:demo", "Copy OAuth URL"]),
 		);
 		let forwardedCommands: unknown;
 		ctx.showCommandPalette = commands => {

@@ -64,6 +64,7 @@ export function streamOpenAIAnthropicShim(
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
+					thinking: model.thinking,
 					input: model.input,
 					cost: model.cost,
 				};

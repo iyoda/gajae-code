@@ -34,6 +34,10 @@ export class ClipboardTransportError extends Error {
 	}
 }
 
+export type ClipboardDeliveryOutcome =
+	| { status: "verified"; transport: "ssh" }
+	| { status: "attempted"; transport: "auto" | "native" | "osc52"; reason: string };
+
 const SSH_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SSH_OPERATION_TIMEOUT_MS = 5000;
 const SSH_CONNECT_TIMEOUT_S = 3;
@@ -261,41 +265,32 @@ function getClipboardTransportConfig(): { transport: "auto" | "native" | "osc52"
 	}
 }
 
-function emitOsc52(text: string): void {
-	if (!process.stdout.isTTY) return;
-	const onError = (err: unknown) => {
+function emitOsc52(text: string): boolean {
+	if (!process.stdout.isTTY) return false;
+	let delivered = false;
+	const onError = (_err: unknown) => {
 		process.stdout.off("error", onError);
-		// Prevent unhandled 'error' from crashing the process when stdout is a closed pipe.
-		if ((err as NodeJS.ErrnoException | null | undefined)?.code === "EPIPE") {
-			return;
-		}
 	};
 	try {
 		const encoded = Buffer.from(text).toString("base64");
 		const osc52 = `\x1b]52;c;${encoded}\x07`;
 		process.stdout.on("error", onError);
-		process.stdout.write(osc52, err => {
+		process.stdout.write(osc52, _err => {
 			process.stdout.off("error", onError);
-			// If stdout is closed (e.g. piped to a process that exits early),
-			// ignore EPIPE and proceed with native clipboard best-effort.
-			if ((err as NodeJS.ErrnoException | null | undefined)?.code === "EPIPE") {
-				return;
-			}
 		});
-	} catch (err) {
+		delivered = true;
+	} catch (_err) {
 		process.stdout.off("error", onError);
-		if ((err as NodeJS.ErrnoException | null | undefined)?.code !== "EPIPE") {
-			// Ignore all write failures (OSC 52 is best-effort).
-		}
 	}
+	return delivered;
 }
 
-async function copyToClipboardNative(text: string): Promise<void> {
+async function copyToClipboardNative(text: string): Promise<boolean> {
 	try {
 		if (process.env.TERMUX_VERSION) {
 			try {
 				execSync("termux-clipboard-set", { input: text, timeout: 5000 });
-				return;
+				return true;
 			} catch {
 				// Fall through to native
 			}
@@ -305,8 +300,9 @@ async function copyToClipboardNative(text: string): Promise<void> {
 		// unaffected by the ssh/osc52 explicit-transport contract below, which
 		// never reaches this function.
 		nativeClipboard().copyToClipboard(text);
+		return true;
 	} catch {
-		// Ignore — native clipboard copy is best-effort
+		return false;
 	}
 }
 
@@ -324,27 +320,40 @@ async function copyToClipboardNative(text: string): Promise<void> {
  *
  * @param text - UTF-8 text to place on the clipboard.
  */
-export async function copyToClipboard(text: string): Promise<void> {
+export async function copyToClipboard(text: string): Promise<ClipboardDeliveryOutcome> {
 	const { transport, sshHost } = getClipboardTransportConfig();
 
 	if (transport === "ssh") {
 		await copyToClipboardViaSsh(sshHost, text);
-		return;
+		return { status: "verified", transport: "ssh" };
 	}
 
 	if (transport === "osc52") {
-		emitOsc52(text);
-		return;
+		const delivered = emitOsc52(text);
+		return {
+			status: "attempted",
+			transport: "osc52",
+			reason: delivered ? "terminal accepted write; no read-back" : "terminal rejected write",
+		};
 	}
 
 	if (transport === "native") {
-		await copyToClipboardNative(text);
-		return;
+		const delivered = await copyToClipboardNative(text);
+		return {
+			status: "attempted",
+			transport: "native",
+			reason: delivered ? "native API provides no read-back verification" : "native clipboard API failed",
+		};
 	}
 
 	// auto: prior best-effort dual-path behavior.
-	emitOsc52(text);
-	await copyToClipboardNative(text);
+	const osc52Delivered = emitOsc52(text);
+	const nativeDelivered = await copyToClipboardNative(text);
+	return {
+		status: "attempted",
+		transport: "auto",
+		reason: `OSC52 ${osc52Delivered ? "accepted" : "failed"}; native ${nativeDelivered ? "accepted" : "failed"}; no read-back verification`,
+	};
 }
 
 /**

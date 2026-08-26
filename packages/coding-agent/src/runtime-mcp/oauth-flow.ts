@@ -192,9 +192,11 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+		this.ctrl.signal?.throwIfAborted();
 		if (!this.#resolvedClientId) {
-			await this.#tryRegisterClient(redirectUri);
+			await this.#tryRegisterClient(redirectUri, this.ctrl.signal);
 		}
+		this.ctrl.signal?.throwIfAborted();
 
 		const authUrl = new URL(this.config.authorizationUrl);
 		const params = authUrl.searchParams;
@@ -226,13 +228,14 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		this.#codeVerifier = codeVerifier;
 
 		if (!params.get("client_id")) {
-			await this.#assertClientIdNotRequired(authUrl.toString());
+			await this.#assertClientIdNotRequired(authUrl.toString(), this.ctrl.signal);
 		}
 
 		return { url: authUrl.toString() };
 	}
 
 	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
+		this.ctrl.signal?.throwIfAborted();
 		const params = new URLSearchParams({
 			grant_type: "authorization_code",
 			code,
@@ -264,7 +267,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				"Content-Type": "application/x-www-form-urlencoded",
 			},
 			body: params.toString(),
+			signal: this.ctrl.signal,
 		});
+		this.ctrl.signal?.throwIfAborted();
 
 		if (!response.ok) {
 			const errorText = await response.text();
@@ -330,8 +335,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	/**
 	 * Try OAuth dynamic client registration when provider requires a client_id.
 	 */
-	async #tryRegisterClient(redirectUri: string): Promise<void> {
-		const registrationEndpoint = await this.#resolveRegistrationEndpoint();
+	async #tryRegisterClient(redirectUri: string, signal?: AbortSignal): Promise<void> {
+		const registrationEndpoint = await this.#resolveRegistrationEndpoint(signal);
 		if (!registrationEndpoint) return;
 
 		try {
@@ -349,6 +354,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 					token_endpoint_auth_method: "none",
 					application_type: "native",
 				}),
+				signal,
 			});
 
 			if (!response.ok) return;
@@ -364,18 +370,20 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			if (data.client_secret && data.client_secret.trim() !== "") {
 				this.#registeredClientSecret = data.client_secret;
 			}
-		} catch {
+		} catch (error) {
+			if (signal?.aborted) throw error;
 			// Ignore registration failures and continue without client registration.
 		}
 	}
 
-	async #resolveRegistrationEndpoint(): Promise<string | null> {
+	async #resolveRegistrationEndpoint(signal?: AbortSignal): Promise<string | null> {
 		try {
 			const authorizationEndpoint = new URL(this.config.authorizationUrl);
 			const metadataUrl = new URL("/.well-known/oauth-authorization-server", authorizationEndpoint.origin);
 			const response = await fetch(metadataUrl.toString(), {
 				method: "GET",
 				headers: { Accept: "application/json" },
+				signal,
 			});
 
 			if (!response.ok) return null;
@@ -383,19 +391,21 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			if (metadata.registration_endpoint && metadata.registration_endpoint.trim() !== "") {
 				return metadata.registration_endpoint;
 			}
-		} catch {
+		} catch (error) {
+			if (signal?.aborted) throw error;
 			// Ignore metadata discovery failures.
 		}
 
 		return null;
 	}
 
-	async #assertClientIdNotRequired(authorizationUrl: string): Promise<void> {
+	async #assertClientIdNotRequired(authorizationUrl: string, signal?: AbortSignal): Promise<void> {
 		try {
 			const response = await fetch(authorizationUrl, {
 				method: "GET",
 				redirect: "manual",
 				headers: { Accept: "text/plain,text/html,application/json" },
+				signal,
 			});
 			if (response.status < 400) return;
 			const body = await response.text();
@@ -403,6 +413,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				throw new Error("OAuth provider requires client_id");
 			}
 		} catch (error) {
+			if (signal?.aborted) throw error;
 			if (error instanceof Error && /client[_-]?id/i.test(error.message)) {
 				throw error;
 			}

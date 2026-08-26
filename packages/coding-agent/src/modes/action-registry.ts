@@ -48,6 +48,7 @@ export const APP_ACTION_METADATA: readonly ActionMetadata[] = [
 	action("app.clipboard.pasteText", "Paste text from configured clipboard", "Clipboard", ["composer"]),
 	action("app.clipboard.copyLine", "Copy line", "Clipboard", ["composer"]),
 	action("app.clipboard.copyPrompt", "Copy prompt", "Clipboard", ["composer"]),
+	action("app.clipboard.copyOAuthUrl", "Copy OAuth URL", "Clipboard", ["composer"]),
 	action("app.session.new", "New session", "Session", ["composer"]),
 	action("app.session.tree", "Session tree", "Session", ["composer"]),
 	action("app.session.fork", "Branch from message", "Session", ["composer"]),
