@@ -727,6 +727,27 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("repairs malformed control while preserving valid accepted state", async () => {
+		const data = await fixture();
+		await expect(
+			accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")])),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(path.join(data.agentDir, "model-presets", "control.json"), "{");
+		await expect(
+			refreshModelPresetRegistry({
+				agentDir: data.agentDir,
+				fetch: (async () => {
+					throw new Error("offline");
+				}) as unknown as typeof fetch,
+			}),
+		).rejects.toThrow("Registry refresh failed.");
+		expect(await Bun.file(path.join(data.agentDir, "model-presets", "control.json")).json()).toEqual({
+			version: 1,
+			disabled: false,
+		});
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(1);
+	});
+
 	test("rejects registry presets with incomplete thinking bounds", async () => {
 		const data = await fixture();
 		const partialThinking = {

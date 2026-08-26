@@ -1603,6 +1603,13 @@ async function recordFailure(
 		async () => {
 			let state: RegistryState;
 			let stateIsVerified = true;
+			let control: RegistryControl = { version: 1, disabled: false };
+			let controlIsValid = true;
+			try {
+				control = loadControlSync(agentDir);
+			} catch {
+				controlIsValid = false;
+			}
 			try {
 				state = loadStateSync(agentDir);
 			} catch {
@@ -1617,14 +1624,12 @@ async function recordFailure(
 					stateIsVerified = false;
 				}
 			}
-			if (!stateIsVerified) {
-				let control: RegistryControl = { version: 1, disabled: false };
-				try {
-					control = loadControlSync(agentDir);
-				} catch {
-					// An unreadable control file cannot safely preserve a stale pin or disablement.
-				}
-				await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
+			if (!stateIsVerified || !controlIsValid) {
+				// An unreadable control file cannot safely preserve a stale pin or disablement.
+				await writeAtomicJson(
+					paths.control,
+					controlIsValid ? { ...control, pinnedRevision: undefined } : { version: 1, disabled: false },
+				);
 			}
 			await writeAtomicJson(paths.state, {
 				...state,

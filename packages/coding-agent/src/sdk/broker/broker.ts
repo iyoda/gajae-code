@@ -46,6 +46,8 @@ export interface BrokerSettings {
 	heartbeatTtlMs?: number;
 	/** Broker-owned migration policy. Client lifecycle frames cannot select it. */
 	resolveDirectoryMigration?: (_cwd: string) => Promise<DirectoryMigrationPolicy>;
+	/** Host model resolver override for lifecycle tests and embedders. */
+	resolveModelPin?: SdkHostModelResolver;
 }
 
 type ResolvedBrokerSettings = {
@@ -874,7 +876,7 @@ export class Broker {
 		};
 		this.index = new SessionIndex(settings.agentDir);
 		this.ledger = new LifecycleLedger(settings.agentDir);
-		this.#resolveModelPin = createDefaultSdkHostModelResolver(this.settings.agentDir);
+		this.#resolveModelPin = settings.resolveModelPin ?? createDefaultSdkHostModelResolver(this.settings.agentDir);
 		this.#lock = path.join(settings.agentDir, "sdk", "broker.lock");
 		const completion = Promise.withResolvers<void>();
 		this.#completion = completion.promise;
@@ -1306,11 +1308,14 @@ export class Broker {
 					await this.#releaseOwnedLock();
 				}
 			} finally {
-				try {
-					await this.#resolveModelPin.dispose?.();
-				} finally {
-					this.discovery = null;
+				const disposeModelPin = this.#resolveModelPin.dispose?.();
+				if (mode === "lost-root" && disposeModelPin !== undefined) {
+					void disposeModelPin.catch(() => undefined);
+					await Promise.race([disposeModelPin, Bun.sleep(BROKER_SETTLEMENT_MS)]);
+				} else {
+					await disposeModelPin;
 				}
+				this.discovery = null;
 			}
 		})();
 		void this.#completionTask.then(this.#resolveCompletion, this.#rejectCompletion);

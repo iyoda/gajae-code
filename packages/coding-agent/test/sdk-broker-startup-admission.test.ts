@@ -611,6 +611,27 @@ test("the ACP caller deadline covers the admission wait even when readiness is d
 	expect(closing.timeoutMs).toBe(5_000);
 });
 
+test("lost-root completion does not wait indefinitely for model resolver disposal", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-lost-root-disposal-"));
+	const agentDir = path.join(root, "agent");
+	const disposeGate = Promise.withResolvers<void>();
+	const resolveModelPin = Object.assign(async () => ({ ok: true as const, model: null }), {
+		dispose: () => disposeGate.promise,
+	});
+	const broker = new Broker({ agentDir, resolveModelPin });
+	try {
+		await broker.start();
+		setPublicationObservationForTest(broker, "ambiguous");
+		const completed = await Promise.race([broker.stop().then(() => true), Bun.sleep(2_500).then(() => false)]);
+		expect(completed).toBe(true);
+	} finally {
+		disposeGate.resolve();
+		setPublicationObservationForTest(broker, undefined);
+		await broker.stop().catch(() => undefined);
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
 test("a default startup admitted late by the production broker stays inside the ACP caller deadline", async () => {
 	const sdk = new TimeoutCapturingSdkClient();
 	await new AcpSdkAdapter({ client: sdk as never }).global(
