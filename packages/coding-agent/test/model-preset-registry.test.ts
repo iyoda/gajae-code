@@ -613,6 +613,44 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("uses trusted provider environment endpoints for registry-only models", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(data.privateKey, 1, [], [{ ...registryPreset("env-model"), provider: "header-env" }]),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		const previousBaseUrl = process.env.HEADER_ENV_BASE_URL;
+		process.env.HEADER_ENV_BASE_URL = "https://headers-env.example/v1";
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  header-env:
+    api: openai-completions
+    apiKey: issue-env-key
+    authHeader: true
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "env-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("header-env", "env-model")).toMatchObject({
+				baseUrl: "https://headers-env.example/v1",
+				headers: { Authorization: "Bearer issue-env-key" },
+			});
+		} finally {
+			authStorage.close();
+			if (previousBaseUrl === undefined) delete process.env.HEADER_ENV_BASE_URL;
+			else process.env.HEADER_ENV_BASE_URL = previousBaseUrl;
+		}
+	});
+
 	test("retains registry profiles authorized for dynamic providers before discovery", async () => {
 		const data = await fixture();
 		const profile = registryProfile("dynamic-profile", "dynamic-provider/dynamic-model");

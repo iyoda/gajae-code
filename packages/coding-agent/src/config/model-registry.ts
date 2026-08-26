@@ -2019,7 +2019,7 @@ export class ModelRegistry {
 		for (const registryModel of registryModels) {
 			const key = `${registryModel.provider}\u0000${registryModel.id}`;
 			const existingIndex = indexByKey.get(key);
-			const explicitTransport = providerOverrides.get(registryModel.provider);
+			const explicitTransport = this.#resolveProviderOverride(registryModel.provider, providerOverrides);
 			if (existingIndex === undefined) {
 				const transportTemplates = merged.filter(
 					model => model.provider === registryModel.provider && model.api === registryModel.api,
@@ -3902,7 +3902,7 @@ export class ModelRegistry {
 
 	#resolveProviderOverride(
 		provider: string,
-		overrides: Map<string, ProviderOverride> = this.#providerOverrides,
+		overrides: ReadonlyMap<string, ProviderOverride> = this.#providerOverrides,
 	): ProviderOverride | undefined {
 		const explicitOverride = overrides.get(provider);
 		if (explicitOverride?.baseUrl) {
