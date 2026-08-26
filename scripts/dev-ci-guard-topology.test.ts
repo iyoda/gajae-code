@@ -246,4 +246,10 @@ describe("dev-ci Telegram daemon generation guard topology", () => {
 		expect(raw!["cancel-in-progress"]).toBe(false);
 		expect(raw!.queue).toBe("max");
 	});
+	test("dispatch workflow admission cannot deadlock its virtual integration job", async () => {
+		const source = await Bun.file(".github/workflows/dev-ci.yml").text();
+		const workflowConcurrency = source.match(/group:\s*>-\s*\n\s*\$\{\{[\s\S]*?cancel-in-progress:/)?.[0] ?? "";
+		expect(workflowConcurrency).toContain("format('dev-ci-dispatch-{0}', github.run_id)");
+		expect(workflowConcurrency).not.toContain("'dev-ci-virtual-integration'");
+	});
 });
