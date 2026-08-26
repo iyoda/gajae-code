@@ -435,10 +435,17 @@ describe("empty .gjc-delete-* latch", () => {
 			sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 			quarantineName: quarantine,
 		});
-		expect(result.ok).toBe(false);
-		expect(result.code).toBe("quarantine_collision");
-		// No-replace semantics: BOTH objects survive untouched.
-		expect(await fs.readFile(target, "utf8")).toBe("");
+		if (process.platform === "win32") {
+			// Windows direct unlink is handle-bound and never uses the quarantine
+			// pathname: the validated victim is deleted and the occupant is irrelevant.
+			expect(result.ok).toBe(true);
+			await expect(fs.lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+		} else {
+			expect(result.ok).toBe(false);
+			expect(result.code).toBe("quarantine_collision");
+			// No-replace semantics: BOTH objects survive untouched.
+			expect(await fs.readFile(target, "utf8")).toBe("");
+		}
 		expect(await fs.readFile(detached, "utf8")).toBe("pre-existing quarantine occupant");
 	});
 
@@ -461,10 +468,17 @@ describe("empty .gjc-delete-* latch", () => {
 			sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 			quarantineName: quarantine,
 		});
-		expect(result.ok).toBe(false);
-		expect(result.code).toBe("quarantine_collision");
-		// Both the victim and the dangling symlink survive untouched.
-		expect(await fs.readFile(target, "utf8")).toBe("");
+		if (process.platform === "win32") {
+			// Windows direct unlink is handle-bound and never uses the quarantine
+			// pathname: the validated victim is deleted and the symlink is irrelevant.
+			expect(result.ok).toBe(true);
+			await expect(fs.lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+		} else {
+			expect(result.ok).toBe(false);
+			expect(result.code).toBe("quarantine_collision");
+			// Both the victim and the dangling symlink survive untouched.
+			expect(await fs.readFile(target, "utf8")).toBe("");
+		}
 		expect((await fs.lstat(detached)).isSymbolicLink()).toBe(true);
 	});
 
