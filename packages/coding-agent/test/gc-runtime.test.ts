@@ -376,6 +376,25 @@ describe("runGjcGcCommand", () => {
 		expect(result.status).toBe(0);
 	});
 
+	test("preflights NUL manifest roots before any adapter prune", async () => {
+		const manifest = path.join(perTestAgentDir, "nul-root-manifest.json");
+		await fs.writeFile(manifest, JSON.stringify({ roots: [`${perTestAgentDir}\0invalid`] }));
+		let pruned = 0;
+		const adapter = fakeAdapter("harness_leases", [record("harness_leases")], async () => {
+			pruned += 1;
+			return { removed: true };
+		});
+		const result = await runGjcGcCommand(
+			["--prune", "--empty-delete-receipts", "--manifest", manifest],
+			perTestAgentDir,
+			{},
+			[adapter],
+		);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("manifest_root_invalid");
+		expect(pruned).toBe(0);
+	});
+
 	test("includes healthy session-index diagnosis in ordinary JSON output", async () => {
 		const agentDir = await sessionIndexAgentDir();
 		await appendSessionIndexEvent(agentDir);

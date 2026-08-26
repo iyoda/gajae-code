@@ -513,6 +513,9 @@ export async function runGjcGcCommand(
 	let emptyDeleteRoots: string[] = [];
 	if (parsed.emptyDeleteReceipts) {
 		emptyDeleteRoots = [...parsed.emptyDeleteRoots];
+		if (emptyDeleteRoots.some(root => root.includes("\0"))) {
+			return { stdout: "", stderr: "gjc gc: root_invalid\n", status: 2 };
+		}
 		// Every supplied manifest is validated, not just the last: a malformed earlier
 		// manifest must fail the run before any store collection or prune can mutate.
 		for (const manifestPath of parsed.emptyDeleteManifests) {
@@ -532,7 +535,7 @@ export async function runGjcGcCommand(
 				return { stdout: "", stderr: "gjc gc: manifest_roots_required\n", status: 2 };
 			}
 			for (const root of manifestRoots) {
-				if (typeof root !== "string" || root.length === 0) {
+				if (typeof root !== "string" || root.length === 0 || root.includes("\0")) {
 					return { stdout: "", stderr: "gjc gc: manifest_root_invalid\n", status: 2 };
 				}
 				emptyDeleteRoots.push(root);

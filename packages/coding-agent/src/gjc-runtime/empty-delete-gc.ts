@@ -94,9 +94,10 @@ function isEmptyDeleteReceiptName(name: string): boolean {
 
 export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDeleteGcRecord[]> {
 	const records: EmptyDeleteGcRecord[] = [];
+	const resolvedRoot = path.resolve(root);
 	let rootStat: BigIntStats;
 	try {
-		rootStat = await fs.lstat(path.resolve(root), { bigint: true });
+		rootStat = await fs.lstat(resolvedRoot, { bigint: true });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return [{ root, path: root, action: "skipped", reason: "missing_root" }];
@@ -111,7 +112,7 @@ export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDel
 	}
 	let names: string[];
 	try {
-		names = await fs.readdir(root);
+		names = await fs.readdir(resolvedRoot);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return [{ root, path: root, action: "skipped", reason: "missing_root" }];
@@ -120,7 +121,7 @@ export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDel
 	}
 	for (const name of names) {
 		if (isUnsafeName(name) || !isEmptyDeleteReceiptName(name)) continue;
-		const file = path.join(root, name);
+		const file = path.join(resolvedRoot, name);
 		let stat: BigIntStats;
 		try {
 			stat = await fs.lstat(file, { bigint: true });
