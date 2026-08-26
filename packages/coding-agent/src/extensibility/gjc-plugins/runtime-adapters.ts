@@ -453,6 +453,7 @@ export async function buildPluginMcpConfigs(input: { cwd: string }): Promise<{
 						command: cfg.command,
 						args: cfg.args,
 						cwd: cfg.cwd ? nodePath.resolve(entry.pluginRoot, cfg.cwd) : entry.pluginRoot,
+						timeout: 5_000,
 						// Third-party plugin MCP processes must not inherit host secrets;
 						// only a minimal OS allowlist (PATH/HOME/temp/locale) is provided.
 						noInheritEnv: true,
