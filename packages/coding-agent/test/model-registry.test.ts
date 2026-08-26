@@ -4541,6 +4541,46 @@ describe("ModelRegistry", () => {
 			expect(registry.find("race-cache", "stale-configured-model")).toBeUndefined();
 		});
 
+		test("does not cache full-refresh configured discovery after a targeted refresh is queued", async () => {
+			writeRawModelsJson({
+				"race-full": {
+					baseUrl: "https://race-full.example.com/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "openai-models-list" },
+				},
+			});
+			const firstResponse = Promise.withResolvers<Response>();
+			const firstRequest = Promise.withResolvers<void>();
+			let requests = 0;
+			using _hook = hookFetch(input => {
+				expect(String(input)).toBe("https://race-full.example.com/v1/models");
+				requests += 1;
+				if (requests === 1) {
+					firstRequest.resolve();
+					return firstResponse.promise;
+				}
+				return new Response(JSON.stringify({ data: [{ id: "new-full-targeted-model" }] }), { status: 200 });
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const fullRefresh = registry.refresh("online-if-uncached");
+			await firstRequest.promise;
+			const targetedRefresh = registry.refreshProvider("race-full", "online-if-uncached");
+			firstResponse.resolve(new Response(JSON.stringify({ data: [{ id: "stale-full-model" }] }), { status: 200 }));
+			await fullRefresh;
+			await targetedRefresh;
+
+			expect(requests).toBe(2);
+			expect(registry.find("race-full", "new-full-targeted-model")).toBeDefined();
+			expect(readModelCache("race-full", 24 * 60 * 60 * 1000, Date.now, cacheDbPath)?.models).toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: "new-full-targeted-model" })]),
+			);
+			expect(readModelCache("race-full", 24 * 60 * 60 * 1000, Date.now, cacheDbPath)?.models).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: "stale-full-model" })]),
+			);
+		});
+
 		test("discovery failure does not fail model registry refresh", async () => {
 			writeRawModelsJson({
 				ollama: {
@@ -8355,6 +8395,40 @@ describe("ModelRegistry", () => {
 			expect(requests).toBe(2);
 			expect(registry.find("vllm", "new-descriptor-model")).toBeDefined();
 			expect(registry.find("vllm", "stale-descriptor-model")).toBeUndefined();
+		});
+		test("does not cache full-refresh descriptor discovery after a targeted refresh is queued", async () => {
+			authStorage.setRuntimeApiKey("vllm", "fresh-vllm-key");
+			const firstResponse = Promise.withResolvers<Response>();
+			const firstRequest = Promise.withResolvers<void>();
+			let requests = 0;
+			using _hook = hookFetch(input => {
+				expect(String(input)).toBe("http://127.0.0.1:8000/v1/models");
+				requests += 1;
+				if (requests === 1) {
+					firstRequest.resolve();
+					return firstResponse.promise;
+				}
+				return new Response(JSON.stringify({ data: [{ id: "new-full-descriptor-model" }] }), { status: 200 });
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const fullRefresh = registry.refresh("online-if-uncached");
+			await firstRequest.promise;
+			const targetedRefresh = registry.refreshProvider("vllm", "online-if-uncached");
+			firstResponse.resolve(
+				new Response(JSON.stringify({ data: [{ id: "stale-full-descriptor-model" }] }), { status: 200 }),
+			);
+			await fullRefresh;
+			await targetedRefresh;
+
+			expect(requests).toBe(2);
+			expect(registry.find("vllm", "new-full-descriptor-model")).toBeDefined();
+			expect(readModelCache("vllm", 24 * 60 * 60 * 1000, Date.now, cacheDbPath)?.models).toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: "new-full-descriptor-model" })]),
+			);
+			expect(readModelCache("vllm", 24 * 60 * 60 * 1000, Date.now, cacheDbPath)?.models).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ id: "stale-full-descriptor-model" })]),
+			);
 		});
 		test("serializes descriptor discovery publication before a newer failed probe", async () => {
 			authStorage.setRuntimeApiKey("vllm", "fresh-vllm-key");

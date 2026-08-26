@@ -1361,6 +1361,8 @@ interface ConfiguredDiscoveryResult {
 	clearPublishedModelIds?: readonly string[];
 }
 
+type ProviderRefreshFence = { providerId: string; generation: number } | { generations: ReadonlyMap<string, number> };
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -1546,11 +1548,14 @@ export class ModelRegistry {
 		await this.#enqueueCatalogMutation(async () => {
 			if (this.#disposed) return;
 			const refreshGeneration = ++this.#catalogRefreshGeneration;
+			const providerRefreshFence: ProviderRefreshFence = {
+				generations: new Map(this.#providerRefreshGenerations),
+			};
 			this.#suspendRebuild();
 			try {
 				this.#reloadStaticModels();
 				this.#suppressedSelectors.clear();
-				await this.#refreshRuntimeDiscoveries(strategy, undefined, refreshGeneration);
+				await this.#refreshRuntimeDiscoveries(strategy, undefined, refreshGeneration, providerRefreshFence);
 				if (refreshGeneration === this.#catalogRefreshGeneration) this.#modelBindingsApplier.apply();
 			} finally {
 				this.#resumeRebuild();
@@ -2575,7 +2580,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 		refreshGeneration = this.#catalogRefreshGeneration,
-		providerRefresh?: { providerId: string; generation: number },
+		providerRefresh?: ProviderRefreshFence,
 	): Promise<void> {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
@@ -2598,6 +2603,7 @@ export class ModelRegistry {
 		if (
 			refreshGeneration !== this.#catalogRefreshGeneration ||
 			(providerRefresh !== undefined &&
+				"providerId" in providerRefresh &&
 				this.#providerRefreshGenerations.get(providerRefresh.providerId) !== providerRefresh.generation)
 		) {
 			return;
@@ -2768,7 +2774,7 @@ export class ModelRegistry {
 	async #discoverProviderModels(
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
-		providerRefresh?: { providerId: string; generation: number },
+		providerRefresh?: ProviderRefreshFence,
 	): Promise<ConfiguredDiscoveryResult> {
 		const provider = providerConfig.provider;
 		const preflightEpoch = this.#optionalAuthPreflightEpoch;
@@ -2876,8 +2882,11 @@ export class ModelRegistry {
 		const isCurrentProviderRefresh = () =>
 			strategy !== "online-if-uncached" ||
 			providerRefresh === undefined ||
-			(providerRefresh.providerId === provider &&
-				this.#providerRefreshGenerations.get(provider) === providerRefresh.generation);
+			("providerId" in providerRefresh
+				? providerRefresh.providerId === provider &&
+					this.#providerRefreshGenerations.get(provider) === providerRefresh.generation
+				: (this.#providerRefreshGenerations.get(provider) ?? 0) ===
+					(providerRefresh.generations.get(provider) ?? 0));
 		const evidence = this.#configuredDiscoveryEvidence.get(provider);
 		const cacheDynamicModelProvenance = fingerprintConfiguredDiscoveryRequestShape(
 			effectiveProviderConfig,
@@ -3012,7 +3021,7 @@ export class ModelRegistry {
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
-		providerRefresh?: { providerId: string; generation: number },
+		providerRefresh?: ProviderRefreshFence,
 	): Promise<Model<Api>[]> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoveryManager.providers.map(p => p.provider));
@@ -3158,7 +3167,7 @@ export class ModelRegistry {
 	async #discoverWithModelManager(
 		{ options, authGeneration, apiKey, endpoint, endpointContainsUserinfo }: ModelManagerDiscoveryOptions,
 		strategy: ModelRefreshStrategy,
-		providerRefresh?: { providerId: string; generation: number },
+		providerRefresh?: ProviderRefreshFence,
 	): Promise<Model<Api>[]> {
 		const generation = (this.#descriptorDiscoveryGenerations.get(options.providerId) ?? 0) + 1;
 		this.#descriptorDiscoveryGenerations.set(options.providerId, generation);
@@ -3185,13 +3194,18 @@ export class ModelRegistry {
 			(endpoint ===
 				this.#normalizeDiscoveryEvidenceEndpoint(this.#getProviderBaseUrlForDiscovery(options.providerId) ?? "") ||
 				(canUseCredentialDerivedXiaomiEndpoint && credentialDerivedEndpoint !== undefined));
+		const isCurrentProviderRefresh = () =>
+			providerRefresh === undefined ||
+			("providerId" in providerRefresh
+				? providerRefresh.providerId === options.providerId &&
+					this.#providerRefreshGenerations.get(options.providerId) === providerRefresh.generation
+				: (this.#providerRefreshGenerations.get(options.providerId) ?? 0) ===
+					(providerRefresh.generations.get(options.providerId) ?? 0));
 		const isCurrentDiscovery = () =>
 			isCurrentDiscoveryContext() &&
-			(providerRefresh === undefined ||
-				(providerRefresh.providerId === options.providerId &&
-					this.#providerRefreshGenerations.get(options.providerId) === providerRefresh.generation));
+			(providerRefresh === undefined || "generations" in providerRefresh || isCurrentProviderRefresh());
 		const canPublishCache = () =>
-			isCurrentDiscoveryContext() && (strategy !== "online-if-uncached" || isCurrentDiscovery());
+			isCurrentDiscoveryContext() && (strategy !== "online-if-uncached" || isCurrentProviderRefresh());
 		try {
 			const manager = createModelManager({
 				...options,
