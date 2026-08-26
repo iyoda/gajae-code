@@ -345,7 +345,7 @@ export class InputController {
 	}
 
 	#installOAuthCopyListener(): void {
-		if (typeof this.ctx.ui.addInputListener !== "function") return;
+		if (typeof this.ctx.ui?.addInputListener !== "function") return;
 		this.#oauthCopyUnsubscribe?.();
 		this.#oauthCopyUnsubscribe = this.ctx.ui.addInputListener(data => {
 			if (this.ctx.hasOAuthUrlForCopy?.() !== true) return;
