@@ -442,6 +442,37 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	#itermPetTransport?: ItermPetTransport;
 
+	waitForAgentEnd(): { promise: Promise<void>; dispose: () => void } {
+		const deferred = Promise.withResolvers<void>();
+		let disposed = false;
+		let agentStarted = false;
+		let unsubscribe: (() => void) | undefined;
+		const dispose = () => {
+			if (disposed) return;
+			disposed = true;
+			unsubscribe?.();
+			unsubscribe = undefined;
+		};
+		const listener = (event: AgentSessionEvent) => {
+			if (disposed) return;
+			if (event.type === "agent_start") {
+				agentStarted = true;
+				return;
+			}
+			if (event.type !== "agent_end" || !agentStarted) return;
+			dispose();
+			deferred.resolve();
+		};
+
+		const subscribedUnsubscribe = this.session.subscribe(listener);
+		unsubscribe = subscribedUnsubscribe;
+		if (disposed) {
+			subscribedUnsubscribe();
+		}
+
+		return { promise: deferred.promise, dispose };
+	}
+
 	/**
 	 * Pet-unavailable warning text. The iTerm transport reason is parenthesized
 	 * only when a transport actually reported one; non-iTerm terminals and a
@@ -1148,8 +1179,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
+		if (this.#stopped || this.#isShuttingDown) {
+			throw Object.assign(new Error("Interactive mode stopped"), { code: "cancelled" });
+		}
 		if (this.session.getGoalModeState()?.mode === "exiting") {
 			await this.#goalModeController.beforeGetUserInput();
+		}
+		const deferredSubmission = this.#inputController.takeDeferredSubmission();
+		if (deferredSubmission) {
+			return deferredSubmission;
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<SubmittedUserInput>();
 		let unsubscribeStop = () => {};
@@ -1585,6 +1623,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	stop(): void {
 		const wasInitialized = this.isInitialized;
 		this.#stopped = true;
+		this.#inputController.discardDeferredSubmission();
 		for (const listener of this.#stopListeners) {
 			try {
 				listener();
@@ -1648,6 +1687,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `/btw` owns the shared composer while its panel is open. Never persist a
 		// side-chat draft or pending side-chat images into the main-session draft.
 		const hadActiveBtw = this.#btwController.hasOpenPanel();
+		const deferredSubmission = this.#inputController.takeDeferredSubmissionForShutdown();
+		if (
+			deferredSubmission &&
+			!hadActiveBtw &&
+			this.editor.getText().length === 0 &&
+			this.pendingImages.length === 0
+		) {
+			this.editor.setText(deferredSubmission.text);
+			this.pendingImages = deferredSubmission.images ? [...deferredSubmission.images] : [];
+		}
 		const draftText = selectShutdownDraft(this.editor.getText(), hadActiveBtw);
 		if (hadActiveBtw) this.pendingImages = [];
 		this.#btwController.dispose();
