@@ -156,7 +156,6 @@ describe("model profile activation red-team", () => {
 				},
 			],
 		});
-
 		await expect(
 			activateModelProfile({ session, modelRegistry: registry, settings, profileName: "needs-two" }),
 		).rejects.toThrow(
@@ -190,11 +189,75 @@ describe("model profile activation red-team", () => {
 				},
 			],
 		});
+		const probes: string[] = [];
+		const getApiKeyForProvider = registry.getApiKeyForProvider;
+		registry.getApiKeyForProvider = async (provider: string) => {
+			probes.push(provider);
+			return getApiKeyForProvider(provider);
+		};
 
 		// Only explicitly declared requiredProviders hard-gate activation.
 		// Mapped fallback providers (provider-b) are resolved entry-by-entry at
 		// request time, so activation succeeds and the mapped selector is kept.
 		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: "underdeclared-provider" });
+		expect(settings.get("task.agentModelOverrides").executor).toBe("provider-b/executor");
+		expect(probes).toContain("provider-b");
+	});
+
+	test("AUTHZ: alternative credentials are probed and rewrite an unavailable mapped provider", async () => {
+		const session = fakeSession();
+		const settings = Settings.isolated();
+		const registry = fakeRegistry({
+			missingProviders: ["provider-b"],
+			models: [model("provider-a", "default"), model("provider-c", "executor")],
+			profiles: [
+				{
+					name: "alternative-mapped-provider",
+					requiredProviders: ["provider-a"],
+					alternativeProviderGroups: [["provider-b", "provider-c"]],
+					modelMapping: { default: "provider-a/default", executor: "provider-b/executor" },
+					source: "user",
+				},
+			],
+		});
+
+		await activateModelProfile({
+			session,
+			modelRegistry: registry,
+			settings,
+			profileName: "alternative-mapped-provider",
+		});
+
+		expect(settings.get("task.agentModelOverrides").executor).toBe("provider-c/executor");
+	});
+
+	test("AUTHZ: fallback proxy routing keeps a directly authenticated mapped provider direct", async () => {
+		const session = fakeSession();
+		const settings = Settings.isolated({
+			"modelProfile.proxyProvider": "litellm",
+			"modelProfile.proxyMode": "fallback",
+		});
+		const profile: ModelProfileDefinition = {
+			name: "registry-direct-mapped-provider",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default", executor: "provider-b/executor" },
+			source: "registry",
+		};
+		const registry = {
+			...fakeRegistry({
+				profiles: [profile],
+				models: [
+					model("provider-a", "default"),
+					model("provider-b", "executor"),
+					model("litellm", "provider-b/executor"),
+				],
+			}),
+			getConfiguredProviderIds: () => ["litellm"],
+			getApiKeyForProvider: async (provider: string) => `key-${provider}`,
+		};
+
+		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: profile.name });
+
 		expect(settings.get("task.agentModelOverrides").executor).toBe("provider-b/executor");
 	});
 

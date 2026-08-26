@@ -951,13 +951,25 @@ export async function prepareModelProfileActivation(
 		const requiredProviders = aggregateModelProfileRequiredProviders(profile.requiredProviders, profile);
 		const alternativeGroups = profile.alternativeProviderGroups ?? [];
 		const alternativeSet = new Set(alternativeGroups.flat());
+		const requiredProviderSet = new Set(requiredProviders);
+		const authenticationProbeProviders = new Set<string>([
+			...requiredProviders,
+			...alternativeSet,
+			...deriveModelProfileMappedProviders(profile),
+		]);
 
 		const missingProviders: string[] = [];
 		const authenticatedProviders: string[] = [];
-		for (const provider of requiredProviders) {
-			const apiKey = await options.modelRegistry.getApiKeyForProvider(provider, credentialSessionId);
+		for (const provider of authenticationProbeProviders) {
+			let apiKey: string | undefined;
+			try {
+				apiKey = await options.modelRegistry.getApiKeyForProvider(provider, credentialSessionId);
+			} catch (error) {
+				if (requiredProviderSet.has(provider) && !alternativeSet.has(provider)) throw error;
+				continue;
+			}
 			if (apiKey !== kNoAuth && !isAuthenticated(apiKey)) {
-				missingProviders.push(provider);
+				if (requiredProviderSet.has(provider)) missingProviders.push(provider);
 			} else {
 				authenticatedProviders.push(provider);
 			}
@@ -1034,7 +1046,7 @@ export async function prepareModelProfileActivation(
 			options.modelRegistry.getAvailable?.() ??
 			options.modelRegistry.getAll();
 		let bindings = resolveProfileBindings(profile);
-		if (missingProviders.length > 0 && alternativeGroups.length > 0) {
+		if (alternativeGroups.length > 0) {
 			bindings = rewriteBindingsProviders(bindings, new Set(authenticatedProviders), alternativeGroups);
 		}
 		// Built-in preset selectors are routed through a configured authenticated

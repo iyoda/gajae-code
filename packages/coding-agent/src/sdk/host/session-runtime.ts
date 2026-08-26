@@ -17,7 +17,11 @@ import {
 	tryResolveProxyProviderId,
 } from "../../config/model-profile-activation";
 import { isModelProfileProviderAvailable, projectModelProfileCatalog } from "../../config/model-profile-contract";
-import { type ModelProfileDefinition, resolveProfileBindings } from "../../config/model-profiles";
+import {
+	deriveModelProfileMappedProviders,
+	type ModelProfileDefinition,
+	resolveProfileBindings,
+} from "../../config/model-profiles";
 import { isAuthenticated, kNoAuth } from "../../config/model-registry";
 import { resolveModelChainWithAuth, splitSelectorThinkingSuffix } from "../../config/model-resolver";
 import { type ModelSelectorValue, normalizeModelSelectorValue } from "../../config/model-selector-value";
@@ -35,7 +39,6 @@ import { parseThinkingLevel } from "../../thinking";
 import { ensureBroker } from "../broker/ensure";
 import { SessionIndex } from "../broker/session-index";
 import {
-	collectAuthenticatedProfileProviders,
 	parseSyntheticModelId,
 	resolveSyntheticModelSelection,
 	SYNTHETIC_PROVIDER_ID,
@@ -1155,10 +1158,24 @@ function createQuerySurface(
 	const collectProfileAuthentication = async (
 		profiles: ReadonlyMap<string, ModelProfileDefinition>,
 	): Promise<Set<string>> => {
-		const authenticated = new Set(
-			await collectAuthenticatedProfileProviders(profiles, provider =>
-				ctx.modelRegistry.getApiKeyForProvider(provider, getProfileCredentialSessionId()),
-			),
+		const providers = new Set<string>();
+		for (const profile of profiles.values()) {
+			for (const provider of profile.requiredProviders) providers.add(provider);
+			for (const group of profile.alternativeProviderGroups ?? []) {
+				for (const provider of group) providers.add(provider);
+			}
+			for (const provider of deriveModelProfileMappedProviders(profile)) providers.add(provider);
+		}
+		const authenticated = new Set<string>();
+		await Promise.all(
+			[...providers].map(async provider => {
+				try {
+					const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider, getProfileCredentialSessionId());
+					if (apiKey === kNoAuth || isAuthenticated(apiKey)) authenticated.add(provider);
+				} catch {
+					// A provider whose credential state cannot be read is not currently configurable.
+				}
+			}),
 		);
 		const proxyProviders = new Set<string>();
 		for (const profile of profiles.values()) {

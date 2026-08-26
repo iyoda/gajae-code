@@ -235,6 +235,164 @@ describe("Q27 models.profiles.list", () => {
 		expect(typeof item?.available).toBe("boolean");
 	});
 
+	it("uses authenticated alternative credentials for qualified profile mappings", async () => {
+		const model = (provider: string, id: string): Model =>
+			({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
+		const profile = {
+			name: "registry-alternative-mapped",
+			displayName: "Registry Alternative Mapped",
+			requiredProviders: ["provider-a"],
+			alternativeProviderGroups: [["provider-b", "provider-c"]],
+			modelMapping: { default: "provider-a/default", executor: "provider-b/executor" },
+			source: "registry" as const,
+		};
+		const defaultModel = model("provider-a", "default");
+		const fallbackModel = model("provider-c", "executor");
+		const credentials = new Map<string, string | undefined>([
+			["provider-a", "provider-a-key"],
+			["provider-b", undefined],
+			["provider-c", "provider-c-key"],
+		]);
+		const registry = {
+			getModelProfiles: () => new Map([[profile.name, profile]]),
+			getError: () => undefined,
+			getApiKeyForProvider: async (provider: string) => credentials.get(provider),
+			getConfiguredProviderIds: () => [],
+			getAvailable: () => [defaultModel, fallbackModel],
+			getAvailableForProfileActivation: () => [defaultModel, fallbackModel],
+			getApiKey: async (candidate: Model) => credentials.get(candidate.provider),
+			resolveCanonicalModel: () => undefined,
+			getCanonicalVariants: () => [],
+			getCanonicalId: () => undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated();
+		const ctx = {
+			cwd: "/tmp",
+			workflowGate: undefined,
+			sdkBindings: () => [],
+			sessionManager: {
+				getSessionId: () => "q27-alternative-session",
+				getSessionFile: () => "/tmp/q27-alternative-session.json",
+				getSessionName: () => undefined,
+				getBranch: () => [],
+			},
+			getGoalState: () => undefined,
+			modelRegistry: registry,
+			settings,
+		} as unknown as ExtensionContext;
+
+		const surface = createSdkSurfaceFactory({ ctx, id: "q27-alternative-session", api: {} as ExtensionAPI });
+		const profiles = await surface.query.getModelProfiles!();
+		const item = profiles.find(candidate => (candidate as { id: string }).id === profile.name) as
+			| { available: unknown }
+			| undefined;
+
+		expect(item?.available).toBe(true);
+		expect(typeof item?.available).toBe("boolean");
+	});
+
+	it("keeps fallback-mode availability when a configured proxy is not authenticated but direct auth works", async () => {
+		const model = (provider: string, id: string): Model =>
+			({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
+		const profile = {
+			name: "registry-fallback-proxy",
+			displayName: "Registry Fallback Proxy",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry" as const,
+		};
+		const registry = {
+			getModelProfiles: () => new Map([[profile.name, profile]]),
+			getError: () => undefined,
+			getApiKeyForProvider: async (provider: string) => (provider === "provider-a" ? "provider-a-key" : undefined),
+			getConfiguredProviderIds: () => ["litellm"],
+			getAvailable: () => [model("provider-a", "default")],
+			getAvailableForProfileActivation: () => [model("provider-a", "default")],
+			getApiKey: async () => "provider-a-key",
+			resolveCanonicalModel: () => undefined,
+			getCanonicalVariants: () => [],
+			getCanonicalId: () => undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"modelProfile.proxyProvider": "litellm",
+			"modelProfile.proxyMode": "fallback",
+		});
+		const ctx = {
+			cwd: "/tmp",
+			workflowGate: undefined,
+			sdkBindings: () => [],
+			sessionManager: {
+				getSessionId: () => "q27-fallback-proxy-session",
+				getSessionFile: () => "/tmp/q27-fallback-proxy-session.json",
+				getSessionName: () => undefined,
+				getBranch: () => [],
+			},
+			getGoalState: () => undefined,
+			modelRegistry: registry,
+			settings,
+		} as unknown as ExtensionContext;
+
+		const surface = createSdkSurfaceFactory({ ctx, id: "q27-fallback-proxy-session", api: {} as ExtensionAPI });
+		const profiles = await surface.query.getModelProfiles!();
+		const item = profiles.find(candidate => (candidate as { id: string }).id === profile.name) as
+			| { available: unknown }
+			| undefined;
+
+		expect(item?.available).toBe(true);
+		expect(typeof item?.available).toBe("boolean");
+	});
+
+	it("rejects always-mode availability when its configured proxy is unavailable", async () => {
+		const model = (provider: string, id: string): Model =>
+			({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
+		const profile = {
+			name: "registry-always-proxy",
+			displayName: "Registry Always Proxy",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry" as const,
+		};
+		const registry = {
+			getModelProfiles: () => new Map([[profile.name, profile]]),
+			getError: () => undefined,
+			getApiKeyForProvider: async (provider: string) => (provider === "provider-a" ? "provider-a-key" : undefined),
+			getConfiguredProviderIds: () => [],
+			getAvailable: () => [model("provider-a", "default")],
+			getAvailableForProfileActivation: () => [model("provider-a", "default")],
+			getApiKey: async () => "provider-a-key",
+			resolveCanonicalModel: () => undefined,
+			getCanonicalVariants: () => [],
+			getCanonicalId: () => undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"modelProfile.proxyProvider": "litellm",
+			"modelProfile.proxyMode": "always",
+		});
+		const ctx = {
+			cwd: "/tmp",
+			workflowGate: undefined,
+			sdkBindings: () => [],
+			sessionManager: {
+				getSessionId: () => "q27-always-proxy-session",
+				getSessionFile: () => "/tmp/q27-always-proxy-session.json",
+				getSessionName: () => undefined,
+				getBranch: () => [],
+			},
+			getGoalState: () => undefined,
+			modelRegistry: registry,
+			settings,
+		} as unknown as ExtensionContext;
+
+		const surface = createSdkSurfaceFactory({ ctx, id: "q27-always-proxy-session", api: {} as ExtensionAPI });
+		const profiles = await surface.query.getModelProfiles!();
+		const item = profiles.find(candidate => (candidate as { id: string }).id === profile.name) as
+			| { available: unknown }
+			| undefined;
+
+		expect(item?.available).toBe(false);
+		expect(typeof item?.available).toBe("boolean");
+	});
+
 	it("retains one sorted catalog revision across pages and refreshes on a cursorless request", async () => {
 		const oldCatalog = Array.from({ length: 6 }, (_, index) => ({
 			id: `old-${index}`,

@@ -402,6 +402,9 @@ type AcceptedGeneration = {
 	manifestSha256: string;
 	acceptedAt: string;
 	etag?: string;
+	/** Complete normalized manifest URL used to scope the validator token. */
+	manifestUrl?: string;
+	/** @deprecated Kept only to read pre-URL-scoped cache rows; never used for ETag reuse. */
 	manifestOrigin?: string;
 	retainedProfiles: ModelPresetRegistryProfiles["profiles"];
 	retainedPresets: ModelPresetRegistryPresets["presets"];
@@ -636,6 +639,10 @@ export function canonicalModelPresetRegistryJson(value: unknown): string {
 
 function sha256(bytes: Uint8Array | string): string {
 	return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function serializedJsonByteLength(value: unknown): number {
+	return Buffer.byteLength(`${JSON.stringify(value)}\n`, "utf8");
 }
 
 function parseCanonicalDocument<T>(bytes: Uint8Array, description: string, schema: z.ZodType<T>): T {
@@ -879,6 +886,26 @@ function parseState(value: unknown): RegistryState {
 			.refine(values => new Set(values).size === values.length)
 			.safeParse(generation.retainedDynamicProviders);
 		const retainedFromRevision = generation.retainedFromRevision;
+		let manifestUrl: string | undefined;
+		if (generation.manifestUrl !== undefined) {
+			if (typeof generation.manifestUrl !== "string")
+				throw new Error(`Registry cache generation ${index} is invalid.`);
+			try {
+				const parsed = new URL(generation.manifestUrl);
+				if (
+					parsed.protocol !== "https:" ||
+					parsed.username ||
+					parsed.password ||
+					parsed.search ||
+					parsed.hash ||
+					parsed.href !== generation.manifestUrl
+				)
+					throw new Error();
+				manifestUrl = parsed.href;
+			} catch {
+				throw new Error(`Registry cache generation ${index} is invalid.`);
+			}
+		}
 		if (
 			!manifest.success ||
 			!snapshot.success ||
@@ -908,6 +935,7 @@ function parseState(value: unknown): RegistryState {
 			manifestSha256: generation.manifestSha256,
 			acceptedAt: generation.acceptedAt,
 			etag: generation.etag,
+			manifestUrl,
 			manifestOrigin: generation.manifestOrigin,
 			retainedProfiles: retainedProfiles.data,
 			retainedPresets: retainedPresets.data,
@@ -996,7 +1024,7 @@ async function exactFileIdentity(file: string): Promise<NativeExactFileIdentity>
 async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
 	const serialized = `${JSON.stringify(value)}\n`;
-	if (path.basename(file) === "state.json" && Buffer.byteLength(serialized) > MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
+	if (path.basename(file) === "state.json" && serializedJsonByteLength(value) > MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)
 		throw new Error("Registry cache state exceeds its durable size limit.");
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	const handle = await fs.open(temporary, "wx", 0o600);
@@ -1395,6 +1423,21 @@ function validateStateGenerations(
 		if (byRevision.has(revision)) throw new Error(`Registry history contains duplicate revision ${revision}.`);
 		byRevision.set(revision, generation);
 	}
+	const highestHistoryRevision = [...byRevision.keys()].reduce((highest, revision) => Math.max(highest, revision), 0);
+	if (state.activeRevision !== undefined && !byRevision.has(state.activeRevision))
+		throw new Error(`Registry selected revision ${state.activeRevision} is missing from accepted history.`);
+	if (state.highestSeenRevision === undefined) {
+		if (highestHistoryRevision > 0 || state.highestSeenManifestSha256 !== undefined)
+			throw new Error("Registry highest-seen manifest checkpoint is incomplete.");
+	} else {
+		if (state.highestSeenManifestSha256 === undefined)
+			throw new Error("Registry highest-seen manifest checkpoint is incomplete.");
+		if (state.highestSeenRevision < highestHistoryRevision)
+			throw new Error("Registry highest-seen revision is older than accepted history.");
+		const checkpoint = byRevision.get(state.highestSeenRevision);
+		if (!checkpoint || checkpoint.manifestSha256 !== state.highestSeenManifestSha256)
+			throw new Error("Registry highest-seen manifest checkpoint is not bound to accepted history.");
+	}
 	const validated = new Set<number>();
 	const visiting = new Set<number>();
 	const visit = (generation: AcceptedGeneration, ancestryDepth = 0): void => {
@@ -1459,23 +1502,69 @@ function withoutRetainedEntries(generation: AcceptedGeneration): AcceptedGenerat
 	};
 }
 
-async function recordFailure(agentDir: string, error: unknown, now: Date): Promise<void> {
+function recoverLatestVerifiedGeneration(
+	state: RegistryState,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): AcceptedGeneration | undefined {
+	let latest: AcceptedGeneration | undefined;
+	for (const generation of state.history) {
+		try {
+			const verified = validateGeneration(generation, trustedKeys);
+			if (!latest || verified.manifest.signed.registryRevision > latest.manifest.signed.registryRevision)
+				latest = verified;
+		} catch {
+			// A recovery checkpoint must come from a complete, independently verified generation.
+		}
+	}
+	return latest;
+}
+
+function recoveryStateFromGeneration(generation: AcceptedGeneration | undefined): RegistryState {
+	if (!generation) return { version: 1, history: [] };
+	const checkpoint = withoutRetainedEntries(generation);
+	return {
+		version: 1,
+		activeRevision: checkpoint.manifest.signed.registryRevision,
+		highestSeenRevision: checkpoint.manifest.signed.registryRevision,
+		highestSeenManifestSha256: checkpoint.manifestSha256,
+		history: [checkpoint],
+	};
+}
+
+async function recordFailure(
+	agentDir: string,
+	error: unknown,
+	now: Date,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): Promise<void> {
 	const paths = registryPaths(agentDir);
 	await withFileLock(
 		paths.transaction,
 		async () => {
 			let state: RegistryState;
-			let replacedUnreadableState = false;
+			let stateIsVerified = true;
 			try {
 				state = loadStateSync(agentDir);
 			} catch {
 				state = { version: 1, history: [] };
-				replacedUnreadableState = true;
+				stateIsVerified = false;
 			}
-			if (replacedUnreadableState) {
-				const control = loadControlSync(agentDir);
-				if (control.pinnedRevision !== undefined)
-					await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
+			if (stateIsVerified) {
+				try {
+					validateStateGenerations(state, trustedKeys);
+				} catch {
+					state = recoveryStateFromGeneration(recoverLatestVerifiedGeneration(state, trustedKeys));
+					stateIsVerified = false;
+				}
+			}
+			if (!stateIsVerified) {
+				let control: RegistryControl = { version: 1, disabled: false };
+				try {
+					control = loadControlSync(agentDir);
+				} catch {
+					// An unreadable control file cannot safely preserve a stale pin or disablement.
+				}
+				await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 			}
 			await writeAtomicJson(paths.state, {
 				...state,
@@ -1488,8 +1577,26 @@ async function recordFailure(agentDir: string, error: unknown, now: Date): Promi
 }
 
 const refreshSingleFlight = new Map<string, Promise<ModelPresetRegistryRefreshResult>>();
+const registryChangeListeners = new Map<string, Set<() => void>>();
 const refreshDependencyIds = new WeakMap<object, number>();
 let nextRefreshDependencyId = 1;
+
+function subscribeRegistryChanges(agentDir: string, listener: () => void): () => void {
+	let listeners = registryChangeListeners.get(agentDir);
+	if (!listeners) {
+		listeners = new Set();
+		registryChangeListeners.set(agentDir, listeners);
+	}
+	listeners.add(listener);
+	return () => {
+		listeners?.delete(listener);
+		if (listeners?.size === 0) registryChangeListeners.delete(agentDir);
+	};
+}
+
+function notifyRegistryChanges(agentDir: string): void {
+	for (const listener of registryChangeListeners.get(agentDir) ?? []) listener();
+}
 
 function refreshDependencyId(value: object): number {
 	const existing = refreshDependencyIds.get(value);
@@ -1547,16 +1654,22 @@ async function refreshModelPresetRegistryInner(
 				if (control.disabled || environmentDisabled())
 					return { status: "disabled", revision: control.pinnedRevision };
 				const state = loadStateSync(agentDir);
+				const trustedKeys = effectiveTrustedKeys(dependencies);
 				let stateIsVerified = true;
+				let recoveryGeneration: AcceptedGeneration | undefined;
 				try {
-					validateStateGenerations(state, effectiveTrustedKeys(dependencies));
+					validateStateGenerations(state, trustedKeys);
 				} catch {
 					stateIsVerified = false;
+					recoveryGeneration = recoverLatestVerifiedGeneration(state, trustedKeys);
 				}
 				const usableState: RegistryState = stateIsVerified
 					? state
 					: { ...state, activeRevision: undefined, history: [] };
 				const effectivePinnedRevision = stateIsVerified ? control.pinnedRevision : undefined;
+				const trustedHighestSeenRevision = stateIsVerified
+					? state.highestSeenRevision
+					: recoveryGeneration?.manifest.signed.registryRevision;
 				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
 						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
@@ -1570,7 +1683,7 @@ async function refreshModelPresetRegistryInner(
 					manifestUrl,
 					dependencies.maxManifestBytes ?? MODEL_PRESET_REGISTRY_MAX_MANIFEST_BYTES,
 					dependencies,
-					latest?.etag && latest.manifestOrigin === manifestUrl.origin ? { "If-None-Match": latest.etag } : {},
+					latest?.etag && latest.manifestUrl === manifestUrl.href ? { "If-None-Match": latest.etag } : {},
 				);
 				if (manifestResponse.response.status === 304) {
 					const currentState = loadStateSync(agentDir);
@@ -1614,11 +1727,12 @@ async function refreshModelPresetRegistryInner(
 				verifyManifest(manifest, effectiveTrustedKeys(dependencies));
 				assertManifestBindings(manifest);
 				const manifestSha256 = sha256(manifestBytes);
-				if (state.highestSeenRevision !== undefined) {
-					if (manifest.signed.registryRevision < state.highestSeenRevision)
+				if (trustedHighestSeenRevision !== undefined) {
+					if (manifest.signed.registryRevision < trustedHighestSeenRevision)
 						throw new Error("Registry revision downgrade rejected.");
 					if (
-						manifest.signed.registryRevision === state.highestSeenRevision &&
+						manifest.signed.registryRevision === trustedHighestSeenRevision &&
+						stateIsVerified &&
 						state.highestSeenManifestSha256 !== undefined &&
 						manifestSha256 !== state.highestSeenManifestSha256
 					)
@@ -1690,6 +1804,7 @@ async function refreshModelPresetRegistryInner(
 						manifestSha256,
 						acceptedAt: now.toISOString(),
 						etag: manifestResponse.response.headers.get("etag") ?? undefined,
+						manifestUrl: manifestUrl.href,
 						manifestOrigin: manifestUrl.origin,
 						...retained,
 						retainedFromRevision: hasRetained
@@ -1757,11 +1872,11 @@ async function refreshModelPresetRegistryInner(
 							activeRevision:
 								effectivePinnedRevision ??
 								(usableState.activeRevision !== undefined &&
-								state.highestSeenRevision !== undefined &&
-								usableState.activeRevision < state.highestSeenRevision
+								trustedHighestSeenRevision !== undefined &&
+								usableState.activeRevision < trustedHighestSeenRevision
 									? usableState.activeRevision
 									: manifest.signed.registryRevision),
-							highestSeenRevision: Math.max(state.highestSeenRevision ?? 0, manifest.signed.registryRevision),
+							highestSeenRevision: Math.max(trustedHighestSeenRevision ?? 0, manifest.signed.registryRevision),
 							highestSeenManifestSha256: manifestSha256,
 							history,
 							lastCheckedAt: now.toISOString(),
@@ -1773,17 +1888,16 @@ async function refreshModelPresetRegistryInner(
 				let candidate = buildCandidate(compactRetention);
 				validateStateGenerations(candidate.nextState, effectiveTrustedKeys(dependencies));
 				if (
-					Buffer.byteLength(JSON.stringify(candidate.nextState)) > maxStateBytes &&
+					serializedJsonByteLength(candidate.nextState) > maxStateBytes &&
 					!compactRetention &&
 					latest !== undefined &&
-					effectivePinnedRevision === undefined &&
 					(usableState.activeRevision === undefined || usableState.activeRevision === latestRevision)
 				) {
 					compactRetention = true;
 					candidate = buildCandidate(true);
 					validateStateGenerations(candidate.nextState, effectiveTrustedKeys(dependencies));
 				}
-				if (Buffer.byteLength(JSON.stringify(candidate.nextState)) > maxStateBytes)
+				if (serializedJsonByteLength(candidate.nextState) > maxStateBytes)
 					throw new Error("Registry cache state exceeds its durable size limit.");
 				const { nextState, retained } = candidate;
 				if (!stateIsVerified && control.pinnedRevision !== undefined)
@@ -1802,7 +1916,7 @@ async function refreshModelPresetRegistryInner(
 		);
 	} catch (error) {
 		const redacted = new Error(safeError(error));
-		await recordFailure(agentDir, redacted, now).catch(() => undefined);
+		await recordFailure(agentDir, redacted, now, effectiveTrustedKeys(dependencies)).catch(() => undefined);
 		throw redacted;
 	}
 }
@@ -1817,6 +1931,7 @@ export async function setModelPresetRegistryDisabled(
 		const current = loadControlSync(agentDir);
 		await writeAtomicJson(paths.control, { ...current, disabled });
 	});
+	notifyRegistryChanges(agentDir);
 }
 
 export async function setModelPresetRegistryPin(
@@ -1842,6 +1957,7 @@ export async function setModelPresetRegistryPin(
 		const current = loadControlSync(agentDir);
 		await writeAtomicJson(paths.control, { ...current, pinnedRevision: revision });
 	});
+	notifyRegistryChanges(agentDir);
 }
 
 export async function rollbackModelPresetRegistry(
@@ -1867,6 +1983,7 @@ export async function rollbackModelPresetRegistry(
 		await writeAtomicJson(paths.state, { ...state, activeRevision: revision, lastError: undefined });
 		await writeAtomicJson(paths.control, { ...control, pinnedRevision: undefined });
 	});
+	notifyRegistryChanges(agentDir);
 }
 
 export function getModelPresetRegistryStatus(
@@ -1974,20 +2091,29 @@ export function refreshModelPresetRegistryInBackground(
 			cacheHealth: current.cacheHealth,
 		});
 	let publishedFingerprint = publicationFingerprint(status);
+	const publishCurrentStatus = (): void => {
+		if (cancelled) return;
+		try {
+			const currentStatus = getModelPresetRegistryStatus({ ...dependencies, agentDir });
+			const currentFingerprint = publicationFingerprint(currentStatus);
+			if (currentFingerprint !== publishedFingerprint) {
+				publishedFingerprint = currentFingerprint;
+				try {
+					onAccepted?.();
+				} catch {
+					// Consumer publication must not make a durable local control mutation fail.
+				}
+			}
+		} catch {
+			// The origin refresh below records bounded diagnostics; local publication remains best-effort.
+		}
+	};
+	const unsubscribe = subscribeRegistryChanges(agentDir, () => queueMicrotask(publishCurrentStatus));
 	let timer: Timer | undefined;
 	const schedule = (delayMs: number): void => {
 		if (cancelled) return;
 		timer = setTimeout(() => {
-			try {
-				const currentStatus = getModelPresetRegistryStatus({ ...dependencies, agentDir });
-				const currentFingerprint = publicationFingerprint(currentStatus);
-				if (currentFingerprint !== publishedFingerprint) {
-					publishedFingerprint = currentFingerprint;
-					onAccepted?.();
-				}
-			} catch {
-				// The origin refresh below records bounded diagnostics; local publication remains best-effort.
-			}
+			publishCurrentStatus();
 			void refreshModelPresetRegistry({ ...dependencies, agentDir, knownManifestSha256 })
 				.then(result => {
 					if (result.status === "updated") knownManifestSha256 = result.manifestSha256;
@@ -2013,6 +2139,7 @@ export function refreshModelPresetRegistryInBackground(
 	schedule(initialDelay);
 	return () => {
 		cancelled = true;
+		unsubscribe();
 		if (timer) clearTimeout(timer);
 	};
 }

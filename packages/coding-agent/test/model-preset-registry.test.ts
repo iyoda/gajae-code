@@ -16,6 +16,7 @@ import {
 	type ModelPresetRegistrySnapshot,
 	type ModelPresetRegistryTrustedKey,
 	refreshModelPresetRegistry as refreshModelPresetRegistryImpl,
+	refreshModelPresetRegistryInBackground,
 	rollbackModelPresetRegistry as rollbackModelPresetRegistryImpl,
 	setModelPresetRegistryDisabled,
 	setModelPresetRegistryPin as setModelPresetRegistryPinImpl,
@@ -733,6 +734,37 @@ describe("signed model preset registry", () => {
 		).resolves.toMatchObject({ status: "updated", revision: 2 });
 	});
 
+	test("does not reuse an ETag across manifest paths on the same origin", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(data.privateKey, 1);
+		const firstUrl = "https://registry.example.test/one/latest.json";
+		const secondUrl = "https://registry.example.test/two/latest.json";
+		await expect(
+			data.run(() =>
+				refreshModelPresetRegistryImpl({
+					agentDir: data.agentDir,
+					manifestUrl: firstUrl,
+					fetch: registryFetch(registry),
+				}),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		let observedIfNoneMatch: string | null = null;
+		const secondFetch = (async (_input, init) => {
+			observedIfNoneMatch = new Headers(init?.headers).get("if-none-match");
+			return new Response(registry.manifestBody);
+		}) as typeof fetch;
+		await expect(
+			data.run(() =>
+				refreshModelPresetRegistryImpl({
+					agentDir: data.agentDir,
+					manifestUrl: secondUrl,
+					fetch: secondFetch,
+				}),
+			),
+		).rejects.toThrow(/snapshot|request failed|schema/i);
+		expect(observedIfNoneMatch).toBeNull();
+	});
+
 	test.skipIf(process.platform !== "win32")("replaces existing registry state repeatedly on Windows", async () => {
 		const data = await fixture();
 		for (let revision = 1; revision <= 5; revision++) await accept(data, signedRegistry(data.privateKey, revision));
@@ -772,6 +804,48 @@ describe("signed model preset registry", () => {
 		});
 		expect(status.activeRevision).toBeUndefined();
 		expect(status.highestSeenRevision).toBeUndefined();
+	});
+
+	test("ignores an unbound anti-rollback floor and keeps a verified recovery checkpoint", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.highestSeenRevision = 99_999_999;
+		state.highestSeenManifestSha256 = "f".repeat(64);
+		await Bun.write(statePath, JSON.stringify(state));
+		await expect(accept(data, signedRegistry(data.privateKey, 2))).resolves.toMatchObject({
+			status: "updated",
+			revision: 2,
+		});
+		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
+			highestSeenRevision: 2,
+			pinnedRevision: undefined,
+		});
+	});
+
+	test("preserves a verified checkpoint when refresh fails after state corruption", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.highestSeenRevision = 99_999_999;
+		state.highestSeenManifestSha256 = "f".repeat(64);
+		await Bun.write(statePath, JSON.stringify(state));
+		await expect(
+			refreshModelPresetRegistry({
+				agentDir: data.agentDir,
+				manifestUrl,
+				fetch: (async () => {
+					throw new Error("offline");
+				}) as unknown as typeof fetch,
+			}),
+		).rejects.toThrow("Registry refresh failed.");
+		const recoveredState = await Bun.file(statePath).json();
+		expect(recoveredState.highestSeenRevision).toBe(1);
+		expect(recoveredState.highestSeenManifestSha256).toBe(state.history[0].manifestSha256);
 	});
 
 	test("falls back cold, remains usable offline warm, and rejects cache corruption without secret leakage", async () => {
@@ -1060,6 +1134,35 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("publishes local controls without waiting for the refresh interval", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		await accept(data, signedRegistry(data.privateKey, 2));
+		const onAccepted = vi.fn();
+		const dispose = refreshModelPresetRegistryInBackground(
+			{
+				agentDir: data.agentDir,
+				automaticRefresh: true,
+				startupDelayMs: 60_000,
+				refreshIntervalMs: 60_000,
+				fetch: (async () => {
+					throw new Error("offline");
+				}) as unknown as typeof fetch,
+			},
+			onAccepted,
+		);
+		try {
+			await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+			for (let attempt = 0; attempt < 20 && onAccepted.mock.calls.length < 1; attempt++) await Bun.sleep(1);
+			expect(onAccepted).toHaveBeenCalledTimes(1);
+			await setModelPresetRegistryPin({ agentDir: data.agentDir });
+			for (let attempt = 0; attempt < 20 && onAccepted.mock.calls.length < 2; attempt++) await Bun.sleep(1);
+			expect(onAccepted).toHaveBeenCalledTimes(2);
+		} finally {
+			dispose();
+		}
+	});
+
 	test("does not publish an in-flight refresh callback after registry disposal", async () => {
 		const data = await fixture();
 		const remote = signedRegistry(data.privateKey, 1, [registryProfile("late-profile")]);
@@ -1339,5 +1442,27 @@ describe("signed model preset registry", () => {
 			}),
 		).rejects.toThrow(/durable size limit/i);
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(1);
+	});
+
+	test("counts the durable state trailing newline against the byte budget", async () => {
+		const data = await fixture();
+		const now = () => new Date("2026-08-26T00:00:00.000Z");
+		const first = signedRegistry(data.privateKey, 1);
+		await accept(data, first, registryFetch(first), { now });
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const firstState = await Bun.file(statePath).json();
+		const second = signedRegistry(data.privateKey, 2);
+		await expect(
+			accept(data, second, registryFetch(second), { now, maxStateBytes: 10 * 1024 * 1024 }),
+		).resolves.toMatchObject({ status: "updated", revision: 2 });
+		const secondState = await Bun.file(statePath).json();
+		const secondStateBytes = Buffer.byteLength(JSON.stringify(secondState), "utf8");
+		await Bun.write(statePath, `${JSON.stringify(firstState)}\n`);
+		await expect(
+			accept(data, second, registryFetch(second), { now, maxStateBytes: secondStateBytes }),
+		).rejects.toThrow(/durable size limit/i);
+		await expect(
+			accept(data, second, registryFetch(second), { now, maxStateBytes: secondStateBytes + 1 }),
+		).resolves.toMatchObject({ status: "updated", revision: 2 });
 	});
 });

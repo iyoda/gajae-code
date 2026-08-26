@@ -208,6 +208,46 @@ describe("model selector profiles", () => {
 		expect(rendered).toContain("fresh-registry-model");
 	});
 
+	test("catalog additions refresh preset authentication state", async () => {
+		installTestTheme();
+		const liveProfile: ModelProfileDefinition = {
+			name: "registry-auth-refresh",
+			displayName: "Auth Refresh",
+			providerGroup: "LIVE CATALOG",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/fresh-model" },
+			source: "registry",
+		};
+		const models = [model("provider-a", "existing-model")];
+		let catalogChanged: (() => void) | undefined;
+		const registry = createRegistry() as unknown as TestModelRegistry & {
+			getAvailable: () => Model[];
+			getAll: () => Model[];
+			getModelProfiles: () => ReadonlyMap<string, ModelProfileDefinition>;
+			onCatalogChanged: (listener: () => void) => () => void;
+		};
+		registry.getAvailable = () => models;
+		registry.getAll = () => models;
+		registry.getModelProfiles = () => new Map([[liveProfile.name, liveProfile]]);
+		registry.getModelProfile = (name: string) => (name === liveProfile.name ? liveProfile : undefined);
+		registry.getApiKeyForProvider = async () => "provider-a-key";
+		registry.onCatalogChanged = listener => {
+			catalogChanged = listener;
+			return () => {};
+		};
+
+		const selector = createSelector(() => {}, { registry });
+		await Bun.sleep(10);
+		let rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("✗ LIVE CATALOG");
+
+		models.push(model("provider-a", "fresh-model"));
+		catalogChanged?.();
+		await Bun.sleep(10);
+		rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("✓ LIVE CATALOG");
+	});
+
 	test("renders a registry preset unavailable when its configured proxy lacks the model", async () => {
 		installTestTheme();
 		const proxyProfile: ModelProfileDefinition = {
@@ -312,6 +352,34 @@ describe("model selector profiles", () => {
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(rendered).toContain("REGISTRY ALWAYS");
 		expect(rendered).toContain("✗ REGISTRY ALWAYS");
+	});
+
+	test("keeps a registry preset available in fallback mode with direct auth and an unauthenticated proxy", async () => {
+		installTestTheme();
+		const fallbackProfile: ModelProfileDefinition = {
+			name: "registry-fallback",
+			displayName: "Registry Fallback",
+			providerGroup: "REGISTRY FALLBACK",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "registry",
+		};
+		const registry = createRegistry() as unknown as TestModelRegistry;
+		registry.getModelProfiles = () => new Map([[fallbackProfile.name, fallbackProfile]]);
+		registry.getModelProfile = (name: string) => (name === fallbackProfile.name ? fallbackProfile : undefined);
+		registry.getConfiguredProviderIds = () => ["litellm"];
+		registry.getApiKeyForProvider = (async (provider: string) =>
+			provider === "provider-a" ? "direct-key" : undefined) as typeof registry.getApiKeyForProvider;
+		const selector = createSelector(() => {}, {
+			registry,
+			settings: Settings.isolated({
+				"modelProfile.proxyProvider": "litellm",
+				"modelProfile.proxyMode": "fallback",
+			}),
+		});
+		await Bun.sleep(10);
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("✓ REGISTRY FALLBACK");
 	});
 
 	beforeAll(async () => {

@@ -102,7 +102,7 @@ export function createSdkHostModelRegistryLoader(
 	const retireEntry = (scopeKey: string, entry: Promise<OwnedModelRegistry>): void => {
 		if ((activeScopes.get(scopeKey) ?? 0) > 0) {
 			const retired = retiredRegistries.get(scopeKey) ?? [];
-			retired.push(entry);
+			if (!retired.includes(entry)) retired.push(entry);
 			retiredRegistries.set(scopeKey, retired);
 			return;
 		}
@@ -156,15 +156,26 @@ export function createSdkHostModelRegistryLoader(
 			}
 		}
 		const owned = await cachedRegistry;
-		if (disposed) {
+		if (disposed || disposedEntries.has(cachedRegistry) || cachedRegistries.get(scopeKey) !== cachedRegistry) {
 			retireEntry(scopeKey, cachedRegistry);
 			throw new Error("SDK host model registry loader is disposed.");
 		}
 		cachedRegistries.delete(scopeKey);
 		cachedRegistries.set(scopeKey, cachedRegistry);
 		const registry = owned.registry;
-		if (loadSettings) registry.setScopedSettings(await loadSettings(context));
+		if (loadSettings) {
+			const registrySettings = await loadSettings(context);
+			if (disposed || disposedEntries.has(cachedRegistry)) {
+				retireEntry(scopeKey, cachedRegistry);
+				throw new Error("SDK host model registry loader is disposed.");
+			}
+			registry.setScopedSettings(registrySettings);
+		}
 		await registry.refresh("offline");
+		if (disposed || disposedEntries.has(cachedRegistry)) {
+			retireEntry(scopeKey, cachedRegistry);
+			throw new Error("SDK host model registry loader is disposed.");
+		}
 		return registry;
 	};
 	return Object.assign(loadRegistry, {

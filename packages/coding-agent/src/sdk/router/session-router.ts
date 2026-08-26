@@ -2076,7 +2076,7 @@ export class SessionRouter {
 					this.#failBarrier(attached, "protocol error: malformed correlated sequence coordinate");
 					return;
 				}
-				if (sequenceClaim.claimed && correlatedSeq !== sequenceClaim.seq) {
+				if (sequenceClaim.claimed && correlatedSeq !== undefined && correlatedSeq !== sequenceClaim.seq) {
 					this.#failBarrier(attached, "protocol error: inconsistent sequence coordinate");
 					return;
 				}

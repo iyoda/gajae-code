@@ -33,6 +33,7 @@ import {
 
 import { isModelProfileProviderAvailable } from "../../config/model-profile-contract";
 import {
+	deriveModelProfileMappedProviders,
 	getModelProfilePresentation,
 	groupModelProfilesForPresetLanding,
 	type ModelProfileDefinition,
@@ -1349,7 +1350,9 @@ export class ModelSelectorComponent extends Container {
 	#getProfileAuthenticatedProviders(profile: ModelProfileDefinition): Set<string> {
 		if (profile.source !== "user" && inspectProxyProviderId(this.#settings).status === "invalid") return new Set();
 		const authenticated = new Set(
-			profileRequiredProviders(profile).filter(provider => this.#isProviderAuthenticated(provider) === true),
+			[...this.#providerAuthById]
+				.filter(([, providerAuthenticated]) => providerAuthenticated)
+				.map(([provider]) => provider),
 		);
 		const proxyProvider = profile.source === "user" ? undefined : tryResolveProxyProviderId(this.#settings);
 		if (proxyProvider !== undefined && this.#isProviderAuthenticated(proxyProvider) === true) {
@@ -1489,12 +1492,18 @@ export class ModelSelectorComponent extends Container {
 
 	async #refreshProviderAuth(): Promise<void> {
 		const refreshGeneration = ++this.#providerAuthRefreshGeneration;
+		this.#providerAuthById = new Map();
+		this.#bareProfileAuthByName = new Map();
 		const availableModels = this.#getProfileAvailableModels();
 		const resolutionRegistry = this.#createProfileResolutionRegistry(availableModels);
 		const providers = new Set<string>();
 		for (const profiles of this.#getPresetGroups().values()) {
 			for (const profile of profiles) {
 				for (const provider of profileRequiredProviders(profile)) providers.add(provider);
+				for (const group of profile.alternativeProviderGroups ?? []) {
+					for (const provider of group) providers.add(provider);
+				}
+				for (const provider of deriveModelProfileMappedProviders(profile)) providers.add(provider);
 				if (profile.source !== "user") {
 					const proxyProvider = tryResolveProxyProviderId(this.#settings);
 					if (proxyProvider !== undefined) providers.add(proxyProvider);
