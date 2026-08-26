@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `AuthGatewayServerOptions` now requires `providerScope` and `listModels`; direct `@gajae-code/ai` callers must construct one gateway instance per provider, pass the provider-filtered source catalog, and have `resolveModel` return the exact catalog object for the requested model. This matches the mandatory `--provider=<id>` CLI migration and prevents cross-provider model and credential ambiguity.
+- `AuthGatewayServerOptions` now requires `providerScope`; `AuthGatewayBootOptions` requires the provider-filtered `listModels` callback and an exact-catalog-object `resolveModel`. Direct `@gajae-code/ai` callers must construct one gateway instance per provider and pass a provider-filtered source catalog. This matches the mandatory `--provider=<id>` CLI migration and prevents cross-provider model and credential ambiguity.
 - `AuthGatewayBootOptions` now requires live authority callbacks (`hasProviderCredential`, `reloadProviderCredentials`, and `validateProviderCredential`). Gateway dispatch holds the authority lease through `streamSimple()` admission and rejects credentials revoked during asynchronous selection instead of sending a stale key.
 - `auth-broker serve` now requires an `AuthCredentialStore` with atomic `allocateMonotonicSequence` support for durable broker incarnation epochs; unsupported custom stores fail closed before binding and must migrate to the durable cache-backed contract.
 
