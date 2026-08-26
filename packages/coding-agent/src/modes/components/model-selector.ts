@@ -25,6 +25,7 @@ import {
 import {
 	getProxyRoutableProviders,
 	inspectProxyProviderId,
+	requiresQualifiedModelProfileRoleResolution,
 	resolveProxyMode,
 	rewriteSelectorForProxy,
 	tryResolveProxyProviderId,
@@ -1325,6 +1326,26 @@ export class ModelSelectorComponent extends Container {
 		return this.#providerAuthById.get(providerId);
 	}
 
+	#getProfileAvailableModels(): Model[] {
+		const getAvailableForProfileActivation = this.#modelRegistry.getAvailableForProfileActivation;
+		return typeof getAvailableForProfileActivation === "function"
+			? getAvailableForProfileActivation.call(this.#modelRegistry)
+			: this.#modelRegistry.getAvailable();
+	}
+
+	#createProfileResolutionRegistry(availableModels: readonly Model[]) {
+		return {
+			getAvailable: () => availableModels as Model[],
+			getApiKey: this.#modelRegistry.getApiKey.bind(this.#modelRegistry),
+			resolveCanonicalModel: this.#modelRegistry.resolveCanonicalModel?.bind(this.#modelRegistry),
+			getCanonicalVariants: this.#modelRegistry.getCanonicalVariants?.bind(this.#modelRegistry),
+			getCanonicalId: this.#modelRegistry.getCanonicalId?.bind(this.#modelRegistry),
+			resolveModelByLookupAlias: this.#modelRegistry.resolveModelByLookupAlias?.bind(this.#modelRegistry),
+			lookupAliasExists: this.#modelRegistry.lookupAliasExists?.bind(this.#modelRegistry),
+			clearCanonicalVariant: this.#modelRegistry.clearCanonicalVariant?.bind(this.#modelRegistry),
+		};
+	}
+
 	#getProfileAuthenticatedProviders(profile: ModelProfileDefinition): Set<string> {
 		if (profile.source !== "user" && inspectProxyProviderId(this.#settings).status === "invalid") return new Set();
 		const authenticated = new Set(
@@ -1345,7 +1366,7 @@ export class ModelSelectorComponent extends Container {
 			selector,
 			proxyProvider,
 			resolveProxyMode(this.#settings),
-			this.#modelRegistry.getAvailable(),
+			this.#getProfileAvailableModels(),
 			new Set(
 				[...this.#providerAuthById].filter(([, authenticated]) => authenticated).map(([provider]) => provider),
 			),
@@ -1399,22 +1420,28 @@ export class ModelSelectorComponent extends Container {
 			}
 			if (this.#getMissingProviders(profile).length > 0) return false;
 			const bindings = resolveProfileBindings(profile);
-			const values = [
-				...(bindings.defaultSelector ? [bindings.defaultSelector] : []),
-				...Object.values(bindings.modelRoles),
-				...Object.values(bindings.agentModelOverrides),
+			const assignments = [
+				...(bindings.defaultSelector !== undefined ? [{ value: bindings.defaultSelector, isDefault: true }] : []),
+				...Object.values(bindings.modelRoles).map(value => ({ value, isDefault: false })),
+				...Object.values(bindings.agentModelOverrides).map(value => ({ value, isDefault: false })),
 			];
 			const bareAssignmentsAvailable = this.#bareProfileAuthByName.get(profile.name) ?? true;
-			return values.every(value =>
-				normalizeModelSelectorValue(value).some(rawSelector => {
-					let selector: string;
-					try {
-						selector = this.#rewriteProfileSelectorForProxy(profile, rawSelector);
-					} catch {
-						return false;
-					}
+			const availableModels = this.#getProfileAvailableModels();
+			return assignments.every(assignment => {
+				let selectors: string[];
+				try {
+					selectors = normalizeModelSelectorValue(assignment.value).map(selector =>
+						this.#rewriteProfileSelectorForProxy(profile, selector),
+					);
+				} catch {
+					return false;
+				}
+				const hasBareSelector = selectors.some(selector => !selector.includes("/"));
+				if (!assignment.isDefault && !requiresQualifiedModelProfileRoleResolution(profile) && !hasBareSelector)
+					return true;
+				return selectors.some(selector => {
 					if (!selector.includes("/")) return bareAssignmentsAvailable;
-					const resolved = resolveModelRoleValue(selector, this.#modelRegistry.getAvailable(), {
+					const resolved = resolveModelRoleValue(selector, availableModels, {
 						settings: this.#settings,
 						modelRegistry: this.#modelRegistry,
 						aliasIntent: "preset-equivalent",
@@ -1435,7 +1462,7 @@ export class ModelSelectorComponent extends Container {
 							return (
 								resolveModelRoleValue(
 									replacementSelector,
-									this.#modelRegistry.getAvailable().filter(model => model.provider === provider),
+									availableModels.filter(model => model.provider === provider),
 									{
 										settings: this.#settings,
 										modelRegistry: this.#modelRegistry,
@@ -1446,8 +1473,8 @@ export class ModelSelectorComponent extends Container {
 							);
 						}) ?? false
 					);
-				}),
-			);
+				});
+			});
 		});
 	}
 
@@ -1462,6 +1489,8 @@ export class ModelSelectorComponent extends Container {
 
 	async #refreshProviderAuth(): Promise<void> {
 		const refreshGeneration = ++this.#providerAuthRefreshGeneration;
+		const availableModels = this.#getProfileAvailableModels();
+		const resolutionRegistry = this.#createProfileResolutionRegistry(availableModels);
 		const providers = new Set<string>();
 		for (const profiles of this.#getPresetGroups().values()) {
 			for (const profile of profiles) {
@@ -1478,7 +1507,7 @@ export class ModelSelectorComponent extends Container {
 				];
 				for (const value of values) {
 					for (const selector of normalizeModelSelectorValue(value)) {
-						const resolved = resolveModelRoleValue(selector, this.#modelRegistry.getAvailable(), {
+						const resolved = resolveModelRoleValue(selector, availableModels, {
 							settings: this.#settings,
 							modelRegistry: this.#modelRegistry,
 							aliasIntent: "preset-equivalent",
@@ -1525,7 +1554,7 @@ export class ModelSelectorComponent extends Container {
 							try {
 								const resolution = await resolveModelChainWithAuth(
 									normalizeModelSelectorValue(value),
-									this.#modelRegistry,
+									resolutionRegistry,
 									this.#settings,
 									this.#authSessionId,
 									{

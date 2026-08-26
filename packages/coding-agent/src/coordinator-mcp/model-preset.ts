@@ -1,9 +1,13 @@
 import * as path from "node:path";
 import { getAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
-import { loadEffectiveModelProfiles } from "../config/model-preset-registry";
+import {
+	type AcceptedModelPresetRegistry,
+	loadAcceptedModelPresetRegistryAsync,
+} from "../config/model-preset-registry";
 import { UnknownModelProfileError, validateModelProfileName } from "../config/model-profile-contract";
-import { ModelsConfigSchema } from "../config/models-config-schema";
+import { mergeModelProfiles } from "../config/model-profiles";
+import { type ModelsConfig, ModelsConfigSchema } from "../config/models-config-schema";
 
 export interface CoordinatorModelProfile {
 	name: string;
@@ -20,10 +24,11 @@ export type CoordinatorModelProfileLoader = () =>
 
 const MAX_ECHOED_MPRESET_LENGTH = 128;
 /**
- * Thrown by the default loader when `models.yml` exists but is invalid or
- * unreadable. This lets the resolver fail closed with a distinct, stable reason
- * instead of silently collapsing a broken registry to the built-ins-only set
- * (which would misreport a caller's valid custom profile as unknown).
+ * Thrown by the default loader when `models.yml` or the accepted preset
+ * registry is invalid or unreadable. This lets the resolver fail closed with a
+ * distinct, stable reason instead of silently collapsing a broken registry to
+ * the built-ins-only set (which would misreport a caller's valid custom
+ * profile as unknown).
  */
 export class CoordinatorModelProfileRegistryError extends Error {
 	constructor(cause?: unknown) {
@@ -34,10 +39,10 @@ export class CoordinatorModelProfileRegistryError extends Error {
 }
 
 function coordinatorModelProfiles(
-	agentDir: string,
-	profiles?: Parameters<typeof loadEffectiveModelProfiles>[0],
+	profiles?: ModelsConfig["profiles"],
+	registryProfiles?: AcceptedModelPresetRegistry["profiles"],
 ): Map<string, CoordinatorModelProfile> {
-	return new Map([...loadEffectiveModelProfiles(profiles, agentDir).keys()].map(name => [name, { name }]));
+	return new Map([...mergeModelProfiles(profiles, registryProfiles).keys()].map(name => [name, { name }]));
 }
 
 export function createCoordinatorModelProfileLoader(agentDir: string): CoordinatorModelProfileLoader {
@@ -48,12 +53,14 @@ async function loadCoordinatorModelProfilesFromAgentDir(
 	agentDir: string,
 ): Promise<Map<string, CoordinatorModelProfile>> {
 	const modelsFile = Bun.file(path.join(agentDir, "models.yml"));
-	if (!(await modelsFile.exists())) return coordinatorModelProfiles(agentDir);
+	const accepted = await loadAcceptedModelPresetRegistryAsync(agentDir);
+	if (accepted.error) throw new CoordinatorModelProfileRegistryError(accepted.error);
+	if (!(await modelsFile.exists())) return coordinatorModelProfiles(undefined, accepted.profiles);
 	try {
 		const parsed = YAML.parse(await modelsFile.text());
 		const config = ModelsConfigSchema.safeParse(parsed);
 		if (!config.success) throw config.error;
-		return coordinatorModelProfiles(agentDir, config.data.profiles);
+		return coordinatorModelProfiles(config.data.profiles, accepted.profiles);
 	} catch (error) {
 		throw new CoordinatorModelProfileRegistryError(error);
 	}

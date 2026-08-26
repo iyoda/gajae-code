@@ -11,6 +11,7 @@ import { AsyncJobManager } from "../../async";
 import {
 	getProxyRoutableProviders,
 	inspectProxyProviderId,
+	requiresQualifiedModelProfileRoleResolution,
 	resolveProxyMode,
 	rewriteSelectorForProxy,
 	tryResolveProxyProviderId,
@@ -1052,6 +1053,12 @@ function createQuerySurface(
 	};
 	const getProfileCredentialSessionId = () => ctx.credentialSessionId ?? id;
 	const profileSettings = (options.settings ?? ctx.settings) as Pick<Settings, "get"> | undefined;
+	const getProfileAvailableModels = (): Model<Api>[] => {
+		const getAvailableForProfileActivation = ctx.modelRegistry.getAvailableForProfileActivation;
+		return typeof getAvailableForProfileActivation === "function"
+			? getAvailableForProfileActivation.call(ctx.modelRegistry)
+			: ctx.modelRegistry.getAvailable();
+	};
 	const resolveProfileAvailability = async (
 		profile: ModelProfileDefinition,
 		authenticatedProviders: ReadonlySet<string>,
@@ -1096,11 +1103,17 @@ function createQuerySurface(
 			}
 			for (const value of Object.values(bindings.modelRoles)) assignments.push({ value, isDefault: false });
 			for (const value of Object.values(bindings.agentModelOverrides)) assignments.push({ value, isDefault: false });
+			const availableModels = getProfileAvailableModels();
+			const resolutionRegistry = {
+				...ctx.modelRegistry,
+				getAvailable: () => availableModels,
+				getApiKey: (model: Model<Api>, sessionId?: string) =>
+					ctx.modelRegistry.getApiKeyForProvider(model.provider, sessionId, model.baseUrl),
+			};
 			let defaultModel: Model<Api> | undefined;
 			for (const assignment of assignments) {
 				let selectors = normalizeModelSelectorValue(assignment.value).map(rewriteSelectorProvider);
 				if (proxyProvider !== undefined && proxyAuthenticated && profile.source !== "user") {
-					const availableModels = ctx.modelRegistry.getAvailable();
 					selectors = selectors.map(selector =>
 						rewriteSelectorForProxy(
 							selector,
@@ -1117,15 +1130,11 @@ function createQuerySurface(
 					const identity = suffix.thinkingLevel ? suffix.selector : selector;
 					return !identity.includes("/");
 				});
-				if (!assignment.isDefault && !hasBareSelector) continue;
+				if (!assignment.isDefault && !requiresQualifiedModelProfileRoleResolution(profile) && !hasBareSelector)
+					continue;
 				const resolution = await resolveModelChainWithAuth(
 					selectors,
-					{
-						...ctx.modelRegistry,
-						getAvailable: () => ctx.modelRegistry.getAvailable(),
-						getApiKey: (model: Model<Api>, sessionId?: string) =>
-							ctx.modelRegistry.getApiKeyForProvider(model.provider, sessionId, model.baseUrl),
-					},
+					resolutionRegistry,
 					options.settings,
 					getProfileCredentialSessionId(),
 					{

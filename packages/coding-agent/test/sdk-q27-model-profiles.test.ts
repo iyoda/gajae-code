@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Model } from "@gajae-code/ai/core";
 import {
 	isModelProfileProviderAvailable,
 	MODEL_PROFILE_DISCOVERY_QUERY,
@@ -12,6 +13,9 @@ import {
 	validateModelProfileName,
 } from "../src/config/model-profile-contract";
 import { mergeModelProfiles } from "../src/config/model-profiles";
+import type { ModelRegistry } from "../src/config/model-registry";
+import { Settings } from "../src/config/settings";
+import type { ExtensionAPI, ExtensionContext } from "../src/extensibility/extensions";
 import { Broker } from "../src/sdk/broker/broker";
 import {
 	readSessionLifecycleFailureForTest,
@@ -20,6 +24,7 @@ import {
 	writeSessionLifecycleFailure,
 } from "../src/sdk/broker/lifecycle";
 import { CursorRegistry, QueryHandlers, RevisionStore } from "../src/sdk/host/query/index.js";
+import { createSdkSurfaceFactory } from "../src/sdk/host/session-runtime";
 import { normalizeSdkStartupFailure } from "../src/sdk/startup-capability";
 
 const dirs: string[] = [];
@@ -174,6 +179,62 @@ describe("model profile capability contract", () => {
 });
 
 describe("Q27 models.profiles.list", () => {
+	it("marks a registry profile unavailable when a qualified role is absent from the effective catalog", async () => {
+		const model = (provider: string, id: string): Model =>
+			({ provider, id, name: id, api: "openai-responses", contextWindow: 1000, maxTokens: 1000 }) as Model;
+		const profile = {
+			name: "registry-role-missing",
+			displayName: "Registry Role Missing",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default", executor: "provider-a/missing" },
+			source: "registry" as const,
+		};
+		const defaultModel = model("provider-a", "default");
+		const registry = {
+			getModelProfiles: () => new Map([[profile.name, profile]]),
+			getError: () => undefined,
+			getApiKeyForProvider: async () => "provider-a-key",
+			getConfiguredProviderIds: () => [],
+			getAvailable: () => [defaultModel, model("provider-a", "missing")],
+			getAvailableForProfileActivation: () => [defaultModel],
+			getApiKey: async () => "provider-a-key",
+			resolveCanonicalModel: () => undefined,
+			getCanonicalVariants: () => [],
+			getCanonicalId: () => undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated();
+		const ctx = {
+			cwd: "/tmp",
+			workflowGate: undefined,
+			sdkBindings: () => [],
+			sessionManager: {
+				getSessionId: () => "q27-profile-session",
+				getSessionFile: () => "/tmp/q27-profile-session.json",
+				getSessionName: () => undefined,
+				getBranch: () => [],
+			},
+			getGoalState: () => undefined,
+			modelRegistry: registry,
+			settings,
+		} as unknown as ExtensionContext;
+
+		const surface = createSdkSurfaceFactory({
+			ctx,
+			id: "q27-profile-session",
+			api: {} as ExtensionAPI,
+		});
+		if (!surface.query) throw new Error("query surface is unavailable");
+		if (typeof surface.query.getModelProfiles !== "function") throw new Error("profile query is unavailable");
+		const profiles = await surface.query.getModelProfiles();
+		const item = profiles.find(candidate => (candidate as { id: string }).id === profile.name) as
+			| { available: unknown }
+			| undefined;
+
+		expect(item).toBeDefined();
+		expect(item?.available).toBe(false);
+		expect(typeof item?.available).toBe("boolean");
+	});
+
 	it("retains one sorted catalog revision across pages and refreshes on a cursorless request", async () => {
 		const oldCatalog = Array.from({ length: 6 }, (_, index) => ({
 			id: `old-${index}`,

@@ -597,6 +597,17 @@ export function getProxyRoutableProviders(profile: ModelProfileDefinition): Read
 		: PROXY_ROUTABLE_PROVIDER_IDS;
 }
 
+/**
+ * Profile sources whose non-default qualified role bindings are part of the
+ * activation contract. Proxy rewrites run before role resolution, so a
+ * rewritten selector satisfies this prerequisite when its concrete proxy
+ * model is present in the effective catalog. Embedded built-ins intentionally
+ * retain their legacy tolerance for stale qualified role tails.
+ */
+export function requiresQualifiedModelProfileRoleResolution(profile: Pick<ModelProfileDefinition, "source">): boolean {
+	return profile.source === "user" || profile.source === "registry";
+}
+
 export function rewriteSelectorForProxy(
 	selector: string,
 	proxyProvider: string,
@@ -1108,7 +1119,7 @@ export async function prepareModelProfileActivation(
 					sessionId: options.session.sessionId,
 					credentialSessionId,
 					aliasIntent: "preset-equivalent",
-					requireQualifiedResolution: profile.source === "user",
+					requireQualifiedResolution: requiresQualifiedModelProfileRoleResolution(profile),
 				},
 				profileLabel,
 				role,
@@ -1129,7 +1140,7 @@ export async function prepareModelProfileActivation(
 					sessionId: options.session.sessionId,
 					credentialSessionId,
 					aliasIntent: "preset-equivalent",
-					requireQualifiedResolution: profile.source === "user",
+					requireQualifiedResolution: requiresQualifiedModelProfileRoleResolution(profile),
 				},
 				profileLabel,
 				role,

@@ -235,6 +235,33 @@ describe("model selector profiles", () => {
 		expect(() => selector.render(220)).not.toThrow();
 	});
 
+	test("renders a registry preset unavailable when a qualified role is absent from the effective catalog", async () => {
+		installTestTheme();
+		const registryProfile: ModelProfileDefinition = {
+			name: "registry-role-missing",
+			displayName: "Registry Role Missing",
+			providerGroup: "REGISTRY ROLE",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default", executor: "provider-a/missing" },
+			source: "registry",
+		};
+		const registry = createRegistry() as unknown as TestModelRegistry & {
+			getAvailableForProfileActivation: () => Model[];
+		};
+		registry.getModelProfiles = () => new Map([[registryProfile.name, registryProfile]]);
+		registry.getModelProfile = (name: string) => (name === registryProfile.name ? registryProfile : undefined);
+		registry.getAvailable = () => [defaultModel, model("provider-a", "missing")];
+		registry.getAll = registry.getAvailable;
+		registry.getAvailableForProfileActivation = () => [defaultModel];
+		const selector = createSelector(() => {}, { registry });
+		await Bun.sleep(10);
+		selector.handleInput("\x1b[C");
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+
+		expect(rendered).toContain("✗ REGISTRY ROLE");
+		expect(rendered).toContain("✗ Registry Role Missing");
+	});
+
 	test("renders presets safely when the configured proxy identifier is malformed", async () => {
 		installTestTheme();
 		const registry = createRegistry() as unknown as TestModelRegistry & {

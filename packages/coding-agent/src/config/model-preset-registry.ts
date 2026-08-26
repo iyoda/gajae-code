@@ -3,7 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model } from "@gajae-code/ai/core";
-import { exactReplacePath, type NativeExactFileIdentity } from "@gajae-code/natives";
+import type { NativeExactFileIdentity, NativeExactUnlinkResult } from "@gajae-code/natives";
 import { getAgentDir, isEnoent } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { splitSelectorThinkingSuffix } from "../thinking";
@@ -14,6 +14,25 @@ import {
 } from "./internal/model-preset-registry-test-state";
 import { type ModelProfileDefinition, type ModelProfileRole, mergeModelProfiles } from "./model-profiles";
 import type { ModelsConfig } from "./models-config-schema";
+
+type NativeExactReplacePath = (
+	sourcePath: string,
+	destinationPath: string,
+	expectedSource: NativeExactFileIdentity,
+	expectedDestination: NativeExactFileIdentity,
+) => NativeExactUnlinkResult;
+let nativeExactReplacePath: NativeExactReplacePath | undefined;
+
+function exactReplacePathNative(
+	sourcePath: string,
+	destinationPath: string,
+	expectedSource: NativeExactFileIdentity,
+	expectedDestination: NativeExactFileIdentity,
+): NativeExactUnlinkResult {
+	nativeExactReplacePath ??= (require("@gajae-code/natives") as { exactReplacePath: NativeExactReplacePath })
+		.exactReplacePath;
+	return nativeExactReplacePath(sourcePath, destinationPath, expectedSource, expectedDestination);
+}
 
 export const MODEL_PRESET_REGISTRY_CONTRACT_VERSION = "1.0.0";
 export const DEFAULT_MODEL_PRESET_REGISTRY_URL =
@@ -810,6 +829,23 @@ function readJsonSync(file: string): unknown | undefined {
 	}
 }
 
+/**
+ * Async cache reads for callers that already have an async lifecycle boundary.
+ * Keep the synchronous reader above for legacy startup paths until their
+ * constructor-wide migration can be completed without changing public APIs.
+ */
+async function readJsonBun(file: string): Promise<unknown | undefined> {
+	try {
+		const stat = await fs.lstat(file, { bigint: true });
+		if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Registry cache path is not a regular file.");
+		if (stat.size > BigInt(MODEL_PRESET_REGISTRY_MAX_STATE_BYTES)) throw new Error("Registry cache is oversized.");
+		return JSON.parse(await Bun.file(file).text());
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
 function parseState(value: unknown): RegistryState {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Registry cache state is invalid.");
 	const state = value as Partial<RegistryState>;
@@ -903,6 +939,27 @@ function loadControlSync(agentDir: string): RegistryControl {
 	return { version: 1, disabled: control.disabled, pinnedRevision: control.pinnedRevision };
 }
 
+async function loadStateBun(agentDir: string): Promise<RegistryState> {
+	const value = await readJsonBun(registryPaths(agentDir).state);
+	return value === undefined ? { version: 1, history: [] } : parseState(value);
+}
+
+async function loadControlBun(agentDir: string): Promise<RegistryControl> {
+	const value = await readJsonBun(registryPaths(agentDir).control);
+	if (value === undefined) return { version: 1, disabled: false };
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new Error("Registry control state is invalid.");
+	const control = value as Partial<RegistryControl>;
+	if (control.version !== 1 || typeof control.disabled !== "boolean")
+		throw new Error("Registry control version is invalid.");
+	if (
+		control.pinnedRevision !== undefined &&
+		(!Number.isSafeInteger(control.pinnedRevision) || control.pinnedRevision <= 0)
+	)
+		throw new Error("Registry pin is invalid.");
+	return { version: 1, disabled: control.disabled, pinnedRevision: control.pinnedRevision };
+}
+
 async function syncDirectory(directory: string): Promise<void> {
 	// Windows does not expose a directory fsync barrier through Bun/Node. The
 	// temporary file is still synced before atomic rename; only persistence of
@@ -963,7 +1020,7 @@ async function writeAtomicJson(file: string, value: unknown): Promise<void> {
 					exactFileIdentity(temporary),
 					exactFileIdentity(file),
 				]);
-				const replaced = exactReplacePath(temporary, file, sourceIdentity, destinationIdentity);
+				const replaced = exactReplacePathNative(temporary, file, sourceIdentity, destinationIdentity);
 				if (!replaced.ok)
 					throw new Error(`Native Windows registry cache replacement failed: ${replaced.code ?? "unknown"}.`);
 			} else {
@@ -1047,6 +1104,42 @@ function generationPresets(generation: AcceptedGeneration): Model<Api>[] {
 	return [...generation.retainedPresets, ...generation.presets.presets].map(preset => ({ ...preset }) as Model<Api>);
 }
 
+function acceptedRegistryFromState(
+	agentDir: string,
+	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir">,
+	control: RegistryControl,
+	state: RegistryState,
+): AcceptedModelPresetRegistry {
+	validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
+	const revision = control.pinnedRevision ?? state.activeRevision;
+	const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
+	if (revision !== undefined && !generation)
+		throw new Error(`Registry selected revision ${revision} is missing from accepted history.`);
+	if (!generation)
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			disabled: false,
+			pinnedRevision: control.pinnedRevision,
+		};
+	const valid = validateGeneration(generation, effectiveTrustedKeys(dependencies, agentDir));
+	return {
+		profiles: generationProfiles(valid),
+		presets: generationPresets(valid),
+		revision: valid.manifest.signed.registryRevision,
+		revisionId: valid.manifest.signed.revision,
+		manifestSha256: valid.manifestSha256,
+		keyId: valid.manifest.signature.keyId,
+		sourceRevision: valid.manifest.signed.provenance.sourceRevision,
+		retainedProfiles: valid.retainedProfiles.map(profile => profile.id),
+		retainedPresets: valid.retainedPresets.map(preset => `${preset.provider}/${preset.id}`),
+		disabled: false,
+		pinnedRevision: control.pinnedRevision,
+	};
+}
+
 export function loadAcceptedModelPresetRegistry(
 	agentDir = getAgentDir(),
 	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
@@ -1075,35 +1168,54 @@ export function loadAcceptedModelPresetRegistry(
 			pinnedRevision: control.pinnedRevision,
 		};
 	try {
-		const state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
-		const revision = control.pinnedRevision ?? state.activeRevision;
-		const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
-		if (revision !== undefined && !generation)
-			throw new Error(`Registry selected revision ${revision} is missing from accepted history.`);
-		if (!generation)
-			return {
-				profiles: new Map(),
-				presets: [],
-				retainedProfiles: [],
-				retainedPresets: [],
-				disabled: false,
-				pinnedRevision: control.pinnedRevision,
-			};
-		const valid = validateGeneration(generation, effectiveTrustedKeys(dependencies, agentDir));
+		return acceptedRegistryFromState(agentDir, dependencies, control, loadStateSync(agentDir));
+	} catch (error) {
 		return {
-			profiles: generationProfiles(valid),
-			presets: generationPresets(valid),
-			revision: valid.manifest.signed.registryRevision,
-			revisionId: valid.manifest.signed.revision,
-			manifestSha256: valid.manifestSha256,
-			keyId: valid.manifest.signature.keyId,
-			sourceRevision: valid.manifest.signed.provenance.sourceRevision,
-			retainedProfiles: valid.retainedProfiles.map(profile => profile.id),
-			retainedPresets: valid.retainedPresets.map(preset => `${preset.provider}/${preset.id}`),
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			error: safeError(error),
 			disabled: false,
 			pinnedRevision: control.pinnedRevision,
 		};
+	}
+}
+
+/**
+ * Async accepted-registry loader for validation paths that can await disk I/O.
+ * It mirrors the synchronous loader's fail-closed result contract while using
+ * Bun file reads for state/control payloads.
+ */
+export async function loadAcceptedModelPresetRegistryAsync(
+	agentDir = getAgentDir(),
+	dependencies: Omit<ModelPresetRegistryDependencies, "agentDir"> = {},
+): Promise<AcceptedModelPresetRegistry> {
+	let control: RegistryControl;
+	try {
+		control = await loadControlBun(agentDir);
+	} catch (error) {
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			error: safeError(error),
+			disabled: environmentDisabled(),
+		};
+	}
+	const disabled = control.disabled || environmentDisabled();
+	if (disabled)
+		return {
+			profiles: new Map(),
+			presets: [],
+			retainedProfiles: [],
+			retainedPresets: [],
+			disabled: true,
+			pinnedRevision: control.pinnedRevision,
+		};
+	try {
+		return acceptedRegistryFromState(agentDir, dependencies, control, await loadStateBun(agentDir));
 	} catch (error) {
 		return {
 			profiles: new Map(),

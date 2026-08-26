@@ -14,12 +14,16 @@ function nativeLifecycle(): typeof import("@gajae-code/natives") {
 }
 
 import { $credentialEnv, logger, resolveEquivalentPath } from "@gajae-code/utils";
-import { loadEffectiveModelProfiles } from "../../config/model-preset-registry";
+import {
+	loadAcceptedModelPresetRegistry,
+	loadAcceptedModelPresetRegistryAsync,
+} from "../../config/model-preset-registry";
 import {
 	isModelProfileError,
 	type ModelProfileErrorDetails,
 	validateModelProfileName,
 } from "../../config/model-profile-contract";
+import { mergeModelProfiles } from "../../config/model-profiles";
 import { ModelsConfigFile } from "../../config/model-registry";
 import {
 	ensureLaunchWorktree,
@@ -608,13 +612,36 @@ function text(value: unknown): string | undefined {
 	return typeof value === "string" && value ? value : undefined;
 }
 
-function validateBrokerModelPreset(agentDir: string, requestedProfile: string): string | BrokerResponse {
+function validateBrokerModelPresetSync(agentDir: string, requestedProfile: string): string | BrokerResponse {
 	const modelsConfigFile = ModelsConfigFile.relocate(path.join(agentDir, "models.yml"));
 	modelsConfigFile.invalidate();
 	const loaded = modelsConfigFile.tryLoad();
-	const profiles = loadEffectiveModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined, agentDir);
+	const accepted = loadAcceptedModelPresetRegistry(agentDir);
+	const profiles = mergeModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined, accepted.profiles);
 	try {
-		return validateModelProfileName(requestedProfile, profiles, loaded.status === "error" ? loaded.error : undefined);
+		return validateModelProfileName(
+			requestedProfile,
+			profiles,
+			accepted.error ?? (loaded.status === "error" ? loaded.error : undefined),
+		);
+	} catch (error) {
+		if (isModelProfileError(error)) return fail(error.code, error.message, undefined, error.details);
+		throw error;
+	}
+}
+
+async function validateBrokerModelPreset(agentDir: string, requestedProfile: string): Promise<string | BrokerResponse> {
+	const modelsConfigFile = ModelsConfigFile.relocate(path.join(agentDir, "models.yml"));
+	modelsConfigFile.invalidate();
+	const loaded = modelsConfigFile.tryLoad();
+	const accepted = await loadAcceptedModelPresetRegistryAsync(agentDir);
+	const profiles = mergeModelProfiles(loaded.status === "ok" ? loaded.value.profiles : undefined, accepted.profiles);
+	try {
+		return validateModelProfileName(
+			requestedProfile,
+			profiles,
+			accepted.error ?? (loaded.status === "error" ? loaded.error : undefined),
+		);
 	} catch (error) {
 		if (isModelProfileError(error)) return fail(error.code, error.message, undefined, error.details);
 		throw error;
@@ -622,7 +649,7 @@ function validateBrokerModelPreset(agentDir: string, requestedProfile: string): 
 }
 
 export function validateBrokerModelPresetForTest(agentDir: string, requestedProfile: string): string | BrokerResponse {
-	return validateBrokerModelPreset(agentDir, requestedProfile);
+	return validateBrokerModelPresetSync(agentDir, requestedProfile);
 }
 
 function readinessTimeout(input: Input): number | BrokerResponse {
@@ -3378,7 +3405,7 @@ async function launchInput(
 	if (input.modelPreset !== undefined && (typeof input.modelPreset !== "string" || input.modelPreset.length === 0))
 		return fail("invalid_input", "modelPreset must be a non-empty exact profile ID.");
 	if (modelPreset !== undefined) {
-		const validatedModelPreset = validateBrokerModelPreset(broker.settings.agentDir, modelPreset);
+		const validatedModelPreset = await validateBrokerModelPreset(broker.settings.agentDir, modelPreset);
 		if (typeof validatedModelPreset !== "string") return validatedModelPreset;
 		modelPreset = validatedModelPreset;
 	}

@@ -2473,6 +2473,20 @@ describe("model-profile-activation: OpenAI-compatible proxy routing", () => {
 		expect(prepared.agentModelOverrides.executor).toBe("litellm/xai/grok-4.3:high");
 	});
 
+	test("keeps registry role bindings available after a documented proxy rewrite", async () => {
+		const profile: ModelProfileDefinition = { ...grokProfile, name: "registry-grok", source: "registry" };
+		const settings = Settings.isolated({ "modelProfile.proxyProvider": "litellm" });
+		const prepared = await prepareModelProfileActivation({
+			session: fakeSession(),
+			modelRegistry: proxyRegistry({ missing: ["xai"], profiles: [profile] }) as unknown as ModelRegistry,
+			settings,
+			profileName: profile.name,
+		});
+
+		expect(prepared.defaultChain).toEqual(["litellm/xai/grok-4.3:medium"]);
+		expect(prepared.agentModelOverrides.executor).toBe("litellm/xai/grok-4.3:high");
+	});
+
 	test("keeps direct selectors when the direct provider is authenticated even with a proxy configured", async () => {
 		const settings = Settings.isolated({ "modelProfile.proxyProvider": "litellm" });
 		const prepared = await prepareModelProfileActivation({

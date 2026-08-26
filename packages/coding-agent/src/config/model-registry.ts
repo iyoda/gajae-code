@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	type Api,
 	type AssistantMessageEventStream,
@@ -589,6 +590,18 @@ interface ProviderOverride {
 	transport?: Model<Api>["transport"];
 	requestTransform?: ModelRequestTransform;
 	cacheRetention?: CacheRetention;
+	isOAuth?: boolean;
+}
+
+function hasMatchingRegistryTransport(left: Model<Api>, right: Model<Api> | ProviderOverride): boolean {
+	return (
+		left.baseUrl === right.baseUrl &&
+		isDeepStrictEqual(left.headers, right.headers) &&
+		left.transport === right.transport &&
+		isDeepStrictEqual(left.requestTransform, right.requestTransform) &&
+		left.cacheRetention === right.cacheRetention &&
+		left.isOAuth === right.isOAuth
+	);
 }
 
 const PROVIDER_BASE_URL_ENV_ALIASES: Record<string, readonly string[]> = {
@@ -1929,24 +1942,26 @@ export class ModelRegistry {
 			const existingIndex = indexByKey.get(key);
 			const explicitTransport = providerOverrides.get(registryModel.provider);
 			if (existingIndex === undefined) {
-				const transportTemplate = merged.find(
+				const transportTemplates = merged.filter(
 					model => model.provider === registryModel.provider && model.api === registryModel.api,
 				);
+				const transportTemplate = transportTemplates[0];
 				const explicitTransportMatches =
 					explicitTransport?.api === registryModel.api && explicitTransport.baseUrl !== undefined;
+				const templatesAgree =
+					transportTemplate !== undefined &&
+					transportTemplates.every(template => hasMatchingRegistryTransport(transportTemplate, template));
+				if (!explicitTransportMatches && transportTemplates.length > 0 && !templatesAgree) continue;
 				if (!transportTemplate && !explicitTransportMatches) continue;
+				const transportSource = explicitTransportMatches ? explicitTransport : transportTemplate!;
 				merged.push({
 					...registryModel,
-					baseUrl: explicitTransportMatches ? explicitTransport.baseUrl! : transportTemplate!.baseUrl,
-					headers: explicitTransportMatches ? explicitTransport.headers : transportTemplate?.headers,
-					transport: explicitTransportMatches ? explicitTransport.transport : transportTemplate?.transport,
-					requestTransform: explicitTransportMatches
-						? explicitTransport.requestTransform
-						: transportTemplate?.requestTransform,
-					cacheRetention: explicitTransportMatches
-						? explicitTransport.cacheRetention
-						: transportTemplate?.cacheRetention,
-					isOAuth: transportTemplate?.isOAuth,
+					baseUrl: transportSource.baseUrl!,
+					headers: transportSource.headers,
+					transport: transportSource.transport,
+					requestTransform: transportSource.requestTransform,
+					cacheRetention: transportSource.cacheRetention,
+					isOAuth: transportSource.isOAuth,
 					compat:
 						transportTemplate?.compat || registryModel.compat || explicitTransport?.compat
 							? { ...transportTemplate?.compat, ...registryModel.compat, ...explicitTransport?.compat }
@@ -2285,6 +2300,11 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 
 		for (const [providerName, providerConfig] of providerEntries) {
+			const authMode = (providerConfig.auth ?? "apiKey") as ProviderAuthMode;
+			const isOAuth = resolveCustomModelIsOAuth(
+				(providerConfig.api as Api | undefined) ?? "openai-completions",
+				providerConfig.auth as ProviderAuthMode | undefined,
+			);
 			if (providerConfig.apiKeyEnv) {
 				this.#configuredApiKeyEnvNames.add(providerConfig.apiKeyEnv);
 			}
@@ -2313,8 +2333,10 @@ export class ModelRegistry {
 						? resolveApiKeyEnvConfig(localOpenAICompat.apiKeyEnv)
 						: undefined;
 				overrides.set(providerName, {
+					api: "openai-completions",
 					baseUrl: localOpenAICompatBaseUrl,
 					apiKey: localOpenAICompatApiKeyConfig,
+					isOAuth,
 					compat: {
 						supportsStore: false,
 						supportsDeveloperRole: false,
@@ -2365,10 +2387,10 @@ export class ModelRegistry {
 					transport: providerConfig.transport,
 					requestTransform: providerConfig.requestTransform,
 					cacheRetention: providerConfig.cacheRetention,
+					isOAuth,
 				});
 			}
 
-			const authMode = (providerConfig.auth ?? "apiKey") as ProviderAuthMode;
 			if (authMode === "none") {
 				keylessProviders.add(providerName);
 			}
@@ -3809,6 +3831,7 @@ export class ModelRegistry {
 
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
 		return {
+			api: override.api ?? baseOverride?.api,
 			baseUrl: override.baseUrl ?? baseOverride?.baseUrl,
 			apiKey: override.apiKey ?? baseOverride?.apiKey,
 			authHeader: override.authHeader ?? baseOverride?.authHeader,
@@ -3817,6 +3840,7 @@ export class ModelRegistry {
 			transport: override.transport ?? baseOverride?.transport,
 			requestTransform: mergeRequestTransform(baseOverride?.requestTransform, override.requestTransform),
 			cacheRetention: override.cacheRetention ?? baseOverride?.cacheRetention,
+			isOAuth: override.isOAuth ?? baseOverride?.isOAuth,
 		};
 	}
 	#applyProviderTransportOverride<

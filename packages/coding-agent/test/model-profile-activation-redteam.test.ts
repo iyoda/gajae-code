@@ -114,6 +114,30 @@ describe("model profile activation red-team", () => {
 		expect(calls.flushCount).toBe(0);
 	});
 
+	test("registry profile rejects an unresolved qualified role even when its default resolves", async () => {
+		const session = fakeSession();
+		const settings = Settings.isolated({ "modelProfile.default": "old-profile" });
+		const calls = instrumentSettings(settings);
+		const registry = fakeRegistry({
+			profiles: [
+				{
+					name: "registry-unresolved-role",
+					requiredProviders: ["provider-a"],
+					modelMapping: { default: "provider-a/default", executor: "provider-b/missing" },
+					source: "registry",
+				},
+			],
+		});
+
+		await expect(
+			activateModelProfile({ session, modelRegistry: registry, settings, profileName: "registry-unresolved-role" }),
+		).rejects.toThrow(/executor selectors do not match any catalog model/);
+		expect(session.model?.id).toBe("initial");
+		expect(settings.get("modelProfile.default")).toBe("old-profile");
+		expect(calls.setCalls).toEqual([]);
+		expect(calls.overrideCalls).toEqual([]);
+	});
+
 	test("ATOMICITY: one missing required provider hard-blocks naming only missing providers with zero mutation", async () => {
 		const session = fakeSession();
 		const settings = Settings.isolated({

@@ -432,6 +432,65 @@ describe("signed model preset registry", () => {
 		);
 	});
 
+	test("rejects registry additions when provider transport templates are ambiguous", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(
+			data.privateKey,
+			1,
+			[],
+			[{ ...registryPreset("ambiguous-model"), provider: "kimi-code" }],
+		);
+		await expect(accept(data, registry)).resolves.toMatchObject({ status: "updated", revision: 1 });
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("kimi-code", "ambiguous-model")).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	test("preserves OAuth shaping for registry additions with explicit transport and no template", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(
+			data.privateKey,
+			1,
+			[],
+			[{ ...registryPreset("oauth-model"), provider: "oauth-only" }],
+		);
+		await expect(accept(data, registry)).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  oauth-only:
+    baseUrl: https://oauth.example/v1
+    api: openai-completions
+    auth: oauth
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.find("oauth-only", "oauth-model")).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://oauth.example/v1",
+				isOAuth: true,
+			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")]));
