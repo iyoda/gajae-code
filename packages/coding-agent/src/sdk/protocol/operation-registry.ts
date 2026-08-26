@@ -135,6 +135,7 @@ const globals = [
 	["session.resume", "Resume a saved session."],
 	["session.close", "Close a saved session."],
 	["session.delete", "Delete a saved session."],
+	["session.reconcile_uncertain", "Retire an indexed terminalUncertain create effect after dead-host proof."],
 ] as const;
 
 const queries = [
@@ -349,7 +350,7 @@ export const OPERATIONS: readonly Operation[] = [
 							acp: "machine_only",
 							daemonCli: "machine_only",
 						})
-					: ["G03", "G04", "G05", "G06", "G07"].includes(id)
+					: ["G03", "G04", "G05", "G06", "G07", "G08"].includes(id)
 						? dispositions({ telegram: "prohibited", discord: "prohibited", slack: "prohibited" })
 						: dispositions(),
 			testIds: ["packages/coding-agent/test/sdk-operation-inventory.test.ts"],

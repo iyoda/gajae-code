@@ -190,15 +190,27 @@ export type BrokerResponse =
 const error = (code: BrokerErrorCode, message: string): BrokerResponse => ({ ok: false, error: { code, message } });
 
 function isCleanupPending(response: BrokerResponse): boolean {
-	return !response.ok && response.error.code === "cleanup_pending" && response.error.cleanup !== undefined;
+	if (response.ok) return false;
+	const error = (response as { error?: unknown }).error;
+	if (typeof error !== "object" || error === null) return false;
+	const value = error as { code?: unknown; cleanup?: unknown };
+	return value.code === "cleanup_pending" && value.cleanup !== undefined;
 }
 
 function cleanupFromResponse(response: unknown): BrokerCleanupEvidence | undefined {
-	return isBrokerResponse(response) && !response.ok ? response.error.cleanup : undefined;
+	if (!isBrokerResponse(response) || response.ok) return undefined;
+	const error = (response as { error?: unknown }).error;
+	if (typeof error !== "object" || error === null) return undefined;
+	const cleanup = (error as { cleanup?: unknown }).cleanup;
+	return cleanup && typeof cleanup === "object" ? (cleanup as BrokerCleanupEvidence) : undefined;
 }
 function pendingCleanupSessionId(response: BrokerResponse): string | undefined {
-	if (response.ok || response.error.code !== "cleanup_pending") return undefined;
-	return typeof response.error.cleanup?.sessionId === "string" ? response.error.cleanup.sessionId : undefined;
+	if (response.ok) return undefined;
+	const error = (response as { error?: unknown }).error;
+	if (typeof error !== "object" || error === null) return undefined;
+	const value = error as { code?: unknown; cleanup?: { sessionId?: unknown } };
+	if (value.code !== "cleanup_pending") return undefined;
+	return typeof value.cleanup?.sessionId === "string" ? value.cleanup.sessionId : undefined;
 }
 
 const LIFECYCLE_OPERATIONS = new Set([
@@ -207,6 +219,7 @@ const LIFECYCLE_OPERATIONS = new Set([
 	"session.resume",
 	"session.close",
 	"session.delete",
+	"session.reconcile_uncertain",
 ]);
 
 /** Bootstrap signing material and its public candidate id authorize a launch but are not lifecycle request identity. */
@@ -225,7 +238,10 @@ function lifecycleFingerprint(operation: string, input: Record<string, unknown>)
 function lifecycleResponseState(response: BrokerResponse): LifecycleState {
 	if (response.ok) return "terminal_ok";
 	if (isCleanupPending(response)) return "effect_started";
-	return response.error.code === "terminal_uncertain" ? "terminal_uncertain" : "terminal_error";
+	const error = (response as { error?: unknown }).error;
+	return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "terminal_uncertain"
+		? "terminal_uncertain"
+		: "terminal_error";
 }
 
 type InputNormalization = { input: Record<string, unknown> } | BrokerResponse;
@@ -307,7 +323,8 @@ function normalizeBrokerInput(operation: string, input: Record<string, unknown>)
 		operation !== "session.fork" &&
 		operation !== "session.resume" &&
 		operation !== "session.close" &&
-		operation !== "session.delete"
+		operation !== "session.delete" &&
+		operation !== "session.reconcile_uncertain"
 	)
 		return { input: normalized };
 
@@ -469,6 +486,7 @@ function lifecycleTarget(operation: string, input: Record<string, unknown>): unk
 		case "session.resume":
 		case "session.close":
 		case "session.delete":
+		case "session.reconcile_uncertain":
 			return { sessionId: id };
 		default:
 			return { operation, root, sessionId: id };
@@ -1575,6 +1593,8 @@ export class Broker {
 		}
 
 		if (!idempotencyKey) return error("invalid_input", "idempotencyKey is required for lifecycle operations");
+		if (idempotencyKey.length > 256 || /[\u0000-\u001f\u007f]/u.test(idempotencyKey))
+			return error("invalid_input", "idempotencyKey must be a bounded non-empty string");
 		const target = createHash("sha256")
 			.update(canonicalJson(lifecycleTarget(operation, input)))
 			.digest("hex");

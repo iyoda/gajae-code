@@ -10,6 +10,13 @@
 
 ### Fixed
 
+- Valid JSON `\uXXXX` tool arguments now execute as their canonical decoded strings instead of entering the escaped-non-ASCII resample loop. Provider adapters retain guard metadata only for malformed JSON, duplicate/deep evidence, and unpaired UTF-16 surrogates, so those cases remain fail-closed while standard escaped Hangul, emoji surrogate pairs, and printable ASCII no longer consume retries or terminate managed runs.
+- Explicit positive `maxTokens` values declared for custom `models.yml` models
+  and model overrides now reach the provider request across the shared stream
+  mapping (`max_tokens`, `max_completion_tokens`, and `max_output_tokens`).
+  Built-in and discovered metadata retain the conservative 32,000-token default,
+  while positive per-request overrides keep precedence; `compat.extraBody` is
+  not required to alter the wire budget.
 - `/login vllm` no longer stores the `vllm-local` no-auth sentinel as a persisted API key. `AuthStorage.getApiKey()` resolves stored `api_key` credentials before environment variables, so a stored sentinel from an empty login could outrank a real `VLLM_API_KEY` env var and reach normal inference. `/login vllm` now requires a real API key (empty input throws `vLLM API key is required; local no-auth servers are discovered automatically`); local no-auth servers remain discovered automatically via the descriptor's `allowUnauthenticated` flag and need no login.
 - `classifyContextOverflow` no longer misclassifies Anthropic context overflow as a terminal request error. Anthropic reports overflow inside a generic `invalid_request_error` envelope (`{"type":"invalid_request_error","message":"prompt is too long: 1158066 tokens > 1000000 maximum"}`), and that envelope type was listed as an authoritative non-overflow code, so it vetoed classification before the `prompt is too long` match could run. Overflow was then treated as a terminal 4xx and auto-compaction never ran. The envelope is now separated from cause-naming codes (auth, quota, rate limit), which keep full veto authority. To preserve the existing hostile-prose defense, only Anthropic's self-verifying measured form (`<used> tokens > <limit> maximum`, where the reported usage actually exceeds the reported maximum) can override the envelope; loose prose such as `too many tokens` still cannot flip a typed transport classification.
 - Auth-gateway boot and dispatch are now provider-scoped: model catalogs reject cross-provider id ambiguity, Codex rows retain `openai-codex-responses`, and requests cannot borrow credentials from another provider.

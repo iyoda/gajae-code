@@ -91,9 +91,8 @@ describe("AgentSession escaped non-ASCII managed steering", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const executed: Array<Record<string, unknown>> = [];
 		// Wire sequence: escaped (discarded → managed outcome, policy retry),
-		// escaped again (the retry attempt rode the steering instruction but is
-		// still defective → discarded again, steering already spent), then a
-		// literal-UTF-8 turn on the unsteered blind retry, which executes.
+		// escaped again (the retry attempt rides the steering instruction again),
+		// then a literal-UTF-8 turn, which executes.
 		const mock = createMockModel({
 			responses: [escapedTurn("tc-1"), escapedTurn("tc-2"), literalTurn("tc-3"), { content: ["done"] }],
 		});
@@ -120,23 +119,26 @@ describe("AgentSession escaped non-ASCII managed steering", () => {
 		await session.prompt("ask me");
 		await manager.flush();
 
-		// Four provider calls: initial, steered retry, blind retry, post-tool wrap-up.
+		// Four provider calls: initial, two steered retries, post-tool wrap-up.
 		expect(mock.model.calls).toHaveLength(4);
 
-		// The first retry (the policy continuation after the first discarded
-		// outcome) must carry the steering instruction exactly once, and tools
-		// stay enabled: the steered request is a re-request of the same logical
-		// turn, not a diagnostic detour.
+		// Every bounded retry must carry the steering instruction, and tools stay
+		// enabled: each request is a re-request of the same logical turn, not a
+		// diagnostic detour.
 		const steeredRequest = mock.model.calls[1];
 		expect(steeredRequest).toBeDefined();
 		expect(hasUserText(steeredRequest.context.messages, ESCAPED_NONASCII_RECOVERY_PROMPT)).toBe(true);
 		expect(steeredRequest.context.tools?.length ?? 0).toBeGreaterThan(0);
+		const secondSteeredRequest = mock.model.calls[2];
+		expect(secondSteeredRequest).toBeDefined();
+		expect(hasUserText(secondSteeredRequest.context.messages, ESCAPED_NONASCII_RECOVERY_PROMPT)).toBe(true);
+		expect(secondSteeredRequest.context.tools?.length ?? 0).toBeGreaterThan(0);
 
 		// The instruction is transient: it never lands in durable history and
 		// never rides a later request once spent.
 		const durable = manager.buildSessionContext().messages;
 		expect(hasUserText(durable, ESCAPED_NONASCII_RECOVERY_PROMPT)).toBe(false);
-		for (const request of mock.model.calls.slice(2)) {
+		for (const request of mock.model.calls.slice(3)) {
 			expect(hasUserText(request.context.messages, ESCAPED_NONASCII_RECOVERY_PROMPT)).toBe(false);
 		}
 
@@ -150,6 +152,61 @@ describe("AgentSession escaped non-ASCII managed steering", () => {
 		expect(persistedToolCallIds).not.toContain("tc-1");
 		expect(persistedToolCallIds).not.toContain("tc-2");
 		expect(persistedToolCallIds).toContain("tc-3");
+	});
+
+	it("resets escaped retries after each accepted tool turn", async () => {
+		tempDir = TempDir.createSync("@gjc-escaped-managed-accepted-reset-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!primary || !fallback) throw new Error("Expected bundled test models");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const executed: Array<Record<string, unknown>> = [];
+		const callModels: string[] = [];
+		const mock = createMockModel({
+			responses: [
+				escapedTurn("tc-1"),
+				escapedTurn("tc-2"),
+				literalTurn("tc-3"),
+				escapedTurn("tc-4"),
+				escapedTurn("tc-5"),
+				literalTurn("tc-6"),
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: primary, systemPrompt: ["test"], tools: [askTool(executed)], messages: [] },
+			convertToLlm: identityConverter,
+			streamFn: (model, context, options) => {
+				callModels.push(selector(model));
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"fallback.maxAttempts": 3,
+			"retry.baseDelayMs": 10,
+		});
+		settings.setModelRole("default", selector(primary));
+		session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+		session.setConfiguredModelChain("default", [selector(primary), selector(fallback)], "test");
+
+		await session.prompt("ask twice");
+		await manager.flush();
+
+		expect(executed).toEqual([{ question: QUESTION }, { question: QUESTION }]);
+		expect(callModels).toEqual([
+			selector(primary),
+			selector(primary),
+			selector(primary),
+			selector(primary),
+			selector(primary),
+			selector(primary),
+			selector(primary),
+		]);
 	});
 
 	it("fails closed after the managed escaped retry budget instead of looping forever", async () => {
@@ -193,23 +250,21 @@ describe("AgentSession escaped non-ASCII managed steering", () => {
 		await manager.flush();
 
 		// The run is terminal with an error, never executed anything, and the
-		// provider-call count is bounded: 1 initial + 2 policy retries (the
-		// first steered, the second blind), each turn then spending its own
-		// in-loop resample budget is impossible here because every loop is a
-		// fresh managed invocation — so the session bound is the only stop.
+		// Each eligible model receives one initial request plus two steered
+		// managed retries before the chain advances or terminates.
 		expect(session.isStreaming).toBe(false);
 		expect(executed).toEqual([]);
-		expect(mock.model.calls.length).toBeLessThanOrEqual(8);
+		expect(mock.model.calls.length).toBe(6);
 		const durable = manager.buildSessionContext().messages;
 		const last = durable.findLast(message => message.role === "assistant");
 		expect(last?.stopReason).toBe("error");
 		expect(last?.errorMessage ?? "").toContain("escaped non-ASCII");
-		// The steering instruction was still transient: exactly one steered
-		// request, nothing durable.
+		// The steering instruction was still transient: every bounded retry was
+		// steered, and nothing was durable.
 		expect(hasUserText(durable, ESCAPED_NONASCII_RECOVERY_PROMPT)).toBe(false);
 		const steeredRequests = mock.model.calls.filter(request =>
 			hasUserText(request.context.messages, ESCAPED_NONASCII_RECOVERY_PROMPT),
 		);
-		expect(steeredRequests).toHaveLength(1);
+		expect(steeredRequests).toHaveLength(5);
 	});
 });

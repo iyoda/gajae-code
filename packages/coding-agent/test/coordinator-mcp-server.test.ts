@@ -1217,6 +1217,464 @@ console.log(JSON.stringify(await appendCoordinatorEventForTest(${JSON.stringify(
 		expect(controls.filter(control => control.operation === "session.close")).toHaveLength(0);
 	});
 
+	it("retires a stranded start intent only after the indexed retirement proof is supplied", async () => {
+		const root = await tempRoot();
+		const controls: SdkControl[] = [];
+		const creationKey = "stranded-start-to-retire";
+		const remoteCreateKey = `remote_${createHash("sha256")
+			.update(`gjc_coordinator_start_session\0${creationKey}`)
+			.digest("hex")}`;
+		const server = await createSdkControlServer(root, controls, [], undefined, [], undefined, undefined, {
+			globalResult: operation =>
+				operation === "session.create"
+					? { ok: true, result: { cwd: root } }
+					: operation === "session.reconcile_uncertain"
+						? {
+								ok: true,
+								result: {
+									sessionId: "retired-session",
+									retired: true,
+									ledgerState: "terminal_error",
+									indexType: "session_closed",
+									stateRoot: path.join(root, ".gjc", "state"),
+									endpointGeneration: 2,
+									endpointMtimeMs: 1,
+									processIncarnation: "linux:123",
+									hostIncarnation: "host:123",
+									lifecycleRequestId: "retire-effect",
+									remoteCreateKey,
+								},
+							}
+						: undefined,
+		});
+		const startArgs = { cwd: root, idempotency_key: creationKey, allow_mutation: true };
+		await expect(server.callTool("gjc_coordinator_start_session", startArgs)).resolves.toMatchObject({ ok: false });
+		const originalPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(creationKey).digest("hex")}.json`,
+		);
+		const original = JSON.parse(await fs.readFile(originalPath, "utf8")) as { request_digest: string; state: string };
+		expect(original.state).toBe("in_progress");
+
+		const retired = await server.callTool("gjc_coordinator_retire_start_session", {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			idempotency_key: "retire-start-intent",
+			allow_mutation: true,
+		});
+		expect(retired).toMatchObject({ ok: true, session_id: "retired-session", retired: true });
+		expect(retired).toMatchObject({
+			lifecycle: {
+				sessionId: "retired-session",
+				retired: true,
+				ledgerState: "terminal_error",
+				indexType: "session_closed",
+			},
+		});
+		expect(JSON.stringify(retired)).not.toContain("processIncarnation");
+		expect(JSON.stringify(retired)).not.toContain("hostIncarnation");
+		expect(JSON.stringify(retired)).not.toContain(path.join(root, ".gjc", "state"));
+		expect(JSON.parse(await fs.readFile(originalPath, "utf8"))).toMatchObject({
+			state: "completed",
+			response: { ok: false, error: { code: "retired" } },
+		});
+		expect(controls.filter(control => control.operation === "session.create")).toHaveLength(1);
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+		await expect(server.callTool("gjc_coordinator_start_session", startArgs)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "retired" },
+		});
+		expect(controls.filter(control => control.operation === "session.create")).toHaveLength(1);
+		const retirementArgs = {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			idempotency_key: "retire-start-intent",
+			allow_mutation: true,
+		};
+		const replay = await server.callTool("gjc_coordinator_retire_start_session", retirementArgs);
+		expect(replay).toEqual(retired);
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...retirementArgs,
+				idempotency_key: "retire-start-different-key",
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "retire_not_allowed" } });
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+	});
+
+	it("forwards the complete retirement identity and does not seal malformed broker proofs", async () => {
+		const root = await tempRoot();
+		const controls: SdkControl[] = [];
+		const creationKey = "malformed-retirement-proof";
+		const remoteCreateKey = `remote_${createHash("sha256")
+			.update(`gjc_coordinator_start_session\0${creationKey}`)
+			.digest("hex")}`;
+		let validAcknowledgement = false;
+		const server = await createSdkControlServer(root, controls, [], undefined, [], undefined, undefined, {
+			globalResult: (operation, input) => {
+				if (operation === "session.create") return { ok: true, result: { cwd: root } };
+				if (operation !== "session.reconcile_uncertain") return undefined;
+				if (input.lifecycleRequestId === "stale-effect")
+					return { ok: false, error: { code: "retirement_proof_stale", message: "stale proof" } };
+
+				if (!validAcknowledgement) return { ok: true, result: { sessionId: "wrong-session", retired: true } };
+				return {
+					ok: true,
+					result: {
+						sessionId: input.sessionId,
+						retired: true,
+						ledgerState: "terminal_error",
+						indexType: "session_closed",
+						stateRoot: input.stateRoot,
+						endpointGeneration: input.endpointGeneration,
+						endpointMtimeMs: input.endpointMtimeMs,
+						processIncarnation: input.processIncarnation,
+						hostIncarnation: input.hostIncarnation,
+						lifecycleRequestId: input.lifecycleRequestId,
+						remoteCreateKey: input.remoteCreateKey,
+					},
+				};
+			},
+		});
+		await expect(
+			server.callTool("gjc_coordinator_start_session", {
+				cwd: root,
+				idempotency_key: creationKey,
+				allow_mutation: true,
+			}),
+		).resolves.toMatchObject({ ok: false });
+		const originalPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(creationKey).digest("hex")}.json`,
+		);
+		const original = JSON.parse(await fs.readFile(originalPath, "utf8")) as { request_digest: string };
+		const retirementArgs = {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			idempotency_key: "malformed-retirement-proof-key",
+			allow_mutation: true,
+		};
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...retirementArgs,
+				idempotency_key: creationKey,
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "idempotency_conflict" } });
+		const staleResponse = await server.callTool("gjc_coordinator_retire_start_session", {
+			...retirementArgs,
+			lifecycle_request_id: "stale-effect",
+		});
+		expect(staleResponse).toMatchObject({ ok: false, error: { code: "retirement_proof_stale" } });
+		const malformed = await server.callTool("gjc_coordinator_retire_start_session", retirementArgs);
+		expect(malformed).toMatchObject({ ok: false, error: { code: "protocol_error" } });
+		expect(controls.at(-1)).toMatchObject({
+			operation: "session.reconcile_uncertain",
+			input: {
+				sessionId: "retired-session",
+				cwd: root,
+				stateRoot: path.join(root, ".gjc", "state"),
+				endpointGeneration: 2,
+				endpointMtimeMs: 1,
+				processIncarnation: "linux:123",
+				hostIncarnation: "host:123",
+				lifecycleRequestId: "retire-effect",
+				remoteCreateKey,
+			},
+		});
+		validAcknowledgement = true;
+		const retried = await server.callTool("gjc_coordinator_retire_start_session", retirementArgs);
+		expect(retried).toMatchObject({ ok: true, session_id: "retired-session", retired: true });
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(3);
+	});
+
+	it("rejects missing or wrong retirement proof before broker mutation", async () => {
+		const root = await tempRoot();
+		const controls: SdkControl[] = [];
+		const creationKey = "retirement-proof-validation";
+		const remoteCreateKey = `remote_${createHash("sha256")
+			.update(`gjc_coordinator_start_session\0${creationKey}`)
+			.digest("hex")}`;
+		const server = await createSdkControlServer(root, controls, [], undefined, [], undefined, undefined, {
+			globalResult: operation => (operation === "session.create" ? { ok: true, result: { cwd: root } } : undefined),
+		});
+		await expect(
+			server.callTool("gjc_coordinator_start_session", {
+				cwd: root,
+				idempotency_key: creationKey,
+				allow_mutation: true,
+			}),
+		).resolves.toMatchObject({ ok: false });
+		const originalPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(creationKey).digest("hex")}.json`,
+		);
+		const original = JSON.parse(await fs.readFile(originalPath, "utf8")) as { request_digest: string };
+		const base = {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			allow_mutation: true,
+		};
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...base,
+				lifecycle_request_id: "bad/id",
+				idempotency_key: "invalid-marker-key",
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "invalid_input" } });
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...base,
+				idempotency_key: "missing-proof-key",
+				remote_create_key: undefined,
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "invalid_input" } });
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...base,
+				idempotency_key: "malformed-marker-key",
+				lifecycle_request_id: "retire/effect",
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "invalid_input" } });
+		await expect(
+			server.callTool("gjc_coordinator_retire_start_session", {
+				...base,
+				idempotency_key: "wrong-proof-key",
+				remote_create_key: "remote_wrong",
+			}),
+		).resolves.toMatchObject({ ok: false, error: { code: "idempotency_conflict" } });
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(0);
+	});
+
+	it("serializes different retirement keys on the original creation lock", async () => {
+		const root = await tempRoot();
+		const controls: SdkControl[] = [];
+		const creationKey = "retirement-key-race";
+		const remoteCreateKey = `remote_${createHash("sha256")
+			.update(`gjc_coordinator_start_session\0${creationKey}`)
+			.digest("hex")}`;
+		const server = await createSdkControlServer(root, controls, [], undefined, [], undefined, undefined, {
+			globalResult: (operation, input) => {
+				if (operation === "session.create") return { ok: true, result: { cwd: root } };
+				if (operation !== "session.reconcile_uncertain") return undefined;
+				return {
+					ok: true,
+					result: {
+						sessionId: input.sessionId,
+						retired: true,
+						ledgerState: "terminal_error",
+						indexType: "session_closed",
+						stateRoot: input.stateRoot,
+						endpointGeneration: input.endpointGeneration,
+						endpointMtimeMs: input.endpointMtimeMs,
+						processIncarnation: input.processIncarnation,
+						hostIncarnation: input.hostIncarnation,
+						lifecycleRequestId: input.lifecycleRequestId,
+						remoteCreateKey: input.remoteCreateKey,
+					},
+				};
+			},
+		});
+		await expect(
+			server.callTool("gjc_coordinator_start_session", {
+				cwd: root,
+				idempotency_key: creationKey,
+				allow_mutation: true,
+			}),
+		).resolves.toMatchObject({ ok: false });
+		const originalPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(creationKey).digest("hex")}.json`,
+		);
+		const original = JSON.parse(await fs.readFile(originalPath, "utf8")) as { request_digest: string };
+		const base = {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			allow_mutation: true,
+		};
+		const results = await Promise.all([
+			server.callTool("gjc_coordinator_retire_start_session", { ...base, idempotency_key: "race-one" }),
+			server.callTool("gjc_coordinator_retire_start_session", { ...base, idempotency_key: "race-two" }),
+		]);
+		expect(results.filter(result => result.ok === true)).toHaveLength(1);
+		expect(
+			results.filter(
+				result =>
+					typeof result.error === "object" &&
+					result.error !== null &&
+					(result.error as Record<string, unknown>).code === "retire_not_allowed",
+			),
+		).toHaveLength(1);
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+	});
+
+	it("replays a staged broker proof after coordinator persistence is interrupted", async () => {
+		const root = await tempRoot();
+		const controls: SdkControl[] = [];
+		const creationKey = "retirement-persistence-retry";
+		const retirementKey = "retirement-persistence-retry-effect";
+		const remoteCreateKey = `remote_${createHash("sha256")
+			.update(`gjc_coordinator_start_session\0${creationKey}`)
+			.digest("hex")}`;
+		const server = await createSdkControlServer(root, controls, [], undefined, [], undefined, undefined, {
+			globalResult: (operation, input) => {
+				if (operation === "session.create") return { ok: true, result: { cwd: root } };
+				if (operation !== "session.reconcile_uncertain") return undefined;
+				return {
+					ok: true,
+					result: {
+						sessionId: input.sessionId,
+						retired: true,
+						ledgerState: "terminal_error",
+						indexType: "session_closed",
+						stateRoot: input.stateRoot,
+						endpointGeneration: input.endpointGeneration,
+						endpointMtimeMs: input.endpointMtimeMs,
+						processIncarnation: input.processIncarnation,
+						hostIncarnation: input.hostIncarnation,
+						lifecycleRequestId: input.lifecycleRequestId,
+						remoteCreateKey: input.remoteCreateKey,
+					},
+				};
+			},
+		});
+		await expect(
+			server.callTool("gjc_coordinator_start_session", {
+				cwd: root,
+				idempotency_key: creationKey,
+				allow_mutation: true,
+			}),
+		).resolves.toMatchObject({ ok: false });
+		const originalPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(creationKey).digest("hex")}.json`,
+		);
+		const original = JSON.parse(await fs.readFile(originalPath, "utf8")) as { request_digest: string };
+		const retirementArgs = {
+			cwd: root,
+			session_id: "retired-session",
+			state_root: path.join(root, ".gjc", "state"),
+			endpoint_generation: 2,
+			endpoint_mtime_ms: 1,
+			process_incarnation: "linux:123",
+			host_incarnation: "host:123",
+			lifecycle_request_id: "retire-effect",
+			remote_create_key: remoteCreateKey,
+			creation_idempotency_key: creationKey,
+			request_digest: original.request_digest,
+			idempotency_key: retirementKey,
+			allow_mutation: true,
+		};
+		const first = await server.callTool("gjc_coordinator_retire_start_session", retirementArgs);
+		expect(first).toMatchObject({ ok: true, retired: true });
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+		const interruptedOriginal = JSON.parse(await fs.readFile(originalPath, "utf8")) as Record<string, unknown>;
+		const retirementPath = path.join(
+			coordinatorNamespace(root),
+			"idempotency",
+			`${createHash("sha256").update(retirementKey).digest("hex")}.json`,
+		);
+		const interruptedRetirementOnly = JSON.parse(await fs.readFile(retirementPath, "utf8")) as Record<
+			string,
+			unknown
+		>;
+		interruptedRetirementOnly.state = "in_progress";
+		delete interruptedRetirementOnly.response;
+		delete interruptedRetirementOnly.completed_at;
+		await fs.writeFile(retirementPath, `${JSON.stringify(interruptedRetirementOnly)}\n`);
+		const registryPath = coordinatorStatePaths(server.config.stateRoot, server.config.namespace.identity).registry;
+		const registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+			creations: Record<string, { retirement_intent?: { retirement_key_digest?: string } }>;
+		};
+		const creationDigest = createHash("sha256").update(`gjc_coordinator_start_session\0${creationKey}`).digest("hex");
+		const retirementIntent = registry.creations[creationDigest]?.retirement_intent;
+		const originalRetirementDigest = retirementIntent?.retirement_key_digest;
+		expect(originalRetirementDigest).toBeDefined();
+		if (!retirementIntent || typeof originalRetirementDigest !== "string")
+			throw new Error("missing durable retirement intent");
+		retirementIntent.retirement_key_digest = "0".repeat(64);
+		await fs.writeFile(registryPath, `${JSON.stringify(registry)}\n`);
+		await expect(server.callTool("gjc_coordinator_retire_start_session", retirementArgs)).resolves.toMatchObject({
+			ok: false,
+			error: { code: "retire_not_allowed" },
+		});
+		retirementIntent.retirement_key_digest = originalRetirementDigest;
+		await fs.writeFile(registryPath, `${JSON.stringify(registry)}\n`);
+		interruptedRetirementOnly.state = "in_progress";
+		delete interruptedRetirementOnly.response;
+		delete interruptedRetirementOnly.completed_at;
+		await fs.writeFile(retirementPath, `${JSON.stringify(interruptedRetirementOnly)}\n`);
+		const replayAfterRetirementSealCrash = await server.callTool(
+			"gjc_coordinator_retire_start_session",
+			retirementArgs,
+		);
+		expect(replayAfterRetirementSealCrash).toEqual(first);
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+
+		interruptedOriginal.state = "in_progress";
+		delete interruptedOriginal.response;
+		delete interruptedOriginal.completed_at;
+		await fs.writeFile(originalPath, `${JSON.stringify(interruptedOriginal)}\n`);
+		const interruptedRetirement = JSON.parse(await fs.readFile(retirementPath, "utf8")) as Record<string, unknown>;
+		interruptedRetirement.state = "in_progress";
+		delete interruptedRetirement.response;
+		delete interruptedRetirement.completed_at;
+		await fs.writeFile(retirementPath, `${JSON.stringify(interruptedRetirement)}\n`);
+		const retried = await server.callTool("gjc_coordinator_retire_start_session", retirementArgs);
+		expect(retried).toEqual(first);
+		expect(controls.filter(control => control.operation === "session.reconcile_uncertain")).toHaveLength(1);
+	});
+
 	it("keeps compensation unobserved when broker close is rejected", async () => {
 		const root = await tempRoot();
 		const controls: SdkControl[] = [];

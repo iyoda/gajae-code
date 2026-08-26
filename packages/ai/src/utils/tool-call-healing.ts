@@ -19,7 +19,7 @@
 
 import {
 	attachUnicodeEscapeEvidence,
-	collectUnicodeEscapeEvidence,
+	collectUnsafeUnicodeEscapeEvidence,
 	parseJsonWithRepair,
 	type UnicodeEscapeEvidence,
 } from "./json-parse";
@@ -243,9 +243,11 @@ export class ToolCallHealer {
 		const name = normalizeFunctionName(rawId);
 		const id = generateHealedToolCallId();
 
-		// Sample the raw payload first: the round-trip below decodes `\uXXXX` into
-		// literal characters, so checking `argsJson` afterwards always reports clean.
-		const escapedUnicodeArgumentEvidence = collectUnicodeEscapeEvidence(rawArgs);
+		// Sample unsafe raw payloads first: the round-trip below decodes `\uXXXX`
+		// into literal characters, so malformed escape data must be retained before
+		// normalization. Valid escapes need no evidence because their decoded value
+		// is canonical.
+		const escapedUnicodeArgumentEvidence = collectUnsafeUnicodeEscapeEvidence(rawArgs);
 		const escapedNonAsciiArguments = escapedUnicodeArgumentEvidence !== undefined;
 
 		let argsJson = rawArgs;

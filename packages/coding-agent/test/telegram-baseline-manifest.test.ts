@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ADAPTERS } from "../src/sdk/protocol/operation-registry";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const packageRoot = path.join(repoRoot, "packages", "coding-agent");
@@ -25,7 +26,7 @@ interface BaselineManifest {
 }
 
 interface SdkAdapterParityManifest extends BaselineManifest {
-	rows: { argv: string[] }[];
+	rows: { adapter: string; argv: string[] }[];
 }
 
 async function tempDir(): Promise<string> {
@@ -334,8 +335,22 @@ describe("test manifest runner", () => {
 
 		expect(result.exitCode, output(result)).toBe(0);
 		expect(output(result)).toContain(`manifest command receipts complete: ${manifest.commands.length}`);
+		// The aggregate summary is derived from the manifest row inventory and the
+		// adapter registry instead of a hand-maintained literal, so registry growth
+		// (e.g. #4954's uncertain-retirement row) updates this assertion with the
+		// manifest itself. The derivation stays fail-closed: zero rows, a missing
+		// adapter, an unknown adapter, or asymmetric per-adapter counts all fail.
+		const perAdapter = new Map<string, number>();
+		for (const row of manifest.rows) perAdapter.set(row.adapter, (perAdapter.get(row.adapter) ?? 0) + 1);
+		expect(manifest.rows.length, "parity manifest must declare rows").toBeGreaterThan(0);
+		expect([...perAdapter.keys()].sort(), "parity manifest must cover exactly the registered adapters").toEqual(
+			[...ADAPTERS].sort(),
+		);
+		expect(new Set(perAdapter.values()).size, "parity manifest must keep adapters symmetric").toBe(1);
 		expect(output(result)).toContain(
-			"manifest row receipts complete: 582 (telegram=97, discord=97, slack=97, mcp=97, acp=97, daemonCli=97)",
+			`manifest row receipts complete: ${manifest.rows.length} (${[...perAdapter]
+				.map(([adapter, count]) => `${adapter}=${count}`)
+				.join(", ")})`,
 		);
 		// Receipts run concurrently inside a phase, so their relative order carries
 		// no evidence; what must hold is that every declared receipt ran exactly
