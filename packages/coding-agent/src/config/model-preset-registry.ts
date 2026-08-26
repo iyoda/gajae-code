@@ -329,14 +329,29 @@ const ThinkingSchema = z
 	})
 	.strict()
 	.superRefine((value, context) => {
+		const effortOrder = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+		const rank = (level: (typeof effortOrder)[number]): number => effortOrder.indexOf(level);
 		if (value.minLevel === undefined || value.maxLevel === undefined) {
 			context.addIssue({ code: "custom", message: "Thinking metadata requires minLevel and maxLevel." });
+		}
+		if (value.minLevel !== undefined && value.maxLevel !== undefined && rank(value.minLevel) > rank(value.maxLevel)) {
+			context.addIssue({ code: "custom", message: "Thinking minLevel must not exceed maxLevel." });
 		}
 		if (value.levels !== undefined && value.minLevel !== undefined && !value.levels.includes(value.minLevel)) {
 			context.addIssue({ code: "custom", message: "Thinking levels must include minLevel." });
 		}
 		if (value.levels !== undefined && value.maxLevel !== undefined && !value.levels.includes(value.maxLevel)) {
 			context.addIssue({ code: "custom", message: "Thinking levels must include maxLevel." });
+		}
+		if (
+			value.defaultLevel !== undefined &&
+			(value.levels !== undefined
+				? !value.levels.includes(value.defaultLevel)
+				: value.minLevel !== undefined &&
+					value.maxLevel !== undefined &&
+					(rank(value.defaultLevel) < rank(value.minLevel) || rank(value.defaultLevel) > rank(value.maxLevel)))
+		) {
+			context.addIssue({ code: "custom", message: "Thinking defaultLevel must be within the supported levels." });
 		}
 	});
 const LongContextPricingSchema = z.object({ threshold: z.number().int().positive(), cost: CostSchema }).strict();

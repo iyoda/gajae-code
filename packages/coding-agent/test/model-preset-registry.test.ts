@@ -665,6 +665,23 @@ describe("signed model preset registry", () => {
 		);
 	});
 
+	test("rejects contradictory thinking bounds and defaults", async () => {
+		const data = await fixture();
+		const contradictory = {
+			...registryPreset("contradictory-thinking"),
+			thinking: {
+				mode: "effort" as const,
+				minLevel: "high" as const,
+				maxLevel: "low" as const,
+				defaultLevel: "medium" as const,
+				levels: ["low", "high"] as const,
+			},
+		} as ModelPresetRegistryPresets["presets"][number];
+		await expect(accept(data, signedRegistry(data.privateKey, 1, [], [contradictory]))).rejects.toThrow(
+			/minLevel must not exceed maxLevel|defaultLevel must be within/i,
+		);
+	});
+
 	test("rejects invalid signature, digest, compatibility, snapshot binding, and unknown fields without replacing LKG", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1, [registryProfile("stable")]));
