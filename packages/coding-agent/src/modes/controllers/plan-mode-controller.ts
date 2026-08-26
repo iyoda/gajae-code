@@ -98,6 +98,7 @@ export class PlanModeController {
 	}
 
 	async restoreFromSession(sessionContext: SessionContext): Promise<void> {
+		if (this.ctx.session.isExplicitEmptyToolSelection()) return;
 		if (!this.ctx.session.settings.get("plan.enabled")) {
 			if (sessionContext.mode === "plan" || sessionContext.mode === "plan_paused")
 				this.ctx.sessionManager.appendModeChange("none");
@@ -115,6 +116,10 @@ export class PlanModeController {
 
 	async enter(options?: { planFilePath?: string; workflow?: "parallel" | "iterative" }): Promise<void> {
 		if (this.#enabled) return;
+		if (this.ctx.session.isExplicitEmptyToolSelection()) {
+			this.ctx.showWarning("Plan mode requires built-in tools and is unavailable in a --no-tools session.");
+			return;
+		}
 		if (!this.ctx.modeGate.enter("plan")) return this.ctx.showWarning("Exit goal mode first.");
 		this.#paused = false;
 		const planFilePath = options?.planFilePath ?? "local://PLAN.md";
@@ -122,9 +127,12 @@ export class PlanModeController {
 		this.#previousTools = previousTools;
 		this.#planFilePath = planFilePath;
 		this.#enabled = true;
-		await this.ctx.session.setActiveToolsByName(
-			this.ctx.session.getToolByName("resolve") ? [...new Set([...previousTools, "resolve"])] : previousTools,
-		);
+		const planTools = this.ctx.session.isExplicitEmptyToolSelection()
+			? previousTools
+			: this.ctx.session.getToolByName("resolve")
+				? [...new Set([...previousTools, "resolve"])]
+				: previousTools;
+		await this.ctx.session.setActiveToolsByName(planTools);
 		this.ctx.session.setPlanModeState({
 			enabled: true,
 			planFilePath,
@@ -143,7 +151,7 @@ export class PlanModeController {
 	async exit(options?: { silent?: boolean; paused?: boolean }): Promise<void> {
 		if (!this.#enabled) return;
 		await this.ctx.session.abort({ timeoutMs: ABORT_TIMEOUT_MS });
-		if (this.#previousTools?.length) await this.ctx.session.setActiveToolsByName(this.#previousTools);
+		if (this.#previousTools !== undefined) await this.ctx.session.setActiveToolsByName(this.#previousTools);
 		if (this.#providerSessionScope && !this.ctx.session.isStreaming) {
 			if (await this.ctx.session.restoreTemporaryProviderSessionScope(this.#providerSessionScope))
 				this.#providerSessionScope = undefined;
