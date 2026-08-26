@@ -2036,7 +2036,7 @@ export class ModelRegistry {
 				const inheritedCompat = explicitTransportMatches
 					? explicitTransport?.compat
 					: commonRegistryTransportCompat(transportTemplates);
-				merged.push({
+				const hydratedRegistryModel = {
 					...registryModel,
 					baseUrl: transportSource.baseUrl!,
 					headers: transportSource.headers,
@@ -2048,7 +2048,12 @@ export class ModelRegistry {
 						inheritedCompat || registryModel.compat || explicitTransport?.compat
 							? { ...inheritedCompat, ...registryModel.compat, ...explicitTransport?.compat }
 							: undefined,
-				});
+				};
+				merged.push(
+					explicitTransportMatches
+						? this.#applyProviderTransportOverride(hydratedRegistryModel, explicitTransport!)
+						: hydratedRegistryModel,
+				);
 				indexByKey.set(key, merged.length - 1);
 				continue;
 			}
