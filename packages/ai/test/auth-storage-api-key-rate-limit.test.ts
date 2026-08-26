@@ -68,4 +68,49 @@ describe("AuthStorage api-key usage-limit fallback", () => {
 		const unknown = await authStorage.markCredentialUsageLimitReached("zai", "zai-key-unknown");
 		expect(unknown).toBe(false);
 	});
+
+	it("does not block a replacement row after a broker mutation during usage lookup", async () => {
+		if (!store) throw new Error("test setup failed");
+		const delayedUsage = Promise.withResolvers<null>();
+		Object.defineProperty(store, "getUsageReport", {
+			configurable: true,
+			value: async () => delayedUsage.promise,
+		});
+		store.saveOAuth("anthropic", {
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60_000,
+			accountId: "account-a",
+			email: "a@example.com",
+		});
+		store.saveOAuth("anthropic", {
+			access: "access-b",
+			refresh: "refresh-b",
+			expires: Date.now() + 60_000,
+			accountId: "account-b",
+			email: "b@example.com",
+		});
+		const localStorage = new AuthStorage(store, {
+			rankingStrategyResolver: () => ({
+				findWindowLimits: () => ({}),
+				windowDefaults: { primaryMs: 1, secondaryMs: 1 },
+			}),
+		});
+		await localStorage.reload();
+		const first = store.listAuthCredentials("anthropic")[0];
+		if (!first) throw new Error("missing first credential");
+
+		const pending = localStorage.markCredentialUsageLimitReached("anthropic", "access-a", {
+			retryAfterMs: 60_000,
+		});
+		await new Promise(resolve => setTimeout(resolve, 0));
+		store.deleteAuthCredential(first.id, "revoked during usage lookup");
+		await localStorage.reload();
+		delayedUsage.resolve(null);
+
+		expect(await pending).toBe(false);
+		const active = localStorage.listCredentialInventory("anthropic").filter(row => !row.disabled);
+		expect(active).toHaveLength(1);
+		expect(active[0]?.id).not.toBe(first.id);
+	});
 });

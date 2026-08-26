@@ -5553,30 +5553,40 @@ export class AuthStorage {
 	): Promise<boolean> {
 		const storageProvider = resolveOAuthStorageProvider(provider);
 		const stored = this.#getStoredCredentials(storageProvider);
+		let matched: { id: number; type: AuthCredential["type"] } | undefined;
 		for (let index = 0; index < stored.length; index++) {
 			const entry = stored[index];
 			if (!entry || !(await this.#credentialMatchesApiKey(storageProvider, entry.credential, apiKey))) {
 				continue;
 			}
-			const now = Date.now();
-			let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
-			if (entry.credential.type === "oauth" && this.#rankingStrategyResolver?.(storageProvider)) {
-				const report = await this.#getUsageReport(storageProvider, entry.credential, options);
-				if (report && this.#isUsageLimitReached(report)) {
-					const resetAtMs = this.#getUsageResetAtMs(report, Date.now());
-					if (resetAtMs && resetAtMs > blockedUntil) {
-						blockedUntil = resetAtMs;
-					}
+			matched = { id: entry.id, type: entry.credential.type };
+			break;
+		}
+		if (!matched) return false;
+
+		const matchedEntry = stored.find(entry => entry.id === matched.id);
+		if (!matchedEntry) return false;
+		const now = Date.now();
+		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		if (matchedEntry.credential.type === "oauth" && this.#rankingStrategyResolver?.(storageProvider)) {
+			const report = await this.#getUsageReport(storageProvider, matchedEntry.credential, options);
+			if (report && this.#isUsageLimitReached(report)) {
+				const resetAtMs = this.#getUsageResetAtMs(report, Date.now());
+				if (resetAtMs && resetAtMs > blockedUntil) {
+					blockedUntil = resetAtMs;
 				}
 			}
-			this.#markCredentialBlocked(
-				this.#getProviderTypeKey(storageProvider, entry.credential.type),
-				index,
-				blockedUntil,
-			);
-			return true;
 		}
-		return false;
+		const currentEntries = this.#getStoredCredentials(storageProvider);
+		const currentIndex = currentEntries.findIndex(entry => entry.id === matched.id);
+		const currentEntry = currentEntries[currentIndex];
+		if (!currentEntry || currentEntry.credential.type !== matched.type) return false;
+		this.#markCredentialBlocked(
+			this.#getProviderTypeKey(storageProvider, currentEntry.credential.type),
+			currentIndex,
+			blockedUntil,
+		);
+		return true;
 	}
 
 	// ─── Auth Broker integration ────────────────────────────────────────────
