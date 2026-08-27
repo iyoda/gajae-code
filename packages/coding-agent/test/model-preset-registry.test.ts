@@ -1007,7 +1007,8 @@ describe("signed model preset registry", () => {
 		).rejects.toThrow(/equivocation|downgrade/i);
 		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
 		expect(state.highestSeenRevision).toBe(1);
-		expect(state.revokedHistory).toHaveLength(1);
+		expect(state.history).toHaveLength(1);
+		expect(state.history[0].revoked).toBe(true);
 	});
 
 	test("keeps a newer rotated generation available during offline startup", async () => {
@@ -1032,6 +1033,42 @@ describe("signed model preset registry", () => {
 			activeRevision: 2,
 			highestSeenRevision: 2,
 		});
+	});
+
+	test("keeps retained selections available after offline rotation recovery", async () => {
+		const data = await fixture();
+		await accept(
+			data,
+			signedRegistry(
+				data.privateKey,
+				1,
+				[registryProfile("retained", "provider/retained-model")],
+				[registryPreset("retained-model")],
+			),
+		);
+		const rotated = crypto.generateKeyPairSync("ed25519");
+		data.trustedKeys.set("rotated-key", {
+			keyId: "rotated-key",
+			publicKeyPem: rotated.publicKey.export({ type: "spki", format: "pem" }).toString(),
+			validFrom: "2026-01-01T00:00:00.000Z",
+		});
+		await accept(
+			data,
+			signedRegistry(
+				rotated.privateKey,
+				2,
+				[registryProfile("replacement", "provider/replacement-model")],
+				[registryPreset("replacement-model")],
+				undefined,
+				[],
+				"rotated-key",
+			),
+		);
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
+		expect(accepted.revision).toBe(2);
+		expect(accepted.profiles.has("retained")).toBe(true);
+		expect(accepted.presets).toEqual(expect.arrayContaining([expect.objectContaining({ id: "retained-model" })]));
 	});
 
 	test("uses ETag 304 only with a verified warm cache", async () => {
