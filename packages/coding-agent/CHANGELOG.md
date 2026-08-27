@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-08-27
+
 ### Added
 
 - The `ask` tool declares its display-only argument fields (`questions.question`, `questions.options.label`) via `displaySafeEscapedArgFields`, so an `ask` call whose question text or option labels arrive as `\uXXXX` escapes (common from Anthropic models writing Korean or emoji) completes with a single warning instead of discarding the turn, charging the managed-fallback retry budget, and ultimately failing the run. Ids, workflow-gate metadata, and deep-interview records remain load-bearing and keep the fail-closed rejection. (#4983)

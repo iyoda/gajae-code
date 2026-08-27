@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-08-27
+
 ### Fixed
 
 - Notification hosts can now obtain opaque exact-generation, prerequisite-bound receipts for accepted directed frames and queue a dependent idle on that bounded recipient cohort; raw fallbacks carry their prerequisite and idle in one writer command without global barriers or accumulating timeout waiters.
