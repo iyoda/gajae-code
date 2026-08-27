@@ -143,6 +143,22 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(values).not.toContain("@../outside/nested/deeper/zzz.ts");
 			expect(values.some(value => value.includes("alpha-local.ts"))).toBe(false);
 		});
+
+		it("resolves an NFC parent component without falling back to sibling directories", async () => {
+			const nfdParent = "\u1112\u1161\u11AB";
+			const nfcParent = nfdParent.normalize("NFC");
+			const decoyParent = `${nfcParent}-decoy`;
+			fs.mkdirSync(path.join(baseDir, nfdParent));
+			fs.mkdirSync(path.join(baseDir, decoyParent));
+			fs.writeFileSync(path.join(baseDir, nfdParent, "target.ts"), "export const target = 1;\n");
+			fs.writeFileSync(path.join(baseDir, decoyParent, "target.ts"), "export const decoy = 1;\n");
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `@${nfcParent}/target`;
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.items.map(item => item.value)).toEqual([`@${nfdParent}/target.ts`]);
+		});
 	});
 	describe("dot-slash path completion", () => {
 		let baseDir: string;
@@ -217,6 +233,56 @@ describe("CombinedAutocompleteProvider", () => {
 			const result = await provider.getForceFileSuggestions([line], 0, line.length);
 			const values = result?.items.map(item => item.value) ?? [];
 			expect(values).toContain(`./${nfdDirectory}/${nfdName}`);
+		});
+
+		it("keeps normalized directory completions stable across the directory cache", async () => {
+			fs.mkdirSync(path.join(baseDir, nfdDirectory));
+			fs.writeFileSync(path.join(baseDir, nfdDirectory, nfdName), "content\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `./${nfdDirectory.normalize("NFC")}/`;
+
+			const first = await provider.getForceFileSuggestions([line], 0, line.length);
+			const second = await provider.getForceFileSuggestions([line], 0, line.length);
+
+			expect(first?.items.map(item => item.value)).toEqual([`./${nfdDirectory}/${nfdName}`]);
+			expect(second?.items.map(item => item.value)).toEqual([`./${nfdDirectory}/${nfdName}`]);
+		});
+
+		it("preserves exact on-disk spelling across mixed NFC/NFD parent components", async () => {
+			const outerNfd = nfdDirectory;
+			const innerNfd = nfdName.slice(0, -4);
+			const childNfd = `${nfdDirectory}${innerNfd}.txt`;
+			const outerNfc = outerNfd.normalize("NFC");
+			const innerNfc = innerNfd.normalize("NFC");
+			const childNfc = childNfd.normalize("NFC");
+			fs.mkdirSync(path.join(baseDir, outerNfd, innerNfd), { recursive: true });
+			fs.writeFileSync(path.join(baseDir, outerNfd, innerNfd, childNfd), "content\n");
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `./${outerNfc}/${innerNfc}/${childNfc}`;
+			const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+			expect(result?.items.map(item => item.value)).toEqual([`./${outerNfd}/${innerNfd}/${childNfd}`]);
+		});
+
+		it("stats symlink children relative to the resolved normalized parent", async () => {
+			const nfcParent = nfdDirectory.normalize("NFC");
+			const parentPath = path.join(baseDir, nfdDirectory);
+			const targetPath = path.join(baseDir, "symlink-target");
+			fs.mkdirSync(parentPath);
+			fs.mkdirSync(targetPath);
+			fs.writeFileSync(path.join(targetPath, "child.txt"), "content\n");
+			try {
+				fs.symlinkSync(targetPath, path.join(parentPath, "linked"), "dir");
+			} catch {
+				return;
+			}
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = `./${nfcParent}/lin`;
+			const result = await provider.getForceFileSuggestions([line], 0, line.length);
+
+			expect(result?.items.map(item => item.value)).toContain(`./${nfdDirectory}/linked/`);
 		});
 	});
 });
