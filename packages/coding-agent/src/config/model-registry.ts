@@ -1530,6 +1530,7 @@ export class ModelRegistry {
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
+	#runtimeProviderAuthHeaders: Map<string, boolean> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	#registryModelKeys: Set<string> = new Set();
@@ -1829,13 +1830,24 @@ export class ModelRegistry {
 		this.#equivalenceConfig = undefined;
 		this.#modelBindingsApplier.setBindings(undefined);
 		this.#configError = undefined;
-		this.#loadModels();
 		for (const [provider, apiKeyConfig] of this.#runtimeProviderApiKeys) {
 			const resolved = resolveApiKeyConfig(apiKeyConfig);
 			if (!resolved) continue;
 			this.#customProviderApiKeys.set(provider, resolved);
 			this.authStorage.setConfigApiKey(provider, resolved);
+			const authHeader = this.#runtimeProviderAuthHeaders.get(provider);
+			if (authHeader === true) {
+				this.#runtimeModelOverlays = this.#runtimeModelOverlays.map(overlay => {
+					if (overlay.provider !== provider) return overlay;
+					const headers = { ...(overlay.headers ?? {}) };
+					delete headers.Authorization;
+					return { ...overlay, headers: { ...headers, Authorization: `Bearer ${resolved}` } };
+				});
+				const override = this.#runtimeProviderOverrides.get(provider);
+				if (override) this.#runtimeProviderOverrides.set(provider, { ...override, apiKey: resolved });
+			}
 		}
+		this.#loadModels();
 		this.#lastDisabledProviderKey = disabledProviderKey;
 	}
 
@@ -4915,12 +4927,12 @@ export class ModelRegistry {
 		}
 		const authHeader = this.#customProviderAuthHeaders.get(provider);
 		if (authHeader !== true) return;
-		this.#models = this.#models.map(model => {
-			if (model.provider !== provider) return model;
+		for (const model of this.#models) {
+			if (model.provider !== provider) continue;
 			const headers = { ...(model.headers ?? {}) };
 			delete headers.Authorization;
-			return { ...model, headers: resolved ? { ...headers, Authorization: `Bearer ${resolved}` } : headers };
-		});
+			model.headers = resolved ? { ...headers, Authorization: `Bearer ${resolved}` } : headers;
+		}
 		this.#rebuildCanonicalIndex();
 	}
 
@@ -4973,6 +4985,7 @@ export class ModelRegistry {
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
+		this.#runtimeProviderAuthHeaders.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 		this.#clearDescriptorDiscoveryEvidence(providerName);
@@ -5091,6 +5104,7 @@ export class ModelRegistry {
 			this.#customProviderApiKeys.set(providerName, resolved);
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
 			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
+			if (config.authHeader !== undefined) this.#runtimeProviderAuthHeaders.set(providerName, config.authHeader);
 			this.authStorage.setConfigApiKey(providerName, resolved);
 		}
 

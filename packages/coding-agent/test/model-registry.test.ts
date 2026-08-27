@@ -6197,7 +6197,7 @@ describe("ModelRegistry", () => {
 		}
 	});
 
-	test("materializes a resolved runtime apiKey in auth headers", () => {
+	test("materializes a resolved runtime apiKey in auth headers", async () => {
 		const envName = "GJC_TEST_RUNTIME_AUTH_HEADER_KEY";
 		const restoreKey = setEnvForTest(envName, "resolved-runtime-auth-key");
 		try {
@@ -6222,6 +6222,12 @@ describe("ModelRegistry", () => {
 
 			expect(registry.find("runtime-auth", "runtime-auth-model")?.headers?.Authorization).toBe(
 				"Bearer resolved-runtime-auth-key",
+			);
+			Bun.env[envName] = "rotated-runtime-auth-key";
+			writeRawModelsJson({});
+			await registry.refresh("offline");
+			expect(registry.find("runtime-auth", "runtime-auth-model")?.headers?.Authorization).toBe(
+				"Bearer rotated-runtime-auth-key",
 			);
 		} finally {
 			restoreKey();
