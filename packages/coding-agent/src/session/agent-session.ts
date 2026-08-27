@@ -4185,6 +4185,11 @@ export class AgentSession {
 				"This session cannot rescope its working directory; only top-level unrestrained sessions can move.",
 			);
 		}
+		if (!enforceOneShot && this.isStreaming) {
+			throw Object.assign(new Error("Cannot relocate while a response is streaming; wait for it to finish."), {
+				code: "busy",
+			});
+		}
 		if (enforceOneShot && this.#rescopeSessionCwdConsumed) {
 			throw new Error("This session has already been rescoped; only one agent-invoked move is allowed per session.");
 		}
@@ -4197,6 +4202,11 @@ export class AgentSession {
 				throw new Error(
 					"This session has already been rescoped; only one agent-invoked move is allowed per session.",
 				);
+			}
+			if (!enforceOneShot && this.isStreaming) {
+				throw Object.assign(new Error("Cannot relocate while a response is streaming; wait for it to finish."), {
+					code: "busy",
+				});
 			}
 			if (this.getEffectiveActiveWorkflowSkillState()) {
 				throw new Error(
