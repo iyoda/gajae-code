@@ -1324,14 +1324,21 @@ export class AuthStorage {
 	 */
 	#recentOAuthRefreshFailures = new Map<string, { expiresAt: number; error: unknown }>();
 	#oauthRefreshLeaseOwner = crypto.randomUUID();
+	#reloadRequest = 0;
+	#unsubscribeSnapshotChanged?: () => void;
 
 	#closed = false;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
-		store.onSnapshotChanged?.(() => {
+		this.#unsubscribeSnapshotChanged = store.onSnapshotChanged?.(() => {
+			if (this.#closed) return;
+			const request = ++this.#reloadRequest;
+			// Snapshot listeners fire after the backing store has applied the new
+			// authority. Apply it synchronously so a revoked row cannot remain
+			// visible while waitForReady() hydrates presentation metadata.
 			this.#reloadCredentialRowsFromStore();
-			void this.reload();
+			void this.#reloadAfterReady(request);
 		});
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
@@ -1377,6 +1384,9 @@ export class AuthStorage {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#unsubscribeSnapshotChanged?.();
+		this.#unsubscribeSnapshotChanged = undefined;
+		this.#reloadRequest += 1;
 		this.#credentialScopeLeases.clear();
 		this.#sessionCredentialSelectors.clear();
 		this.#sessionCredentialAutoMasks.clear();
@@ -2016,7 +2026,13 @@ export class AuthStorage {
 	 * Reload credentials from storage.
 	 */
 	async reload(): Promise<void> {
+		const request = ++this.#reloadRequest;
+		await this.#reloadAfterReady(request);
+	}
+
+	async #reloadAfterReady(request: number): Promise<void> {
 		await this.#store.waitForReady?.();
+		if (this.#closed || request !== this.#reloadRequest) return;
 		this.#reloadCredentialRowsFromStore();
 	}
 
@@ -2078,6 +2094,7 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		this.#rebaseCredentialBackoffs(provider, current, credentials);
 		const identityOrderChanged =
 			current.length !== credentials.length ||
 			current.some(
@@ -2231,6 +2248,21 @@ export class AuthStorage {
 		const existing = backoffMap.get(credentialIndex) ?? 0;
 		backoffMap.set(credentialIndex, Math.max(existing, blockedUntilMs));
 		this.#credentialBackoff.set(providerKey, backoffMap);
+	}
+
+	/** Marks a row by durable id so a concurrent snapshot reorder cannot block a neighbor. */
+	#markCredentialBlockedById(
+		provider: string,
+		type: AuthCredential["type"],
+		credentialId: number,
+		blockedUntilMs: number,
+	): boolean {
+		const index = this.#getStoredCredentials(provider).findIndex(
+			entry => entry.id === credentialId && entry.credential.type === type,
+		);
+		if (index === -1) return false;
+		this.#markCredentialBlocked(this.#getProviderTypeKey(provider, type), index, blockedUntilMs);
+		return true;
 	}
 
 	/** Records which credential was used for a session (for rate-limit switching). */
@@ -2461,10 +2493,26 @@ export class AuthStorage {
 			}
 		}
 		this.#sessionLastCredential.delete(provider);
-		for (const key of this.#credentialBackoff.keys()) {
-			if (key.startsWith(`${provider}:`)) {
-				this.#credentialBackoff.delete(key);
+	}
+
+	/** Rebase index-keyed backoffs onto the same credential rows after a reorder. */
+	#rebaseCredentialBackoffs(
+		provider: string,
+		previous: readonly StoredCredential[],
+		next: readonly StoredCredential[],
+	): void {
+		for (const [providerKey, backoffs] of this.#credentialBackoff) {
+			if (!providerKey.startsWith(`${provider}:`)) continue;
+			const type = providerKey.slice(provider.length + 1);
+			const rebased = new Map<number, number>();
+			for (const [oldIndex, blockedUntil] of backoffs) {
+				const previousEntry = previous[oldIndex];
+				if (!previousEntry || previousEntry.credential.type !== type) continue;
+				const nextIndex = next.findIndex(entry => entry.id === previousEntry.id && entry.credential.type === type);
+				if (nextIndex !== -1) rebased.set(nextIndex, blockedUntil);
 			}
+			if (rebased.size > 0) this.#credentialBackoff.set(providerKey, rebased);
+			else this.#credentialBackoff.delete(providerKey);
 		}
 	}
 
@@ -2477,14 +2525,15 @@ export class AuthStorage {
 		expectedId?: number,
 	): void {
 		const entries = this.#getStoredCredentials(provider);
-		if (index < 0 || index >= entries.length) return;
-		const target = entries[index];
-		if (expectedId !== undefined && target.id !== expectedId) {
-			throw new Error("Credential authority changed during refresh");
+		const targetIndex = expectedId === undefined ? index : entries.findIndex(entry => entry.id === expectedId);
+		if (targetIndex < 0 || targetIndex >= entries.length) {
+			if (expectedId !== undefined) throw new Error("Credential authority changed during refresh");
+			return;
 		}
-		if (persist && !this.#store.refreshSnapshot) this.#store.updateAuthCredential(target.id, credential);
+		const target = entries[targetIndex];
+		if (persist && !this.#store.refreshOAuthCredential) this.#store.updateAuthCredential(target.id, credential);
 		const updated = [...entries];
-		updated[index] = { id: target.id, credential };
+		updated[targetIndex] = { id: target.id, credential };
 		this.#setStoredCredentials(provider, updated);
 		if (
 			credential.type === "oauth" &&
@@ -3469,32 +3518,46 @@ export class AuthStorage {
 		return match?.id;
 	}
 
-	#persistRefreshedUsageCredential(provider: Provider, previous: UsageCredential, next: UsageCredential): void {
+	#persistRefreshedUsageCredential(
+		provider: Provider,
+		previous: UsageCredential,
+		next: UsageCredential,
+		credentialId?: number,
+	): void {
 		const entries = this.#getStoredCredentials(provider);
-		const index = entries.findIndex(entry => {
-			if (entry.credential.type !== "oauth") return false;
-			if (previous.refreshToken && entry.credential.refresh === previous.refreshToken) return true;
-			if (previous.accessToken && entry.credential.access === previous.accessToken) return true;
-			return (
-				entry.credential.accountId === previous.accountId &&
-				entry.credential.email === previous.email &&
-				entry.credential.projectId === previous.projectId
-			);
-		});
+		const index =
+			credentialId === undefined
+				? entries.findIndex(entry => {
+						if (entry.credential.type !== "oauth") return false;
+						if (previous.refreshToken && entry.credential.refresh === previous.refreshToken) return true;
+						if (previous.accessToken && entry.credential.access === previous.accessToken) return true;
+						return (
+							entry.credential.accountId === previous.accountId &&
+							entry.credential.email === previous.email &&
+							entry.credential.projectId === previous.projectId
+						);
+					})
+				: entries.findIndex(entry => entry.id === credentialId);
 		if (index === -1) return;
 		const existing = entries[index]!.credential;
 		if (existing.type !== "oauth") return;
-		this.#replaceCredentialAt(provider, index, {
-			type: "oauth",
-			access: next.accessToken ?? existing.access,
-			refresh: next.refreshToken ?? existing.refresh,
-			expires: next.expiresAt ?? existing.expires,
-			accountId: next.accountId,
-			projectId: next.projectId,
-			email: next.email,
-			enterpriseUrl: next.enterpriseUrl,
-			mcpBinding: next.mcpBinding ?? existing.mcpBinding,
-		});
+		this.#replaceCredentialAt(
+			provider,
+			index,
+			{
+				type: "oauth",
+				access: next.accessToken ?? existing.access,
+				refresh: next.refreshToken ?? existing.refresh,
+				expires: next.expiresAt ?? existing.expires,
+				accountId: next.accountId,
+				projectId: next.projectId,
+				email: next.email,
+				enterpriseUrl: next.enterpriseUrl,
+				mcpBinding: next.mcpBinding ?? existing.mcpBinding,
+			},
+			true,
+			credentialId,
+		);
 	}
 
 	async #fetchUsageUncached(
@@ -3533,7 +3596,12 @@ export class AuthStorage {
 						timeoutSignal,
 					);
 					const refreshedCredential = this.#mergeRefreshedUsageCredential(request.credential, refreshed);
-					this.#persistRefreshedUsageCredential(request.provider, request.credential, refreshedCredential);
+					this.#persistRefreshedUsageCredential(
+						request.provider,
+						request.credential,
+						refreshedCredential,
+						refreshableCredentialId,
+					);
 					params = {
 						...params,
 						credential: refreshedCredential,
@@ -4275,6 +4343,7 @@ export class AuthStorage {
 		provider = resolveOAuthStorageProvider(provider);
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		if (!sessionCredential) return false;
+		const sessionCredentialId = this.#getStoredCredentials(provider)[sessionCredential.index]?.id;
 
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		const now = Date.now();
@@ -4293,13 +4362,19 @@ export class AuthStorage {
 			}
 		}
 
-		this.#markCredentialBlocked(providerKey, sessionCredential.index, blockedUntil);
+		const currentIndex =
+			sessionCredentialId === undefined
+				? sessionCredential.index
+				: this.#getStoredCredentials(provider).findIndex(entry => entry.id === sessionCredentialId);
+		const currentEntry = this.#getStoredCredentials(provider)[currentIndex];
+		if (currentIndex < 0 || currentEntry?.credential.type !== sessionCredential.type) return false;
+		this.#markCredentialBlocked(providerKey, currentIndex, blockedUntil);
 
 		const remainingCredentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter(
 				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === sessionCredential.type && entry.index !== sessionCredential.index,
+					entry.credential.type === sessionCredential.type && entry.index !== currentIndex,
 			);
 
 		return remainingCredentials.some(candidate => !this.#isCredentialBlocked(providerKey, candidate.index));
@@ -4448,7 +4523,7 @@ export class AuthStorage {
 			if (!blocked && usage && this.#isUsageLimitReached(usage)) {
 				const resetAtMs = this.#getUsageResetAtMs(usage, nowMs);
 				blockedUntil = resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs;
-				this.#markCredentialBlocked(args.providerKey, selection.index, blockedUntil);
+				this.#markCredentialBlockedById(args.provider, "oauth", selection.id, blockedUntil);
 				blocked = true;
 			}
 			const windows = usage ? strategy.findWindowLimits(usage) : undefined;
@@ -4796,7 +4871,11 @@ export class AuthStorage {
 						if (Date.now() >= deadline) {
 							throw new Error("OAuth token refresh ownership remained ambiguous");
 						}
-						await Bun.sleep(Math.min(50, Math.max(1, claim.expiresAt - Date.now())));
+						await raceCredentialRefreshWithSignal(
+							Bun.sleep(Math.min(50, Math.max(1, claim.expiresAt - Date.now()))),
+							signal,
+							"OAuth token refresh aborted by caller",
+						);
 					}
 				} else {
 					const persisted = this.#store
@@ -4865,9 +4944,19 @@ export class AuthStorage {
 		try {
 			const refreshed = await Promise.race([refreshPromise, cancellation.promise]);
 			let effectiveRefreshed = refreshed;
-			if (this.#refreshOAuthCredentialOverride && this.#store.refreshSnapshot) {
-				await this.#store.refreshSnapshot();
-				const accepted = this.#store.listAuthCredentials(provider).find(row => row.id === credentialId)?.credential;
+			if (
+				this.#refreshOAuthCredentialOverride &&
+				this.#store.refreshOAuthCredential &&
+				this.#store.refreshSnapshot
+			) {
+				await raceCredentialRefreshWithSignal(
+					this.#store.refreshSnapshot(signal),
+					signal,
+					"OAuth token refresh aborted by caller",
+				);
+				const accepted = this.#store
+					.listAuthCredentials(resolveOAuthStorageProvider(provider))
+					.find(row => row.id === credentialId)?.credential;
 				if (accepted?.type !== "oauth") {
 					throw new Error("Credential authority changed during refresh");
 				}
@@ -5007,9 +5096,10 @@ export class AuthStorage {
 			}
 			if (checkUsage && !allowBlocked && usage && this.#isUsageLimitReached(usage)) {
 				const resetAtMs = this.#getUsageResetAtMs(usage, Date.now());
-				this.#markCredentialBlocked(
-					providerKey,
-					selection.index,
+				this.#markCredentialBlockedById(
+					provider,
+					"oauth",
+					selection.id,
 					resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs,
 				);
 				return undefined;
@@ -5089,9 +5179,10 @@ export class AuthStorage {
 				}
 				if (checkUsage && !allowBlocked && usage && this.#isUsageLimitReached(usage)) {
 					const resetAtMs = this.#getUsageResetAtMs(usage, Date.now());
-					this.#markCredentialBlocked(
-						providerKey,
-						selection.index,
+					this.#markCredentialBlockedById(
+						provider,
+						"oauth",
+						selection.id,
 						resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs,
 					);
 					return undefined;
@@ -5216,7 +5307,7 @@ export class AuthStorage {
 				}
 			} else {
 				// Block temporarily for transient failures (5 minutes)
-				this.#markCredentialBlocked(providerKey, selection.index, Date.now() + 5 * 60 * 1000);
+				this.#markCredentialBlockedById(provider, "oauth", selection.id, Date.now() + 5 * 60 * 1000);
 			}
 		}
 		if (this.#getCredentialSelector(provider, options, sessionId)) {
@@ -5504,11 +5595,11 @@ export class AuthStorage {
 		const sessionId = isAbortSignalOption(optionsOrSignal) ? undefined : optionsOrSignal?.sessionId;
 		const storageProvider = resolveOAuthStorageProvider(provider);
 		const stored = this.#getStoredCredentials(storageProvider);
-		let matched: { id: number; type: AuthCredential["type"]; index: number } | undefined;
+		let matched: { id: number; type: AuthCredential["type"] } | undefined;
 		for (let index = 0; index < stored.length; index++) {
 			const entry = stored[index];
 			if (entry && (await this.#credentialMatchesApiKey(storageProvider, entry.credential, apiKey))) {
-				matched = { id: entry.id, type: entry.credential.type, index };
+				matched = { id: entry.id, type: entry.credential.type };
 				break;
 			}
 		}
@@ -5519,9 +5610,10 @@ export class AuthStorage {
 		}
 
 		this.#clearSessionCredential(storageProvider, sessionId);
-		this.#markCredentialBlocked(
-			this.#getProviderTypeKey(storageProvider, matched.type),
-			matched.index,
+		this.#markCredentialBlockedById(
+			storageProvider,
+			matched.type,
+			matched.id,
 			Date.now() + AuthStorage.#defaultBackoffMs,
 		);
 

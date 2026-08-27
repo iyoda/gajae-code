@@ -3,11 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
 	type CredentialDisabledEvent,
 	SqliteAuthCredentialStore,
 } from "../src/auth-storage";
+import type { UsageProvider, UsageReport } from "../src/usage";
 import * as oauthUtils from "../src/utils/oauth";
 import { withEnv } from "./helpers";
 
@@ -1172,5 +1174,253 @@ describe("AuthStorage OAuth refresh race", () => {
 		const recovered = store.claimOAuthRefreshLease(first.id, "first-secret", false, "owner-b", now + 51, 50);
 		expect(recovered.kind).toBe("claimed");
 		if (recovered.kind === "claimed") expect(recovered.lease.tokenFingerprint).not.toContain("first-secret");
+	});
+
+	test("preserves usage backoff by row id when a snapshot reorders credentials", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("unit-backoff-reorder", [
+			{ type: "api_key", key: "backoff-a" },
+			{ type: "api_key", key: "backoff-b" },
+		]);
+		expect(await authStorage.getApiKey("unit-backoff-reorder")).toBe("backoff-a");
+		expect(
+			await authStorage.markCredentialUsageLimitReached("unit-backoff-reorder", "backoff-a", {
+				retryAfterMs: 60_000,
+			}),
+		).toBe(true);
+
+		const originalList = store.listAuthCredentials.bind(store);
+		vi.spyOn(store, "listAuthCredentials").mockImplementation((provider?: string) => {
+			const rows = originalList(provider);
+			return provider === "unit-backoff-reorder" ? [...rows].reverse() : rows;
+		});
+		await authStorage.reload();
+
+		// The row that was blocked before the reorder remains blocked after it moves
+		// from index 0 to index 1; the unblocked row is selected on every attempt.
+		expect(await authStorage.getApiKey("unit-backoff-reorder")).toBe("backoff-b");
+		expect(await authStorage.getApiKey("unit-backoff-reorder")).toBe("backoff-b");
+	});
+
+	test("cancels a refresh while waiting for another process's lease", async () => {
+		if (!authStorage || !(store instanceof SqliteAuthCredentialStore)) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{ type: "oauth", access: "lease-access", refresh: "lease-refresh", expires: Date.now() - 60_000 },
+		]);
+		const row = store.listAuthCredentials("anthropic")[0];
+		if (!row) throw new Error("credential missing");
+		const claim = store.claimOAuthRefreshLease(row.id, "lease-refresh", false, "other-owner", Date.now(), 5_000);
+		if (claim.kind !== "claimed") throw new Error("expected another process to hold the lease");
+
+		const controller = new AbortController();
+		const startedAt = Date.now();
+		const request = authStorage.getApiKey("anthropic", "lease-cancel", { signal: controller.signal });
+		await Bun.sleep(10);
+		controller.abort();
+		await expect(request).resolves.toBeUndefined();
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		store.releaseOAuthRefreshLease(claim.lease);
+	});
+
+	test("persists local OAuth rotation even when a store only exposes refreshSnapshot", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		oauthUtils.registerOAuthProvider({
+			id: "unit-snapshot-only-refresh",
+			name: "Unit Snapshot Only Refresh",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: Date.now() + 60 * 60_000 };
+			},
+			async refreshToken(credentials) {
+				return {
+					...credentials,
+					access: "snapshot-only-rotated-access",
+					refresh: "snapshot-only-rotated-refresh",
+					expires: Date.now() + 60 * 60_000,
+				};
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		await authStorage.set("unit-snapshot-only-refresh", [
+			{
+				type: "oauth",
+				access: "snapshot-only-old-access",
+				refresh: "snapshot-only-old-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		// A snapshot hook alone does not imply that a local rotation was persisted.
+		// Disable the SQLite lease path so this exercises #replaceCredentialAt's
+		// ordinary persistence branch.
+		const mutableStore = store as unknown as {
+			claimOAuthRefreshLease?: AuthCredentialStore["claimOAuthRefreshLease"];
+			refreshSnapshot?: AuthCredentialStore["refreshSnapshot"];
+		};
+		mutableStore.claimOAuthRefreshLease = undefined;
+		mutableStore.refreshSnapshot = async () => undefined;
+
+		expect(await authStorage.getApiKey("unit-snapshot-only-refresh")).toBe("snapshot-only-rotated-access");
+		const persisted = store.listAuthCredentials("unit-snapshot-only-refresh")[0]?.credential;
+		expect(persisted).toMatchObject({
+			type: "oauth",
+			access: "snapshot-only-rotated-access",
+			refresh: "snapshot-only-rotated-refresh",
+		});
+	});
+
+	test("publishes a usage refresh to its captured row after that row changes", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		const refreshStarted = Promise.withResolvers<void>();
+		const releaseRefresh = Promise.withResolvers<void>();
+		oauthUtils.registerOAuthProvider({
+			id: "unit-usage-row-refresh",
+			name: "Unit Usage Row Refresh",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: Date.now() + 60 * 60_000 };
+			},
+			async refreshToken(credentials) {
+				refreshStarted.resolve();
+				await releaseRefresh.promise;
+				return {
+					...credentials,
+					access: "usage-rotated-access",
+					refresh: "usage-rotated-refresh",
+					expires: Date.now() + 60 * 60_000,
+				};
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		const usageReport: UsageReport = {
+			provider: "unit-usage-row-refresh",
+			fetchedAt: Date.now(),
+			limits: [],
+		};
+		const usageProvider: UsageProvider = {
+			id: "unit-usage-row-refresh",
+			async fetchUsage(params) {
+				expect(params.credential.accessToken).toBe("usage-rotated-access");
+				return usageReport;
+			},
+		};
+		const usageStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "unit-usage-row-refresh" ? usageProvider : undefined),
+		});
+		try {
+			await usageStorage.set("unit-usage-row-refresh", [
+				{
+					type: "oauth",
+					access: "usage-old-access",
+					refresh: "usage-old-refresh",
+					expires: Date.now() - 60_000,
+				},
+			]);
+			const row = store.listAuthCredentials("unit-usage-row-refresh")[0];
+			if (!row) throw new Error("credential missing");
+
+			// Avoid the SQLite refresh lease so the test can replace the row while the
+			// provider refresh is in flight.
+			const mutableStore = store as unknown as {
+				claimOAuthRefreshLease?: AuthCredentialStore["claimOAuthRefreshLease"];
+			};
+			mutableStore.claimOAuthRefreshLease = undefined;
+
+			const reportsPromise = usageStorage.fetchUsageReports();
+			await refreshStarted.promise;
+			store.updateAuthCredential(row.id, {
+				type: "oauth",
+				access: "peer-access",
+				refresh: "peer-refresh",
+				expires: Date.now() + 60 * 60_000,
+			});
+			releaseRefresh.resolve();
+
+			expect(await reportsPromise).toEqual([usageReport]);
+			const persisted = store.listAuthCredentials("unit-usage-row-refresh")[0]?.credential;
+			expect(persisted).toMatchObject({
+				type: "oauth",
+				access: "usage-rotated-access",
+				refresh: "usage-rotated-refresh",
+			});
+		} finally {
+			releaseRefresh.resolve();
+			usageStorage.close();
+		}
+	});
+
+	test("drops a revoked row immediately while an older reload is still waiting", async () => {
+		const active: AuthCredential = {
+			type: "oauth",
+			access: "snapshot-active-access",
+			refresh: "snapshot-active-refresh",
+			expires: Date.now() + 60 * 60_000,
+		};
+		const activeRow = { id: 1, provider: "unit-snapshot-revoke", credential: active, disabledCause: null };
+		let rows = [activeRow];
+		const listeners = new Set<() => void>();
+		const firstReady = Promise.withResolvers<void>();
+		let readyCalls = 0;
+		const snapshotStore: AuthCredentialStore = {
+			close() {},
+			listAuthCredentials(provider?: string) {
+				return rows.filter(row => provider === undefined || row.provider === provider);
+			},
+			updateAuthCredential() {},
+			deleteAuthCredential() {},
+			tryDisableAuthCredentialIfMatches() {
+				return false;
+			},
+			replaceAuthCredentialsForProvider() {
+				return rows;
+			},
+			upsertAuthCredentialForProvider() {
+				return [activeRow];
+			},
+			upsertAuthCredentialForProviderIfAbsent() {
+				return { inserted: false, reason: "skipped-existing", provider: "unit-snapshot-revoke", entries: rows };
+			},
+			deleteAuthCredentialsForProvider() {},
+			getCache() {
+				return null;
+			},
+			setCache() {},
+			allocateMonotonicSequence() {
+				return 1;
+			},
+			cleanExpiredCache() {},
+			onSnapshotChanged(listener) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			waitForReady: async () => {
+				readyCalls += 1;
+				if (readyCalls === 1) await firstReady.promise;
+			},
+		};
+		const snapshotStorage = new AuthStorage(snapshotStore);
+		try {
+			const olderReload = snapshotStorage.reload();
+			rows = [];
+			for (const listener of listeners) listener();
+			await Bun.sleep(0);
+			expect(snapshotStorage.has("unit-snapshot-revoke")).toBe(false);
+
+			// Simulate a stale waiter returning an old row after the revocation event.
+			rows = [activeRow];
+			firstReady.resolve();
+			await olderReload;
+			expect(snapshotStorage.has("unit-snapshot-revoke")).toBe(false);
+		} finally {
+			snapshotStorage.close();
+		}
 	});
 });

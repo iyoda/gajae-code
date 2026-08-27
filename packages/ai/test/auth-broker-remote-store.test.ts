@@ -7,9 +7,11 @@ import {
 	AuthBrokerError,
 	type AuthBrokerServerHandle,
 	AuthStorage,
+	type CredentialMetadataResponse,
 	REMOTE_REFRESH_SENTINEL,
 	RemoteAuthCredentialStore,
 	SqliteAuthCredentialStore,
+	type SnapshotResponse,
 	startAuthBroker,
 } from "../src";
 
@@ -160,6 +162,137 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote.listCredentialInventory()).toEqual([]);
 		expect(remote.getInventoryMetadataState().capability).toBe("unsupported");
 		expect(fetchMock.mock.calls.length).toBe(before);
+	});
+
+	test("treats an epoch transition as fresh when the generation is reused", async () => {
+		const oldSnapshot: SnapshotResponse = {
+			generation: 7,
+			epoch: "1-old-epoch",
+			generatedAt: 100,
+			serverNowMs: 100,
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+			credentials: [],
+		};
+		const newSnapshot: SnapshotResponse = {
+			...oldSnapshot,
+			epoch: "2-new-epoch",
+			serverNowMs: 50,
+		};
+		const client = new AuthBrokerClient({ url: "http://broker.test", token, maxRetries: 0 });
+		vi.spyOn(client, "fetchCredentialMetadata").mockRejectedValue({ status: 404 });
+		vi.spyOn(client, "fetchSnapshot").mockImplementation(async (opts = {}) => {
+			if (opts.waitMs === 30_000) return new Promise(() => {}) as never;
+			return { status: 200, snapshot: newSnapshot, generation: newSnapshot.generation };
+		});
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: oldSnapshot, streamSnapshots: false });
+
+		expect(await remote.waitForFreshSnapshot(100)).toBe(true);
+		expect(remote.snapshot.epoch).toBe(newSnapshot.epoch);
+		expect(remote.snapshot.generation).toBe(newSnapshot.generation);
+	});
+
+	test("does not install metadata returned by a retired snapshot authority", async () => {
+		const oldSnapshot: SnapshotResponse = {
+			generation: 1,
+			epoch: "1-old-epoch",
+			generatedAt: 100,
+			serverNowMs: 100,
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+			credentials: [],
+		};
+		const newSnapshot: SnapshotResponse = { ...oldSnapshot, epoch: "2-new-epoch", serverNowMs: 200 };
+		const oldMetadata: CredentialMetadataResponse = {
+			epoch: oldSnapshot.epoch,
+			generation: oldSnapshot.generation,
+			generatedAt: oldSnapshot.generatedAt,
+			credentials: [
+				{
+					id: 1,
+					provider: "anthropic",
+					type: "oauth",
+					identity: "retired@example.com",
+					disabledCause: "retired",
+				},
+			],
+		};
+		const newMetadata: CredentialMetadataResponse = {
+			epoch: newSnapshot.epoch,
+			generation: newSnapshot.generation,
+			generatedAt: newSnapshot.generatedAt,
+			credentials: [],
+		};
+		const firstMetadata = Promise.withResolvers<CredentialMetadataResponse>();
+		let metadataCalls = 0;
+		const client = new AuthBrokerClient({ url: "http://broker.test", token, maxRetries: 0 });
+		vi.spyOn(client, "fetchCredentialMetadata").mockImplementation(async () => {
+			metadataCalls += 1;
+			return metadataCalls === 1 ? firstMetadata.promise : newMetadata;
+		});
+		vi.spyOn(client, "fetchSnapshot").mockImplementation(async (opts = {}) => {
+			if (opts.waitMs === 30_000) return new Promise(() => {}) as never;
+			return { status: 200, snapshot: newSnapshot, generation: newSnapshot.generation };
+		});
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: oldSnapshot, streamSnapshots: false });
+		await waitUntil(() => metadataCalls === 1);
+
+		await remote.refreshSnapshot();
+		firstMetadata.resolve(oldMetadata);
+		const state = await remote.syncInventoryMetadata();
+
+		expect(metadataCalls).toBe(2);
+		expect(state.capability).toBe("supported");
+		expect(state.generation).toBe(newSnapshot.generation);
+		expect(state.records).toEqual([]);
+	});
+
+	test("rejects delayed legacy responses from before a generation reset", async () => {
+		const initialSnapshot: SnapshotResponse = {
+			generation: 100,
+			generatedAt: 100,
+			serverNowMs: 100,
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+			credentials: [],
+		};
+		let nextSnapshot: SnapshotResponse = { ...initialSnapshot, generation: 1, serverNowMs: 200 };
+		const client = new AuthBrokerClient({ url: "http://broker.test", token, maxRetries: 0 });
+		vi.spyOn(client, "fetchCredentialMetadata").mockRejectedValue({ status: 404 });
+		vi.spyOn(client, "fetchSnapshot").mockImplementation(async (opts = {}) => {
+			if (opts.waitMs === 30_000) return new Promise(() => {}) as never;
+			return { status: 200, snapshot: nextSnapshot, generation: nextSnapshot.generation };
+		});
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot, streamSnapshots: false });
+
+		await remote.refreshSnapshot();
+		nextSnapshot = { ...initialSnapshot, generation: 101, serverNowMs: 150 };
+		await expect(remote.refreshSnapshot()).rejects.toThrow("snapshot authority was rejected");
+		expect(remote.snapshot.generation).toBe(1);
+		expect(remote.snapshot.serverNowMs).toBe(200);
+		nextSnapshot = { ...initialSnapshot, generation: 102, serverNowMs: 200 };
+		await expect(remote.refreshSnapshot()).rejects.toThrow("snapshot authority was rejected");
+		expect(remote.snapshot.generation).toBe(1);
+	});
+
+	test("cancels freshness waits while snapshot authority is queued", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false });
+		await remote.refreshSnapshot();
+		const nextSnapshot: SnapshotResponse = {
+			...remote.snapshot,
+			generation: remote.snapshot.generation + 1,
+			serverNowMs: remote.snapshot.serverNowMs + 1,
+		};
+		const fetchSnapshot = vi.spyOn(client, "fetchSnapshot").mockResolvedValue({
+			status: 200,
+			snapshot: nextSnapshot,
+			generation: nextSnapshot.generation,
+		});
+		const ticket = await remote.acquireCredentialDispatchTicket("anthropic");
+		const controller = new AbortController();
+		const freshness = remote.waitForFreshSnapshot(100, { signal: controller.signal });
+		await waitUntil(() => fetchSnapshot.mock.calls.length > 0);
+		controller.abort();
+		await expect(freshness).rejects.toThrow(/aborted/);
+		ticket.release();
 	});
 
 	test("presentation usage peek is safe and zero-network", async () => {

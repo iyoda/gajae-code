@@ -349,10 +349,7 @@ async function serveSnapshot(
 	const includeEpoch = req.headers.get(AUTH_BROKER_EPOCH_HEADER) === "1";
 	const clientGeneration = clientTag?.generation;
 	const waitMs = parseWaitMs(url);
-	const legacyConditional = clientTag !== undefined && !includeEpoch;
-
 	if (
-		legacyConditional ||
 		clientGeneration === undefined ||
 		(includeEpoch && clientTag?.epoch !== epoch) ||
 		currentGeneration !== clientGeneration ||
@@ -675,7 +672,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const id = Number.parseInt(disableMatch[1], 10);
 					const parsed = await parseBody(req, credentialDisableRequestSchema, { allowEmpty: true });
 					if (!parsed.ok) return parsed.response;
-					const cause = "disabled via auth-broker";
+					const cause = parsed.data.cause?.trim() || "disabled via auth-broker";
 					const ok = opts.storage.disableCredentialById(id, cause);
 					if (!ok) {
 						logger.info("auth-broker disable miss", { id, peer });

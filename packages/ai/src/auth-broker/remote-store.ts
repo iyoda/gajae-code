@@ -396,7 +396,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			if (!snapshot.epoch) return false;
 			if (snapshot.epoch === this.#epoch) {
 				if (generation < this.#generation) return false;
-				if (generation === this.#generation && snapshot.serverNowMs < this.#snapshot.serverNowMs) return false;
+				if (generation === this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs) return false;
 			} else {
 				if (this.#retiredEpochs.has(snapshot.epoch)) return false;
 				const currentRank = epochRank(this.#epoch);
@@ -410,33 +410,27 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}
 		} else if (snapshot.epoch) {
 			// First epoch-bearing response establishes the authority namespace.
-		} else if (
-			(generation < this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs) ||
-			(generation === this.#generation && snapshot.serverNowMs < this.#snapshot.serverNowMs)
-		) {
-			// Epoch-less legacy brokers use serverNowMs as the restart discriminator:
-			// accept a reset generation only when the broker proves it is newer than
-			// the last accepted legacy snapshot, while delayed old responses fail closed.
-			if (
-				(generation < this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs) ||
-				(generation === this.#generation && snapshot.serverNowMs < this.#snapshot.serverNowMs)
-			)
-				return false;
+		} else {
+			// Epoch-less legacy brokers use serverNowMs as the restart discriminator.
+			// Keep it monotonic for every accepted response, not only generation
+			// decreases: a delayed pre-reset response can carry a higher generation
+			// than the reset snapshot while still being older in wall-clock time.
+			if (!this.#loadingInitialSnapshot && snapshot.serverNowMs <= this.#snapshot.serverNowMs) return false;
 		}
-		const generationChanged =
-			generation !== this.#generation ||
-			snapshot.epoch !== this.#epoch ||
-			this.#inventoryMetadataGeneration !== generation;
+		const authorityChanged = generation !== this.#generation || snapshot.epoch !== this.#epoch;
+		const metadataChanged = authorityChanged || this.#inventoryMetadataGeneration !== generation;
 		this.#snapshot = snapshot;
 		this.#generation = generation;
 		if (!this.#loadingInitialSnapshot) this.#snapshotAuthoritative = true;
 		this.#epoch = snapshot.epoch ?? this.#epoch;
 		this.#snapshotReceivedAt = Date.now();
-		if (generationChanged) {
+		if (metadataChanged) {
 			this.#inventoryMetadata.clear();
 			this.#inventoryMetadataGeneration = -1;
-			this.#invalidateUsageCache();
-			this.#reconcileUsagePresentations();
+			if (authorityChanged) {
+				this.#invalidateUsageCache();
+				this.#reconcileUsagePresentations();
+			}
 			if (this.#inventoryMetadataUnsupported) {
 				this.#setInventoryState("unsupported", generation, {
 					status: "unsupported",
@@ -472,12 +466,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			return (
 				snapshot.epoch === this.#epoch &&
 				(generation < this.#generation ||
-					(generation === this.#generation && snapshot.serverNowMs < this.#snapshot.serverNowMs))
+					(generation === this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs))
 			);
 		}
 		return (
 			(generation < this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs) ||
-			(generation === this.#generation && snapshot.serverNowMs < this.#snapshot.serverNowMs)
+			(generation === this.#generation && snapshot.serverNowMs <= this.#snapshot.serverNowMs)
 		);
 	}
 
@@ -591,8 +585,21 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	async #syncInventoryMetadata(): Promise<Readonly<CredentialInventoryMetadataState>> {
 		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const snapshotEpoch = this.#epoch;
+			const snapshotGeneration = this.#generation;
 			try {
 				const metadata = await this.#client.fetchCredentialMetadata();
+				if (this.#epoch !== snapshotEpoch || this.#generation !== snapshotGeneration) {
+					if (attempt === 0) continue;
+					this.#inventoryMetadata.clear();
+					this.#inventoryMetadataGeneration = -1;
+					this.#setInventoryState("mismatch", this.#generation, {
+						status: "mismatch",
+						reason: "credential metadata snapshot authority changed",
+						generation: this.#generation,
+					});
+					return this.getInventoryMetadataState();
+				}
 				if (metadata.epoch !== this.#epoch) {
 					if (attempt === 0) {
 						await this.refreshSnapshot().catch(() => {});
@@ -865,13 +872,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			signal: opts.signal,
 		});
 		if (result.status === 200) {
-			await this.#withSnapshotAuthority(async () => {
-				if (!this.#applySnapshot(result.snapshot, result.generation)) {
-					if (!this.#isSupersededSnapshot(result.snapshot, result.generation)) {
-						throw new Error("Auth broker freshness snapshot authority was rejected");
+			await this.#raceWithSignal(
+				this.#withSnapshotAuthority(async () => {
+					if (!this.#applySnapshot(result.snapshot, result.generation)) {
+						if (!this.#isSupersededSnapshot(result.snapshot, result.generation)) {
+							throw new Error("Auth broker freshness snapshot authority was rejected");
+						}
 					}
-				}
-			});
+				}),
+				opts.signal,
+			);
 		}
 		return this.#generation !== previousGeneration || this.#epoch !== previousEpoch;
 	}
