@@ -215,6 +215,7 @@ clap = { version = "4", features = ["derive"] }
 # ──────────────────────────────────────────────────────────────────────────────
 regex = "1"
 similar = "3.1.0"
+unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 

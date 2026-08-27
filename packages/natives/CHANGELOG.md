@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `fuzzyFind` NFC-normalizes queries and candidate paths before scoring so composed (NFC) queries match decomposed (NFD) file names as returned by macOS volumes.
+
 ## [0.15.3] - 2026-08-27
 
 ### Fixed

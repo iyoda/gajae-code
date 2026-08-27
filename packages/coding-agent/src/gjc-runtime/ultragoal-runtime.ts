@@ -86,6 +86,7 @@ import {
 	type UltragoalValidationLaneSelection,
 	validationLaneSelectionFor,
 } from "./ultragoal-validation-policy";
+import { isWorkflowPlaceholderText, WORKFLOW_PLACEHOLDER_CORRECTION } from "./workflow-placeholder";
 import { resolveWorkflowSetting } from "./workflow-settings";
 
 export {
@@ -1166,6 +1167,9 @@ function parseGoalsFromBrief(brief: string): ParsedGoal[] {
 		if (!title && !body) {
 			throw new Error(`ultragoal @goal block ${index + 1} has no title or objective`);
 		}
+		if (isWorkflowPlaceholderText(body || title)) {
+			throw new Error(`ultragoal @goal block ${index + 1} requires ${WORKFLOW_PLACEHOLDER_CORRECTION}`);
+		}
 		return { title: clampTitle(title), objective: body || title };
 	});
 }
@@ -1180,6 +1184,7 @@ export async function createUltragoalPlan(input: {
 }): Promise<UltragoalPlan> {
 	const brief = input.brief.trim();
 	if (!brief) throw new Error("ultragoal brief is required");
+	if (isWorkflowPlaceholderText(brief)) throw new Error(`ultragoal brief requires ${WORKFLOW_PLACEHOLDER_CORRECTION}`);
 	const now = new Date().toISOString();
 	// Parse the untrimmed brief so the raw-line delimiter contract holds: a
 	// leading-indented `@goal` on the first line must stay objective text rather

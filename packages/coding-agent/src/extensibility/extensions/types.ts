@@ -155,6 +155,8 @@ export interface ExtensionUIDialogOptions {
 	customInput?: {
 		optionLabel: string;
 		onSubmit: (text: string) => void;
+		/** Empty/whitespace-only submissions may be rejected by the selector. */
+		allowEmpty?: boolean;
 	};
 	/**
 	 * Inline free-text input for a non-answer clarification action. It is
