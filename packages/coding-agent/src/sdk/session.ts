@@ -2290,6 +2290,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					applyRescopedReadState,
 				}
 			: undefined;
+		const canExposeMoveSession = canAgentRescopeSessionCwd && options.workspaceTree === undefined;
 
 		const toolSession: ToolSession = {
 			get cwd() {
@@ -2322,7 +2323,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requireYieldTool: options.requireYieldTool,
 			taskDepth: options.taskDepth ?? 0,
 			currentAgentType: options.currentAgentType,
-			...(canAgentRescopeSessionCwd
+			...(canExposeMoveSession
 				? {
 						rescopeSessionCwd: (target: string): Promise<{ from: string; to: string }> => {
 							if (!session) return Promise.reject(new Error("Session is not initialized."));
