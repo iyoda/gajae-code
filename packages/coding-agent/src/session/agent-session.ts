@@ -2575,7 +2575,6 @@ export class AgentSession {
 	 * own turn without pausing any later turn.
 	 */
 	#foldStopRequested = false;
-	readonly #activeToolCallIds = new Set<string>();
 	/**
 	 * The single linearization point for folding a foreground wait. Arrow deps
 	 * capture `this` but are only invoked after construction.
@@ -4050,7 +4049,6 @@ export class AgentSession {
 		this.#asyncJobProviderSessionId = config.asyncJobProviderSessionId;
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
 		this.agent.afterToolCall = ctx => {
-			this.#activeToolCallIds.delete(ctx.toolCall.id);
 			settleToolLineageRegistrationWindow(ctx.toolCall.id, this.#ownedRegistrationEndpoint());
 			return this.#ttsrAfterToolCall(ctx);
 		};
@@ -4062,7 +4060,6 @@ export class AgentSession {
 		// original tool call id and must retain the same owned-completion origin.
 		// They are superseded by a rebind on the same id or by bounded eviction.
 		this.agent.beforeToolCall = ctx => {
-			this.#activeToolCallIds.add(ctx.toolCall.id);
 			const lineageIdHash = this.#turnLineageIdHash;
 			if (lineageIdHash) {
 				bindToolLineage(ctx.toolCall.id, {
@@ -8518,10 +8515,6 @@ export class AgentSession {
 	 */
 	registerForegroundFoldParticipant(adapter: FoldAdapter): () => void {
 		return this.#foldCoordinator.registerParticipant(adapter);
-	}
-
-	isActiveToolCall(toolCallId: string): boolean {
-		return this.#activeToolCallIds.has(toolCallId);
 	}
 
 	/** The session-owned fold coordinator, for delivery-side receipt lookup. */
