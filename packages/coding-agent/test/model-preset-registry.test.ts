@@ -1001,9 +1001,7 @@ describe("signed model preset registry", () => {
 		state.history[0].revoked = true;
 		await Bun.write(statePath, JSON.stringify(state));
 
-		await expect(setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 })).rejects.toThrow(
-			/revoked/i,
-		);
+		await expect(setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 })).rejects.toThrow(/revoked/i);
 	});
 
 	test("unpinning revoked-only history leaves no active revision", async () => {
