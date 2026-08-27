@@ -28,6 +28,8 @@ import {
 	runPackageManagerUpdateForTest,
 	runPostUpdateRecoveryForTest,
 	runUpdateCommand,
+	verifyMigrationTargetAdapterForTest,
+	verifyMigrationTargetForTest,
 } from "../src/cli/update-cli";
 import { Settings } from "../src/config/settings";
 import { distTagForChannel, isUpdateChannel } from "../src/config/update-channel";
@@ -519,6 +521,294 @@ describe("update-cli managed notification recovery", () => {
 		registry: DEFAULT_NPM_REGISTRY,
 		warnings: [],
 	};
+
+	describe("standalone migration preflight", () => {
+		const target = { method: "migrate" as const, path: "/standalone/gjc", previousPath: "/shim/gjc" };
+
+		it("verifies the release checksum before executing the migration target", async () => {
+			const calls: string[] = [];
+			const result = await verifyMigrationTargetForTest({
+				runtimePath: target.path,
+				verifyChecksum: async () => {
+					calls.push("checksum");
+				},
+				verifyRuntime: async () => {
+					calls.push("runtime");
+					return { ok: true, actual: release.version, path: target.path };
+				},
+			});
+			expect(calls).toEqual(["checksum", "runtime"]);
+			expect(result).toEqual({ ok: true, actual: release.version, path: target.path });
+		});
+
+		it("holds the binary update lock across migration preflight", async () => {
+			const root = await makeTempDir();
+			const runtimePath = path.join(root, "gjc");
+			const lockPath = path.join(root, ".gjc-install.lock");
+			await runUpdateCommand(
+				{ force: false, check: false },
+				{
+					getLatestRelease: async () => release,
+					resolveUpdateTarget: async () => ({ method: "migrate", path: runtimePath }),
+					verifyMigrationTarget: async () => {
+						expect(fsNode.existsSync(lockPath)).toBe(true);
+						return { ok: true, actual: release.version, path: runtimePath };
+					},
+				},
+			);
+			expect(fsNode.existsSync(lockPath)).toBe(false);
+		});
+
+		it("does not execute a missing or tampered migration target when checksum verification fails", async () => {
+			const calls: string[] = [];
+			const result = await verifyMigrationTargetForTest({
+				runtimePath: target.path,
+				verifyChecksum: async () => {
+					calls.push("checksum");
+					throw new Error("checksum mismatch");
+				},
+				verifyRuntime: async () => {
+					calls.push("runtime");
+					return { ok: true, actual: release.version, path: target.path };
+				},
+			});
+			expect(calls).toEqual(["checksum"]);
+			expect(result).toEqual({ ok: false, path: target.path });
+		});
+
+		it("passes the release tag, binary asset, and target path to checksum verification", async () => {
+			const checksumCalls: Array<{ tag: string; assetName: string; filePath: string }> = [];
+			const result = await verifyMigrationTargetAdapterForTest({
+				release,
+				runtimePath: target.path,
+				verifyChecksum: async options => {
+					checksumCalls.push(options);
+				},
+				verifyRuntime: async (expectedVersion, runtimePath) => ({
+					ok: true,
+					actual: expectedVersion,
+					path: runtimePath,
+				}),
+			});
+			expect(checksumCalls).toEqual([{ tag: release.tag, assetName: "gjc-linux-x64", filePath: target.path }]);
+			expect(result).toEqual({ ok: true, actual: release.version, path: target.path });
+		});
+
+		it("keeps a checksum-valid but stale or smoke-failing target on the migration path", async () => {
+			const calls: string[] = [];
+			const result = await verifyMigrationTargetForTest({
+				runtimePath: target.path,
+				verifyChecksum: async () => {
+					calls.push("checksum");
+				},
+				verifyRuntime: async () => {
+					calls.push("runtime");
+					return {
+						ok: false,
+						actual: release.version,
+						path: target.path,
+						smokeTestFailed: true,
+					};
+				},
+			});
+			expect(calls).toEqual(["checksum", "runtime"]);
+			expect(result).toEqual({
+				ok: false,
+				actual: release.version,
+				path: target.path,
+				smokeTestFailed: true,
+			});
+		});
+
+		it("skips update recovery and defaults refresh when the standalone target already verifies", async () => {
+			const calls: string[] = [];
+			const output: string[] = [];
+			const logSpy = vi.spyOn(console, "log").mockImplementation(message => output.push(String(message)));
+			try {
+				await runUpdateCommand(
+					{ force: false, check: false },
+					{
+						getLatestRelease: async () => release,
+						resolveUpdateTarget: async () => target,
+						verifyMigrationTarget: async (expectedRelease, runtimePath) => {
+							expect(expectedRelease).toEqual(release);
+							expect(runtimePath).toBe(target.path);
+							return { ok: true, actual: expectedRelease.version, path: runtimePath };
+						},
+						performUpdate: async () => {
+							calls.push("update");
+							return { ok: true, path: target.path };
+						},
+						runPostUpdateRecovery: async () => {
+							calls.push("recovery");
+						},
+						refreshInstalledDefaultSkills: async () => {
+							calls.push("refresh");
+						},
+					},
+				);
+				expect(calls).toEqual([]);
+				expect(output.join("\n")).toContain(
+					`Standalone gjc ${release.version} is already installed and verified at ${target.path}`,
+				);
+				expect(output.join("\n")).toContain(`${target.previousPath} shadows it on PATH.`);
+				expect(output.join("\n")).toContain("must precede the shim directory");
+			} finally {
+				logSpy.mockRestore();
+			}
+		});
+
+		it("leaves a shim-first repeated invocation non-mutating after standalone verification", async () => {
+			const calls: string[] = [];
+			for (let attempt = 0; attempt < 2; attempt++) {
+				await runUpdateCommand(
+					{ force: false, check: false },
+					{
+						getLatestRelease: async () => release,
+						resolveUpdateTarget: async () => target,
+						verifyMigrationTarget: async () => {
+							calls.push("verify standalone");
+							return { ok: true, actual: release.version, path: target.path };
+						},
+						performUpdate: async () => {
+							calls.push("update");
+							return { ok: true, path: target.path };
+						},
+						runPostUpdateRecovery: async () => {
+							calls.push("recovery");
+						},
+						refreshInstalledDefaultSkills: async () => {
+							calls.push("refresh");
+						},
+					},
+				);
+			}
+			expect(calls).toEqual(["verify standalone", "verify standalone"]);
+		});
+
+		it("reports a verified shadowed target in check mode without performing an update", async () => {
+			const calls: string[] = [];
+			await runUpdateCommand(
+				{ force: false, check: true },
+				{
+					getLatestRelease: async () => release,
+					resolveUpdateTarget: async () => target,
+					verifyMigrationTarget: async () => {
+						calls.push("verify");
+						return { ok: true, actual: release.version, path: target.path };
+					},
+					performUpdate: async () => {
+						calls.push("update");
+						return { ok: true, path: target.path };
+					},
+				},
+			);
+			expect(calls).toEqual(["verify"]);
+		});
+
+		it("skips an already verified nightly migration target", async () => {
+			const calls: string[] = [];
+			const nightlyRelease = {
+				...release,
+				tag: "v999.0.0-nightly.20260828000000.1.gabcdef123456",
+				version: "999.0.0-nightly.20260828000000.1.gabcdef123456",
+			};
+			await runUpdateCommand(
+				{ force: false, check: false, channel: "nightly" },
+				{
+					getLatestRelease: async options => {
+						expect(options?.channel).toBe("nightly");
+						return nightlyRelease;
+					},
+					resolveUpdateTarget: async () => target,
+					verifyMigrationTarget: async expectedRelease => {
+						calls.push("verify");
+						expect(expectedRelease).toEqual(nightlyRelease);
+						return { ok: true, actual: nightlyRelease.version, path: target.path };
+					},
+					performUpdate: async () => {
+						calls.push("update");
+						return { ok: true, path: target.path };
+					},
+				},
+			);
+			expect(calls).toEqual(["verify"]);
+		});
+
+		it("migrates when the standalone target is stale or fails its smoke test", async () => {
+			const calls: string[] = [];
+			await runUpdateCommand(
+				{ force: false, check: false },
+				{
+					getLatestRelease: async () => release,
+					resolveUpdateTarget: async () => target,
+					verifyMigrationTarget: async () => ({
+						ok: false,
+						actual: release.version,
+						path: target.path,
+						smokeTestFailed: true,
+					}),
+					performUpdate: async () => {
+						calls.push("update");
+						return { ok: true, path: target.path };
+					},
+					runPostUpdateRecovery: async () => {
+						calls.push("recovery");
+					},
+					refreshInstalledDefaultSkills: async () => {
+						calls.push("refresh");
+					},
+				},
+			);
+			expect(calls).toEqual(["update", "recovery", "refresh"]);
+		});
+
+		it("does not preflight a migration target when the release decision is already up to date", async () => {
+			const calls: string[] = [];
+			await runUpdateCommand(
+				{ force: false, check: false },
+				{
+					getLatestRelease: async () => ({ ...release, version: "0.0.1" }),
+					resolveUpdateTarget: async () => target,
+					verifyMigrationTarget: async () => {
+						calls.push("verify");
+						return { ok: true, path: target.path };
+					},
+					performUpdate: async () => {
+						calls.push("update");
+						return { ok: true, path: target.path };
+					},
+				},
+			);
+			expect(calls).toEqual([]);
+		});
+
+		it("bypasses migration preflight when force is set", async () => {
+			const calls: string[] = [];
+			await runUpdateCommand(
+				{ force: true, check: false },
+				{
+					getLatestRelease: async () => release,
+					resolveUpdateTarget: async () => target,
+					verifyMigrationTarget: async () => {
+						calls.push("verify");
+						return { ok: true, path: target.path };
+					},
+					performUpdate: async () => {
+						calls.push("update");
+						return { ok: true, path: target.path };
+					},
+					runPostUpdateRecovery: async () => {
+						calls.push("recovery");
+					},
+					refreshInstalledDefaultSkills: async () => {
+						calls.push("refresh");
+					},
+				},
+			);
+			expect(calls).toEqual(["update", "recovery", "refresh"]);
+		});
+	});
 
 	function configuredSettings(overrides: Record<string, unknown> = {}): Settings {
 		return Settings.isolated({

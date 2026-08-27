@@ -61,7 +61,7 @@ Gajae-Code(`gjc`)는 외부 코딩 에이전트 하네스입니다. 아무 저�
 **설치** — Linux(x64/arm64), macOS(arm64/x64), Windows(x64) 프리빌드 바이너리. Bun은 필요 없습니다:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.0/scripts/install.sh -o gjc-install.sh
+curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.3/scripts/install.sh -o gjc-install.sh
 sh gjc-install.sh
 gjc
 ```
@@ -75,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/main/scripts
 Windows (PowerShell, 태그 고정):
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.0/scripts/install.ps1 -OutFile gjc-install.ps1
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.3/scripts/install.ps1 -OutFile gjc-install.ps1
 powershell -File gjc-install.ps1
 ```
 
