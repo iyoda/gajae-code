@@ -7,6 +7,11 @@ import { INTENT_FIELD } from "@gajae-code/agent-core";
 import type { RawArgumentValidationResult } from "@gajae-code/ai/types";
 import * as z from "zod/v4";
 import { deepInterviewCharacterCount } from "../gjc-runtime/deep-interview-state";
+import {
+	isLegacyDeepInterviewPlaceholder,
+	isWorkflowPlaceholderText,
+	WORKFLOW_PLACEHOLDER_CORRECTION,
+} from "../gjc-runtime/workflow-placeholder";
 
 function deepInterviewBoundedString(maximum: number) {
 	return z.string().superRefine((value, context) => {
@@ -146,6 +151,13 @@ function createQuestionItemSchema(deepInterviewSchema: z.ZodType<DeepInterviewMe
 			workflowGate: WorkflowGateMeta.describe("optional workflow gate stage/kind override").optional(),
 		})
 		.superRefine((value, context) => {
+			if (value.deepInterview !== undefined && isWorkflowPlaceholderText(value.question)) {
+				context.addIssue({
+					code: "custom",
+					message: `deep-interview question body must ${WORKFLOW_PLACEHOLDER_CORRECTION}`,
+					path: ["question"],
+				});
+			}
 			const labels = new Set(value.options.map(option => option.label));
 			const contract = intentContract(value.deepInterview);
 			const review = intentReview(value.deepInterview);
@@ -459,19 +471,58 @@ function knownIntentRejection(arguments_: Record<string, unknown>): RawArgumentV
 		return { outcome: "reject", code: "ask-intent-contract-requires-non-empty-authority" };
 	return undefined;
 }
+
+function deepInterviewPlaceholderRejection(
+	arguments_: Record<string, unknown>,
+): RawArgumentValidationResult | undefined {
+	const root = parseEncodedContainer(arguments_);
+	if (!isPlainRecord(root)) return undefined;
+	const questions = parseEncodedContainer(root.questions);
+	if (!Array.isArray(questions)) return undefined;
+	for (const [index, rawValue] of questions.entries()) {
+		const rawQuestion = parseEncodedContainer(rawValue);
+		if (!isPlainRecord(rawQuestion) || !Object.hasOwn(rawQuestion, "deepInterview")) continue;
+		const metadata = parseEncodedContainer(rawQuestion.deepInterview);
+		if (metadata !== null && metadata !== undefined && isWorkflowPlaceholderText(rawQuestion.question)) {
+			return {
+				outcome: "reject",
+				code: "ask-deep-interview-question-body-required",
+				detail: {
+					rejectedKeys: [`questions[${index}].question`],
+					hint: WORKFLOW_PLACEHOLDER_CORRECTION,
+				},
+			};
+		}
+	}
+	for (const [index, rawValue] of questions.entries()) {
+		const question = parseEncodedContainer(rawValue);
+		if (isPlainRecord(question) && isLegacyDeepInterviewPlaceholder(question.question)) {
+			return {
+				outcome: "reject",
+				code: "ask-deep-interview-question-body-required",
+				detail: { rejectedKeys: [`questions[${index}].question`], hint: WORKFLOW_PLACEHOLDER_CORRECTION },
+			};
+		}
+	}
+	return undefined;
+}
+
 export function recoverRoundZeroIntentContract(
 	arguments_: Record<string, unknown>,
 	stage?: "topology" | "post-topology",
 ): RawArgumentValidationResult {
+	const normalizedInput = normalizeRoundZeroOptionalNulls(arguments_);
+	const placeholderRejection = deepInterviewPlaceholderRejection(normalizedInput);
+	if (placeholderRejection) return placeholderRejection;
 	// #4649: an incomplete Round-0 topology object (deepInterview present,
 	// required fields omitted) is NOT a retired-pair recovery candidate, so it
 	// would passthrough into generic Zod validation whose error names no contract
 	// and no correction — the repeat-invalid-bisect loop. Non-candidates get the
 	// targeted correction here; candidates get it only after the stricter known
 	// intent rejections below, so every previously-covered verdict is unchanged.
-	if (!isRoundZeroRecoveryCandidate(arguments_))
-		return roundZeroMetadataRejection(arguments_, stage) ?? { outcome: "passthrough" };
-	const normalizedArguments = normalizeRoundZeroOptionalNulls(arguments_);
+	if (!isRoundZeroRecoveryCandidate(normalizedInput))
+		return roundZeroMetadataRejection(normalizedInput, stage) ?? { outcome: "passthrough" };
+	const normalizedArguments = normalizedInput;
 	const knownRejection = knownIntentRejection(normalizedArguments);
 	if (knownRejection) return knownRejection;
 	const missingTopologyFields = roundZeroMetadataRejection(normalizedArguments, stage);

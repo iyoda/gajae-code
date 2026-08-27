@@ -176,6 +176,49 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(values).toContain("./src/");
 		});
 	});
+
+	describe("unicode-normalized path matching", () => {
+		let baseDir: string;
+		const nfdDirectory = "\u1112\u1161\u11AB";
+		const nfdName = "\u1112\u1161\u11AB\u1100\u1173\u11AF.txt";
+
+		beforeEach(() => {
+			baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-nfc-test-"));
+		});
+
+		afterEach(() => {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		});
+
+		it("matches NFD directory entries against an NFC prefix", async () => {
+			fs.writeFileSync(path.join(baseDir, nfdName), "content\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "./\uD55C";
+			const result = await provider.getForceFileSuggestions([line], 0, line.length);
+			expect(result).not.toBeNull();
+			const values = result?.items.map(item => item.value) ?? [];
+			expect(values).toContain(`./${nfdName}`);
+		});
+
+		it("matches NFD entries in the @ fuzzy lane against an NFC query", async () => {
+			fs.writeFileSync(path.join(baseDir, nfdName), "content\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@\uD55C\uAE00";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			const values = result?.items.map(item => item.value) ?? [];
+			expect(values).toContain(`@${nfdName}`);
+		});
+
+		it("traverses an NFD directory from an NFC path prefix", async () => {
+			fs.mkdirSync(path.join(baseDir, nfdDirectory));
+			fs.writeFileSync(path.join(baseDir, nfdDirectory, nfdName), "content\n");
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "./\uD55C/";
+			const result = await provider.getForceFileSuggestions([line], 0, line.length);
+			const values = result?.items.map(item => item.value) ?? [];
+			expect(values).toContain(`./${nfdDirectory}/${nfdName}`);
+		});
+	});
 });
 
 describe("slash command token classification", () => {

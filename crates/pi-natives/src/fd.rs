@@ -3,10 +3,11 @@
 //! Searches for files and directories whose paths match a query string via
 //! subsequence scoring. Uses the shared [`fs_cache`] for directory scanning.
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::{fs_cache, task};
 
@@ -51,8 +52,17 @@ pub struct FuzzyFindResult {
 	pub total_matches: u32,
 }
 
+/// Composes decomposed (NFD) file names, e.g. from macOS APFS/HFS+ volumes, so
+/// they match composed (NFC) queries typed in the composer.
+fn nfc_normalize(value: &str) -> Cow<'_, str> {
+	match is_nfc_quick(value.chars()) {
+		IsNormalized::Yes => Cow::Borrowed(value),
+		_ => Cow::Owned(value.nfc().collect()),
+	}
+}
+
 fn normalize_fuzzy_text(value: &str) -> String {
-	value
+	nfc_normalize(value)
 		.chars()
 		.filter(|ch| !ch.is_whitespace() && !matches!(ch, '/' | '\\' | '.' | '_' | '-'))
 		.flat_map(|ch| ch.to_lowercase())
@@ -107,7 +117,7 @@ fn score_fuzzy_path(
 		.file_name()
 		.and_then(|name| name.to_str())
 		.unwrap_or(path);
-	let lower_file_name = file_name.to_lowercase();
+	let lower_file_name = nfc_normalize(file_name).to_lowercase();
 
 	let mut score = if lower_file_name == query_lower {
 		120
@@ -124,7 +134,7 @@ fn score_fuzzy_path(
 			0
 		}
 	} else {
-		let lower_path = path.to_lowercase();
+		let lower_path = nfc_normalize(path).to_lowercase();
 		if lower_path.contains(query_lower) {
 			60
 		} else {
@@ -199,7 +209,7 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
 	}
 
-	let query_lower = config.query.trim().to_lowercase();
+	let query_lower = nfc_normalize(config.query.trim()).to_lowercase();
 	let normalized_query = normalize_fuzzy_text(&query_lower);
 	let query_chars: Vec<char> = normalized_query.chars().collect();
 	if !query_lower.is_empty() && normalized_query.is_empty() {
@@ -245,4 +255,46 @@ pub fn fuzzy_find(options: FuzzyFindOptions<'_>) -> task::Promise<FuzzyFindResul
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let config = FuzzyFindConfig { query, path, hidden, gitignore, max_results, cache };
 	task::blocking("fuzzy_find", ct, move |ct| fuzzy_find_sync(config, ct))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn score(path: &str, query: &str) -> u32 {
+		let query_lower = nfc_normalize(query.trim()).to_lowercase();
+		let normalized_query = normalize_fuzzy_text(&query_lower);
+		let query_chars: Vec<char> = normalized_query.chars().collect();
+		score_fuzzy_path(path, false, &query_lower, &normalized_query, &query_chars)
+	}
+
+	#[test]
+	fn nfc_query_matches_nfd_file_name() {
+		let nfd = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.txt";
+		assert!(score(nfd, "\u{D55C}") > 0);
+		assert!(score(nfd, "\u{D55C}\u{AE00}") > 0);
+	}
+
+	#[test]
+	fn nfd_query_matches_nfc_file_name() {
+		assert!(score("\u{D55C}\u{AE00}.txt", "\u{1112}\u{1161}\u{11AB}") > 0);
+	}
+
+	#[test]
+	fn nfc_query_matches_nfd_path_segment() {
+		let nfd_dir = "\u{1103}\u{1169}\u{11A8}\u{1109}\u{1165}/readme.md";
+		assert!(score(nfd_dir, "\u{B3C5}\u{C11C}/read") > 0);
+	}
+
+	#[test]
+	fn ascii_scoring_is_unchanged() {
+		assert_eq!(score("readme.md", "readme.md"), 120);
+		assert_eq!(score("readme.md", "read"), 100);
+		assert_eq!(score("readme.md", "zzz"), 0);
+	}
+
+	#[test]
+	fn nfc_normalize_borrows_composed_text() {
+		assert!(matches!(nfc_normalize("plain/ascii.txt"), Cow::Borrowed(_)));
+	}
 }
