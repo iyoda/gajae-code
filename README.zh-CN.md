@@ -60,7 +60,7 @@ Gajae-Code（`gjc`）是一个外置编码代理 harness：丢进任意仓库或
 **安装** — 提供 Linux（x64/arm64）、macOS（arm64/x64）、Windows（x64）预编译二进制。不需要 Bun：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.0/scripts/install.sh -o gjc-install.sh
+curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.3/scripts/install.sh -o gjc-install.sh
 sh gjc-install.sh
 gjc
 ```
@@ -70,7 +70,7 @@ gjc
 Windows（PowerShell，固定标签）：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.0/scripts/install.ps1 -OutFile gjc-install.ps1
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.3/scripts/install.ps1 -OutFile gjc-install.ps1
 powershell -File gjc-install.ps1
 ```
 

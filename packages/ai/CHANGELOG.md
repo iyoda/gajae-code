@@ -7,12 +7,20 @@
 - `AuthGatewayServerOptions` now requires `providerScope`; `AuthGatewayBootOptions` requires the provider-filtered `listModels` callback and an exact-catalog-object `resolveModel`. Direct `@gajae-code/ai` callers must construct one gateway instance per provider and pass a provider-filtered source catalog. This matches the mandatory `--provider=<id>` CLI migration and prevents cross-provider model and credential ambiguity.
 - `AuthGatewayBootOptions` now requires live authority callbacks (`hasProviderCredential`, `reloadProviderCredentials`, and `validateProviderCredential`). Gateway dispatch holds the authority lease through `streamSimple()` admission and rejects credentials revoked during asynchronous selection instead of sending a stale key.
 - `auth-broker serve` now requires an `AuthCredentialStore` with atomic `allocateMonotonicSequence` support for durable broker incarnation epochs; unsupported custom stores fail closed before binding and must migrate to the durable cache-backed contract.
+### Added
+
+- The built-in `kiro` provider now accepts long-lived `KIRO_API_KEY` values (`ksk_…` from [app.kiro.dev](https://app.kiro.dev/settings/api-keys)) in addition to AWS Builder ID OAuth. API-key auth talks to the Kiro service root with `tokentype: API_KEY` and discovers the live model catalog via `ListAvailableModels`. Builder ID login (`gjc auth-broker login kiro` / `AWS_BEARER_TOKEN_KIRO`) is unchanged.
+
+### Fixed
+
+- Kiro credential selection now rejects control-character injection and keeps non-`ksk_` values on the Builder ID bearer path. API-key failures redact the credential before reaching assistant error output, and the transport accepts provider header overrides without changing the documented endpoint contract.
+- API-key model discovery also retains the contributor-supplied static catalog for offline print-mode resolution, while live `ListAvailableModels` results remain authoritative when available.
 
 ## [0.15.3] - 2026-08-27
 
 ### Fixed
 
-- Valid JSON `\uXXXX` tool arguments now execute as their canonical decoded strings instead of entering the escaped-non-ASCII resample loop. Provider adapters retain guard metadata only for malformed JSON, duplicate/deep evidence, and unpaired UTF-16 surrogates, so those cases remain fail-closed while standard escaped Hangul, emoji surrogate pairs, and printable ASCII no longer consume retries or terminate managed runs.
+- Valid JSON `\uXXXX` tool arguments now execute as their canonical decoded strings instead of entering the escaped-non-ASCII resample loop. This intentionally treats every syntactically valid decoded scalar as canonical; runtime validation cannot infer whether a valid hex digit differed from the model's intent. Provider adapters retain guard metadata for malformed escape-bearing JSON, duplicate/deep suspicious escape evidence, and unpaired UTF-16 surrogates, while standard escaped Hangul, emoji surrogate pairs, and printable ASCII no longer consume retries or terminate managed runs.
 - Explicit positive `maxTokens` values declared for custom `models.yml` models
   and model overrides now reach the provider request across the shared stream
   mapping (`max_tokens`, `max_completion_tokens`, and `max_output_tokens`).

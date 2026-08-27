@@ -406,6 +406,25 @@ describe("prompt action autocomplete", () => {
 		expect(result!.items.map(i => i.value)).toContain("model");
 	});
 
+	it("preserves Hangul chosung ordering through the product wrapper", () => {
+		const provider = createNoopProvider([
+			{ name: "한모글", description: "Gapped Korean command" },
+			{ name: "한글", description: "Adjacent Korean command" },
+		]);
+
+		const result = provider.trySyncSlashCompletion("/ㅎㄱ");
+		expect(result?.items.map(item => item.value)).toEqual(["한글", "한모글"]);
+	});
+
+	it("rejects separator-only slash queries and normalizes skill Hangul queries", () => {
+		expect(
+			createNoopProvider([{ name: "model", description: "Switch model" }]).trySyncSlashCompletion("/-"),
+		).toBeNull();
+
+		const provider = createNoopProvider([{ name: "skill:한글", description: "Korean skill" }]);
+		expect(provider.trySyncSlashCompletion("/ㅎ-ㄱ")?.items.map(item => item.value)).toEqual(["skill:한글"]);
+	});
+
 	it("returns null from trySyncSlashCompletion for non-slash text", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [{ name: "model", description: "Switch AI model" }],
