@@ -10,6 +10,7 @@ import {
 	type ViewportAnchorSource,
 	type ViewportAnchorSourceRenderer,
 } from "@gajae-code/tui";
+import { isWorkflowPlaceholderText } from "../gjc-runtime/workflow-placeholder";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 
 interface RoundQuestionModel {
@@ -132,7 +133,7 @@ function parseRoundQuestion(text: string): RoundQuestionModel | null {
 		.slice(headerIndex + 1)
 		.join("\n")
 		.trim();
-	if (!body) return null;
+	if (isWorkflowPlaceholderText(body)) return null;
 
 	const componentMatch =
 		/^Round\s+(\d+)\s+\|\s+Component:\s*(.*?)\s+\|\s+Targeting:\s*(.*?)\s+\|\s+Why now:\s*(.*?)\s+\|\s+Ambiguity:\s*(.+?)%?\s*$/i.exec(

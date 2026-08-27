@@ -7,6 +7,7 @@ import { INTENT_FIELD } from "@gajae-code/agent-core";
 import type { RawArgumentValidationResult } from "@gajae-code/ai/types";
 import * as z from "zod/v4";
 import { deepInterviewCharacterCount } from "../gjc-runtime/deep-interview-state";
+import { isWorkflowPlaceholderText, WORKFLOW_PLACEHOLDER_CORRECTION } from "../gjc-runtime/workflow-placeholder";
 
 function deepInterviewBoundedString(maximum: number) {
 	return z.string().superRefine((value, context) => {
@@ -146,6 +147,13 @@ function createQuestionItemSchema(deepInterviewSchema: z.ZodType<DeepInterviewMe
 			workflowGate: WorkflowGateMeta.describe("optional workflow gate stage/kind override").optional(),
 		})
 		.superRefine((value, context) => {
+			if (isWorkflowPlaceholderText(value.question)) {
+				context.addIssue({
+					code: "custom",
+					message: `deep-interview question body must ${WORKFLOW_PLACEHOLDER_CORRECTION}`,
+					path: ["question"],
+				});
+			}
 			const labels = new Set(value.options.map(option => option.label));
 			const contract = intentContract(value.deepInterview);
 			const review = intentReview(value.deepInterview);
@@ -459,10 +467,33 @@ function knownIntentRejection(arguments_: Record<string, unknown>): RawArgumentV
 		return { outcome: "reject", code: "ask-intent-contract-requires-non-empty-authority" };
 	return undefined;
 }
+
+function deepInterviewPlaceholderRejection(
+	arguments_: Record<string, unknown>,
+): RawArgumentValidationResult | undefined {
+	if (!isPlainRecord(arguments_) || !Array.isArray(arguments_.questions)) return undefined;
+	for (const [index, rawQuestion] of arguments_.questions.entries()) {
+		if (!isPlainRecord(rawQuestion) || !Object.hasOwn(rawQuestion, "deepInterview")) continue;
+		if (isWorkflowPlaceholderText(rawQuestion.question)) {
+			return {
+				outcome: "reject",
+				code: "ask-deep-interview-question-body-required",
+				detail: {
+					rejectedKeys: [`questions[${index}].question`],
+					hint: WORKFLOW_PLACEHOLDER_CORRECTION,
+				},
+			};
+		}
+	}
+	return undefined;
+}
+
 export function recoverRoundZeroIntentContract(
 	arguments_: Record<string, unknown>,
 	stage?: "topology" | "post-topology",
 ): RawArgumentValidationResult {
+	const placeholderRejection = deepInterviewPlaceholderRejection(arguments_);
+	if (placeholderRejection) return placeholderRejection;
 	// #4649: an incomplete Round-0 topology object (deepInterview present,
 	// required fields omitted) is NOT a retired-pair recovery candidate, so it
 	// would passthrough into generic Zod validation whose error names no contract

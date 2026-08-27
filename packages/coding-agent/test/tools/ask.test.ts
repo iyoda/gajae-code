@@ -6,7 +6,13 @@ import type { AppendOrMergeResult } from "@gajae-code/coding-agent/gjc-runtime/d
 import * as deepInterviewRecorder from "@gajae-code/coding-agent/gjc-runtime/deep-interview-recorder";
 import { deepInterviewCharacterCount } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-state";
 import { getThemeByName, initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
-import type { AskAnswerRequest, AskAnswerSource, AskRemoteReceipt, ToolSession } from "@gajae-code/coding-agent/tools";
+import type {
+	AskAnswerRequest,
+	AskAnswerSource,
+	AskRemoteReceipt,
+	AskSettlement,
+	ToolSession,
+} from "@gajae-code/coding-agent/tools";
 import { AskTool, askSchema, askToolRenderer } from "@gajae-code/coding-agent/tools/ask";
 import { ToolAbortError } from "@gajae-code/coding-agent/tools/tool-errors";
 import { logger } from "@gajae-code/utils";
@@ -688,7 +694,7 @@ describe("AskTool cancellation", () => {
 });
 
 describe("AskTool remote semantic settlements", () => {
-	const abortableUi = () =>
+	const abortableUi = (abort?: () => void) =>
 		createContext({
 			select: (_prompt, _options, dialogOptions) =>
 				new Promise<string | undefined>(resolve => {
@@ -698,7 +704,82 @@ describe("AskTool remote semantic settlements", () => {
 				new Promise<string | undefined>(resolve => {
 					dialogOptions?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
 				}),
+			abort,
 		});
+
+	it("bounds repeated remote whitespace custom answers and explains the retry", async () => {
+		const requests: AskAnswerRequest[] = [];
+		const settlements: AskSettlement[] = [];
+		let remoteCalls = 0;
+		const source: AskAnswerSource = {
+			awaitAnswer: async () => undefined,
+			awaitAnswerRequest: request => {
+				requests.push(request);
+				remoteCalls++;
+				return Promise.resolve({
+					source: "remote" as const,
+					interaction: { kind: "value" as const, value: " \t" },
+					settle: async (settlement: AskSettlement) => {
+						settlements.push(settlement);
+						return { kind: "invalid_closed" as const };
+					},
+				});
+			},
+		};
+		const abort = vi.fn();
+		const tool = new AskTool(createSession({ getAskAnswerSource: () => source }));
+
+		await expect(
+			tool.execute(
+				"remote-whitespace-loop",
+				{ questions: [{ id: "choice", question: "Choose", options: [{ label: "yes" }] }] },
+				undefined,
+				undefined,
+				abortableUi(abort),
+			),
+		).rejects.toThrow("Ask tool was cancelled by the user");
+
+		expect(remoteCalls).toBe(3);
+		expect(settlements).toHaveLength(3);
+		expect(settlements).toEqual([
+			{ kind: "invalid", reason: "empty_custom" },
+			{ kind: "invalid", reason: "empty_custom" },
+			{ kind: "invalid", reason: "empty_custom" },
+		]);
+		expect(requests.slice(1).every(request => request.question.includes("Custom input cannot be empty"))).toBe(true);
+	});
+
+	it("yields between synchronous invalid remote answers so timers are not starved", async () => {
+		let timerRan = false;
+		const timer = setTimeout(() => {
+			timerRan = true;
+		}, 0);
+		let remoteCalls = 0;
+		const source: AskAnswerSource = {
+			awaitAnswer: async () => undefined,
+			awaitAnswerRequest: () => {
+				remoteCalls++;
+				return Promise.resolve({
+					source: "remote" as const,
+					interaction: { kind: "value" as const, value: "   " },
+					settle: async () => ({ kind: "invalid_closed" as const }),
+				});
+			},
+		};
+
+		await expect(
+			new AskTool(createSession({ getAskAnswerSource: () => source })).execute(
+				"remote-whitespace-yield",
+				{ questions: [{ id: "choice", question: "Choose", options: [{ label: "yes" }] }] },
+				undefined,
+				undefined,
+				abortableUi(),
+			),
+		).rejects.toThrow("Ask tool was cancelled by the user");
+		clearTimeout(timer);
+		expect(timerRan).toBe(true);
+		expect(remoteCalls).toBe(3);
+	});
 
 	it("awaits a committed visible acknowledgement before returning the answer", async () => {
 		const settlementStarted = Promise.withResolvers<void>();
@@ -1378,7 +1459,7 @@ describe("AskTool custom input", () => {
 		expect(abort).not.toHaveBeenCalled();
 	});
 
-	it("treats explicit empty-string custom input as submitted input", async () => {
+	it("cancels when the editor submits empty custom input", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
 		const editor = vi.fn(async () => "");
@@ -1388,31 +1469,51 @@ describe("AskTool custom input", () => {
 			abort,
 		});
 
-		const result = await tool.execute(
-			"call-empty-custom",
-			{
-				questions: [
-					{
-						id: "details",
-						question: "Share details",
-						options: [{ label: "yes" }, { label: "no" }],
-					},
-				],
-			},
-			undefined,
-			undefined,
-			context,
-		);
-
-		expect(result.content[0]?.type).toBe("text");
-		if (result.content[0]?.type !== "text") {
-			throw new Error("Expected text result");
-		}
-		expect(result.content[0].text).toContain("User provided custom input:");
-		expect(result.details?.customInput).toBe("");
-		expect(result.details?.selectedOptions).toEqual([]);
+		await expect(
+			tool.execute(
+				"call-empty-custom",
+				{
+					questions: [
+						{
+							id: "details",
+							question: "Share details",
+							options: [{ label: "yes" }, { label: "no" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(editor).toHaveBeenCalledTimes(1);
-		expect(abort).not.toHaveBeenCalled();
+		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels when inline Other input is only whitespace", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const editor = vi.fn(async () => "editor fallback");
+		const context = createContext({
+			select: async (_prompt, _options, dialogOptions) => {
+				dialogOptions?.customInput?.onSubmit(" \t\n ");
+				return "Other (type your own)";
+			},
+			editor,
+			abort,
+		});
+
+		await expect(
+			tool.execute(
+				"call-inline-empty-custom",
+				{ questions: [{ id: "details", question: "Share details", options: [{ label: "yes" }] }] },
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(editor).not.toHaveBeenCalled();
+		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
 	it("renders checked options together with custom text in multi-select answers", async () => {

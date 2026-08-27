@@ -1172,6 +1172,7 @@ export class ExtensionUiController {
 				customInput: dialogOptions?.customInput
 					? {
 							optionLabel: dialogOptions.customInput.optionLabel,
+							allowEmpty: (dialogOptions.customInput as { allowEmpty?: boolean }).allowEmpty,
 							onSubmit: text => {
 								const optionLabel = dialogOptions.customInput?.optionLabel;
 								this.hideHookSelector();
