@@ -8,6 +8,8 @@
 
 ### Added
 
+- Added opt-in `compaction.adaptive.*` settings and wired them into post-turn and pre-prompt auto-compaction. Adaptive mode remains disabled by default, preserves fixed-token precedence, and exposes bounded base, aggression, call-window, and minimum-threshold controls.
+
 - The `ask` tool declares its display-only argument fields (`questions.question`, `questions.options.label`) via `displaySafeEscapedArgFields`, so an `ask` call whose question text or option labels arrive as `\uXXXX` escapes (common from Anthropic models writing Korean or emoji) completes with a single warning instead of discarding the turn, charging the managed-fallback retry budget, and ultimately failing the run. Ids, workflow-gate metadata, and deep-interview records remain load-bearing and keep the fail-closed rejection. (#4983)
 
 - Added an explicit `Copy OAuth URL` command-palette action for interactive `/login` and runtime MCP OAuth flows. It copies the exact pending authorization URL through the configured clipboard transport only after the user selects the action; it never overwrites the clipboard automatically and clears the pending URL when the flow ends. This preserves OSC 8 policy, tmux/SSH/no-hyperlink behavior, and avoids relying on padded soft-wrapped terminal rows for copying.
