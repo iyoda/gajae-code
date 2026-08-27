@@ -2121,13 +2121,13 @@ export async function setModelPresetRegistryPin(
 	const agentDir = effectiveAgentDir(options);
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
-		const state = recoverStateForRead(loadStateSync(agentDir), effectiveTrustedKeys(options));
+		let state = recoverStateForRead(loadStateSync(agentDir), effectiveTrustedKeys(options));
 		if (revision === undefined) {
 			const highest = state.history.reduce(
 				(value, item) => (item.revoked ? value : Math.max(value, item.manifest.signed.registryRevision)),
 				0,
 			);
-			await writeAtomicJson(paths.state, { ...state, activeRevision: highest || undefined });
+			state = { ...state, activeRevision: highest || undefined };
 		}
 		if (revision !== undefined) {
 			const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
