@@ -1010,6 +1010,30 @@ describe("signed model preset registry", () => {
 		expect(state.revokedHistory).toHaveLength(1);
 	});
 
+	test("keeps a newer rotated generation available during offline startup", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		const rotated = crypto.generateKeyPairSync("ed25519");
+		data.trustedKeys.set("rotated-key", {
+			keyId: "rotated-key",
+			publicKeyPem: rotated.publicKey.export({ type: "spki", format: "pem" }).toString(),
+			validFrom: "2026-01-01T00:00:00.000Z",
+		});
+		await accept(
+			data,
+			signedRegistry(rotated.privateKey, 2, undefined, undefined, undefined, undefined, "rotated-key"),
+		);
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const accepted = loadAcceptedModelPresetRegistry(data.agentDir, {});
+		expect(accepted.revision).toBe(2);
+		expect(accepted.profiles.has("remote")).toBe(true);
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir })).toMatchObject({
+			cacheHealth: "valid",
+			activeRevision: 2,
+			highestSeenRevision: 2,
+		});
+	});
+
 	test("uses ETag 304 only with a verified warm cache", async () => {
 		const data = await fixture();
 		const registry = signedRegistry(data.privateKey, 1);

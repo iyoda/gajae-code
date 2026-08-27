@@ -1195,7 +1195,7 @@ function acceptedRegistryFromState(
 	control: RegistryControl,
 	state: RegistryState,
 ): AcceptedModelPresetRegistry {
-	validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
+	state = recoverStateForRead(state, effectiveTrustedKeys(dependencies, agentDir));
 	const revision = control.pinnedRevision ?? state.activeRevision;
 	const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
 	if (revision !== undefined && !generation)
@@ -1700,6 +1700,30 @@ function recoveryStateFromGeneration(
 	};
 }
 
+function recoverStateForRead(
+	state: RegistryState,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): RegistryState {
+	try {
+		validateStateGenerations(state, trustedKeys);
+		return state;
+	} catch (error) {
+		const hasRevokedGeneration =
+			(state.revokedHistory?.length ?? 0) > 0 ||
+			state.history.some(
+				generation => trustedKeys.get(generation.manifest.signature.keyId)?.revokedAt !== undefined,
+			);
+		if (!hasRevokedGeneration) throw error;
+		const recovered = recoveryStateFromGeneration(
+			recoverLatestVerifiedGeneration(state, trustedKeys),
+			recoverRevokedCheckpoints(state, trustedKeys),
+			state,
+		);
+		validateStateGenerations(recovered, trustedKeys);
+		return recovered;
+	}
+}
+
 async function recordFailure(
 	agentDir: string,
 	error: unknown,
@@ -2197,7 +2221,7 @@ export function getModelPresetRegistryStatus(
 	try {
 		control = loadControlSync(agentDir);
 		state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(dependencies, agentDir));
+		state = recoverStateForRead(state, effectiveTrustedKeys(dependencies, agentDir));
 		cacheHealth = state.history.length > 0 ? "valid" : "empty";
 	} catch (error) {
 		cacheHealth = "corrupt";
