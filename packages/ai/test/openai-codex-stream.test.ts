@@ -1811,6 +1811,46 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("holds gateway admission through the websocket handshake", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		let admitted = false;
+		let socket: GatedWebSocket | undefined;
+
+		class GatedWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				socket = this;
+			}
+
+			send(): void {
+				this.emitCodexResponse({ messageId: "msg-gated", responseId: "resp-gated", text: "ok" });
+			}
+		}
+
+		global.WebSocket = GatedWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const context = createCodexTestContext();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const stream = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId: "gated-handshake-session",
+			providerSessionState,
+			preferWebsockets: true,
+			onStreamCreated: () => {
+				admitted = true;
+			},
+		});
+
+		await new Promise(resolve => setTimeout(resolve, 20));
+		expect(socket).toBeDefined();
+		expect(admitted).toBe(false);
+		socket?.scheduleOpen();
+		await stream.result();
+		expect(admitted).toBe(true);
+	});
+
 	it("includes service_tier in websocket payloads when requested", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

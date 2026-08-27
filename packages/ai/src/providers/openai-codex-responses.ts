@@ -2850,8 +2850,12 @@ async function openCodexWebSocketEventStream(
 	options?: Pick<OpenAICodexResponsesOptions, "streamFirstEventTimeoutMs" | "streamIdleTimeoutMs" | "onStreamCreated">,
 	firstEventTimeoutMs?: number,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
-	options?.onStreamCreated?.();
 	const connection = await getOrCreateCodexWebSocketConnection(state, url, headers, signal, options);
+	// The gateway lease must remain held through the WebSocket handshake. A
+	// broker revocation can arrive while the connection is being established;
+	// releasing admission before that await would allow a revoked key to be
+	// sent by the first stream request.
+	options?.onStreamCreated?.();
 	return connection.streamRequest(
 		request,
 		signal,
