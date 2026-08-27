@@ -1258,7 +1258,7 @@ describe("signed model preset registry", () => {
 		});
 	});
 
-	test("preserves a verified checkpoint when refresh fails after state corruption", async () => {
+	test("preserves an unbound checkpoint when refresh fails after state corruption", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));
 		const statePath = path.join(data.agentDir, "model-presets", "state.json");
@@ -1276,8 +1276,35 @@ describe("signed model preset registry", () => {
 			}),
 		).rejects.toThrow("Registry refresh failed.");
 		const recoveredState = await Bun.file(statePath).json();
-		expect(recoveredState.highestSeenRevision).toBe(1);
-		expect(recoveredState.highestSeenManifestSha256).toBe(state.history[0].manifestSha256);
+		expect(recoveredState.highestSeenRevision).toBe(99_999_999);
+		expect(recoveredState.highestSeenManifestSha256).toBe("f".repeat(64));
+	});
+
+	test("preserves an unbound anti-rollback floor when failed recovery has no history", async () => {
+		const data = await fixture();
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		await Bun.write(
+			statePath,
+			JSON.stringify({
+				version: 1,
+				history: [],
+				highestSeenRevision: 99,
+				highestSeenManifestSha256: "f".repeat(64),
+			}),
+		);
+		await expect(
+			refreshModelPresetRegistry({
+				agentDir: data.agentDir,
+				manifestUrl,
+				fetch: (async () => {
+					throw new Error("offline");
+				}) as unknown as typeof fetch,
+			}),
+		).rejects.toThrow(/anti-rollback checkpoint cannot be reconstructed/i);
+		const recoveredState = await Bun.file(statePath).json();
+		expect(recoveredState.highestSeenRevision).toBe(99);
+		expect(recoveredState.highestSeenManifestSha256).toBe("f".repeat(64));
+		expect(recoveredState.history).toEqual([]);
 	});
 
 	test("rejects same-revision equivocation after recovering a verified checkpoint", async () => {
@@ -1339,7 +1366,7 @@ describe("signed model preset registry", () => {
 					throw new Error("offline");
 				}) as unknown as typeof fetch,
 			}),
-		).rejects.toThrow("Registry refresh failed.");
+		).rejects.toThrow(/anti-rollback checkpoint cannot be reconstructed/i);
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
 		await accept(data, signedRegistry(data.privateKey, 2));
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);

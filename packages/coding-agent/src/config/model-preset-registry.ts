@@ -1634,6 +1634,15 @@ function recoveryStateFromGeneration(
 				? { manifest: generation.manifest, manifestSha256: generation.manifestSha256 }
 				: priorFloorGeneration;
 	const boundedHistory = history.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY);
+	if (priorFloor !== undefined && !priorFloorGeneration && priorFloor > (activeRevision ?? 0)) {
+		return {
+			version: 1,
+			activeRevision,
+			highestSeenRevision: priorFloor,
+			highestSeenManifestSha256: priorState?.highestSeenManifestSha256,
+			history: boundedHistory,
+		};
+	}
 	if (
 		floor &&
 		!boundedHistory.some(item => item.manifest.signed.registryRevision === floor.manifest.signed.registryRevision)
