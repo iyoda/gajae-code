@@ -1,9 +1,12 @@
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
+	autocompleteFuzzyMatch,
+	autocompleteFuzzyScore,
 	CombinedAutocompleteProvider,
 	extractSlashCommandTokenPrefix,
 	getSlashCommandMatchRank,
+	normalizeFuzzyText,
 	type SlashCommand,
 } from "@gajae-code/tui";
 import type { KeybindingsManager } from "../config/keybindings";
@@ -50,43 +53,6 @@ interface PromptActionAutocompleteOptions {
 	getPromptSuggestion?: () => string | null;
 }
 
-function fuzzyMatch(query: string, target: string): boolean {
-	if (query.length === 0) return true;
-	if (query.length > target.length) return false;
-
-	let queryIndex = 0;
-	for (let targetIndex = 0; targetIndex < target.length && queryIndex < query.length; targetIndex += 1) {
-		if (query[queryIndex] === target[targetIndex]) {
-			queryIndex += 1;
-		}
-	}
-
-	return queryIndex === query.length;
-}
-
-function fuzzyScore(query: string, target: string): number {
-	if (query.length === 0) return 1;
-	if (target === query) return 100;
-	if (target.startsWith(query)) return 80;
-	if (target.includes(query)) return 60;
-
-	let queryIndex = 0;
-	let gaps = 0;
-	let lastMatchIndex = -1;
-	for (let targetIndex = 0; targetIndex < target.length && queryIndex < query.length; targetIndex += 1) {
-		if (query[queryIndex] === target[targetIndex]) {
-			if (lastMatchIndex >= 0 && targetIndex - lastMatchIndex > 1) {
-				gaps += 1;
-			}
-			lastMatchIndex = targetIndex;
-			queryIndex += 1;
-		}
-	}
-
-	if (queryIndex !== query.length) return 0;
-	return Math.max(1, 40 - gaps * 5);
-}
-
 function isPromptActionItem(item: AutocompleteItem): item is PromptActionAutocompleteItem {
 	return "actionId" in item && "execute" in item && typeof item.execute === "function";
 }
@@ -127,6 +93,7 @@ function sortSlashCommandSuggestions(
 ): { items: AutocompleteItem[]; prefix: string } | null {
 	if (!suggestions) return null;
 	const query = suggestions.prefix.slice(1).toLowerCase();
+	const normalizedQuery = normalizeFuzzyText(query);
 	const commandIndexes = new Map(commands.map((command, index) => [command.name, index]));
 	const commandByName = new Map(commands.map(command => [command.name, command]));
 	const items = suggestions.items
@@ -135,13 +102,20 @@ function sortSlashCommandSuggestions(
 			const commandIndex = commandIndexes.get(item.value) ?? index;
 			const lowerName = item.value.toLowerCase();
 			const lowerDesc = command?.description?.toLowerCase() ?? item.description?.toLowerCase() ?? "";
-			const nameScore = fuzzyMatch(query, lowerName) ? fuzzyScore(query, lowerName) : 0;
-			const descScore = fuzzyMatch(query, lowerDesc) ? fuzzyScore(query, lowerDesc) * 0.5 : 0;
+			const normalizedName = normalizeFuzzyText(item.value);
+			const normalizedDesc = normalizeFuzzyText(lowerDesc);
+			const nameScore = autocompleteFuzzyMatch(normalizedQuery, normalizedName)
+				? autocompleteFuzzyScore(normalizedQuery, normalizedName)
+				: 0;
+			const descScore = autocompleteFuzzyMatch(normalizedQuery, normalizedDesc)
+				? autocompleteFuzzyScore(normalizedQuery, normalizedDesc) * 0.5
+				: 0;
+			const isAscii = /^[\x00-\x7F]*$/.test(`${query}${item.value}`);
 			return {
 				item,
 				index,
 				commandIndex,
-				matchRank: getSlashCommandMatchRank(query, lowerName),
+				matchRank: isAscii ? getSlashCommandMatchRank(query, lowerName) : 4,
 				priority: getSlashCommandPriority(command, item),
 				score: Math.max(nameScore, descScore),
 			};
@@ -219,14 +193,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 					const searchable = [action.id, action.label, action.description, ...action.keywords]
 						.join(" ")
 						.toLowerCase();
-					if (!fuzzyMatch(query, searchable)) return null;
+					if (!autocompleteFuzzyMatch(query, searchable)) return null;
 					return {
 						value: action.label,
 						label: action.label,
 						description: action.description,
 						actionId: action.id,
 						execute: action.execute,
-						score: fuzzyScore(query, searchable),
+						score: autocompleteFuzzyScore(query, searchable),
 					} satisfies PromptActionAutocompleteItem & { score: number };
 				})
 				.filter(item => item !== null)
@@ -350,7 +324,10 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		if (!prefix) return null;
 		const query = prefix.slice(1).toLowerCase();
 		if (query.length === 0 && !options.includeEmpty) return null;
-		const normalizedQuery = query.startsWith("skill-") ? `skill:${query.slice("skill-".length)}` : query;
+		const normalizedQuery = normalizeFuzzyText(
+			query.startsWith("skill-") ? `skill:${query.slice("skill-".length)}` : query,
+		);
+		if (query.length > 0 && normalizedQuery.length === 0) return null;
 		const exactNonSkillCommand = this.#commands.some(
 			command => command.name === query && !command.name.startsWith("skill:"),
 		);
@@ -364,16 +341,18 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 					`skill-${skillName}`,
 					...(exactNonSkillCommand ? [] : [skillName]),
 					command.description ?? "",
-				].map(target => target.toLowerCase());
+				].map(target => normalizeFuzzyText(target));
 				if (
-					!searchTargets.some(target => fuzzyMatch(normalizedQuery, target) || target.includes(normalizedQuery))
+					!searchTargets.some(
+						target => autocompleteFuzzyMatch(normalizedQuery, target) || target.includes(normalizedQuery),
+					)
 				) {
 					return null;
 				}
 				const bestScore = Math.max(
 					...searchTargets.map(target =>
-						fuzzyMatch(normalizedQuery, target)
-							? fuzzyScore(normalizedQuery, target)
+						autocompleteFuzzyMatch(normalizedQuery, target)
+							? autocompleteFuzzyScore(normalizedQuery, target)
 							: target.includes(normalizedQuery)
 								? 60
 								: 0,
