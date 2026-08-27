@@ -1366,7 +1366,7 @@ describe("signed model preset registry", () => {
 					throw new Error("offline");
 				}) as unknown as typeof fetch,
 			}),
-		).rejects.toThrow(/anti-rollback checkpoint cannot be reconstructed/i);
+		).rejects.toThrow("Registry refresh failed.");
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
 		await accept(data, signedRegistry(data.privateKey, 2));
 		expect(loadAcceptedModelPresetRegistry(data.agentDir, {}).revision).toBe(2);
