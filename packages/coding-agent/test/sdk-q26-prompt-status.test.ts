@@ -43,10 +43,10 @@ describe("prompt reconciliation record", () => {
 			acceptedAt: clock.now(),
 			startedAt: clock.now(),
 		});
-		rec.noteTransition(correlation(), { type: "agent_end" });
+		rec.noteTransition(correlation(), { type: "agent_end", finalText: "completed" });
 		expect(rec.lookup({ commandId: "command-1", turnId: "turn-1" })).toEqual({
 			status: "terminal_ok",
-			receiptState: "missing",
+			receiptState: "present",
 			commandId: "command-1",
 			turnId: "turn-1",
 			clientRef: "ref-1",
@@ -72,6 +72,26 @@ describe("prompt reconciliation record", () => {
 		expect(result.error.message).not.toMatch(/[\t\r\n]/);
 		expect(result.error.message.length).toBeLessThanOrEqual(512);
 		expect(result.terminalAt).toBeGreaterThan(0);
+	});
+
+	it("accepts explicit cancellation and non-text activity without a visible receipt", () => {
+		const rec = createPromptReconciliation();
+		rec.noteAccepted(correlation(4), "ref-cancelled");
+		rec.noteTransition(correlation(4), {
+			type: "agent_end",
+			outcome: { kind: "stopped", reason: "cancelled", provenance: "client_cancel" },
+		});
+		expect(rec.lookup({ clientRef: "ref-cancelled" })).toMatchObject({
+			status: "terminal_ok",
+			receiptState: "missing",
+		});
+
+		rec.noteAccepted(correlation(5), "ref-activity");
+		rec.noteTransition(correlation(5), { type: "agent_end", hasActivity: true });
+		expect(rec.lookup({ clientRef: "ref-activity" })).toMatchObject({
+			status: "terminal_ok",
+			receiptState: "missing",
+		});
 	});
 
 	it("retains only a safe-token code and never exposes arbitrary failure text", () => {
@@ -137,7 +157,7 @@ describe("prompt reconciliation record", () => {
 		const rec = createPromptReconciliation({ now: clock.now });
 		rec.noteAccepted(correlation(), "ref-1");
 		rec.noteTransition(correlation(), { type: "agent_start" });
-		rec.noteTransition(correlation(), { type: "agent_end" });
+		rec.noteTransition(correlation(), { type: "agent_end", finalText: "completed" });
 		expect(rec.lookup({ clientRef: "ref-1" })).toMatchObject({ status: "terminal_ok" });
 		clock.advance(24 * 60 * 60_000);
 		expect(() => rec.admit("ref-1")).toThrowError(/never reuse a clientRef/);
@@ -146,7 +166,7 @@ describe("prompt reconciliation record", () => {
 
 		for (let n = 2; n <= PROMPT_RECONCILIATION_TERMINAL_CAPACITY + 1; n++) {
 			rec.noteAccepted(correlation(n), `ref-${n}`);
-			rec.noteTransition(correlation(n), { type: "agent_end" });
+			rec.noteTransition(correlation(n), { type: "agent_end", finalText: "completed" });
 			clock.advance(1);
 		}
 		expect(rec.lookup({ clientRef: "ref-1" })).toEqual({ status: "unknown", receiptState: "unknown" });
@@ -187,7 +207,7 @@ describe("prompt reconciliation record", () => {
 		const rec = createPromptReconciliation({ now: clock.now });
 		for (let n = 1; n <= PROMPT_RECONCILIATION_TERMINAL_CAPACITY + 1; n++) {
 			rec.noteAccepted(correlation(n));
-			rec.noteTransition(correlation(n), { type: "agent_end" });
+			rec.noteTransition(correlation(n), { type: "agent_end", finalText: "completed" });
 			clock.advance(1);
 		}
 		expect(rec.lookup({ commandId: "command-1", turnId: "turn-1" })).toEqual({
@@ -214,7 +234,10 @@ describe("prompt reconciliation record", () => {
 		}
 		// The early record terminates LAST (newest terminalAt), so capacity eviction
 		// must drop the oldest terminal record, not the newly terminal one.
-		rec.noteTransition({ commandId: "command-early", turnId: "turn-early" }, { type: "agent_end" });
+		rec.noteTransition(
+			{ commandId: "command-early", turnId: "turn-early" },
+			{ type: "agent_end", finalText: "completed" },
+		);
 		expect(rec.lookup({ clientRef: "ref-early" })).toMatchObject({ status: "terminal_ok" });
 		expect(rec.lookup({ commandId: "command-1", turnId: "turn-1" })).toEqual({
 			status: "unknown",
@@ -281,7 +304,7 @@ describe("prompt reconciliation record", () => {
 		const rec = createPromptReconciliation({ now: clock.now });
 		rec.noteAccepted(correlation(), "ref-late");
 		rec.noteTransition(correlation(), { type: "agent_start" });
-		rec.noteTransition(correlation(), { type: "agent_end" });
+		rec.noteTransition(correlation(), { type: "agent_end", finalText: "completed" });
 		const settled = rec.lookup({ clientRef: "ref-late" });
 		if (settled.status !== "terminal_ok") throw new Error("expected terminal_ok");
 		expect(settled.error).toBeUndefined();
@@ -304,7 +327,7 @@ describe("prompt reconciliation record", () => {
 	it("keeps the first recorded reason when later agent_failed frames disagree", () => {
 		const rec = createPromptReconciliation();
 		rec.noteAccepted(correlation(1), "ref-first");
-		rec.noteTransition(correlation(1), { type: "agent_end" });
+		rec.noteTransition(correlation(1), { type: "agent_end", finalText: "completed" });
 		rec.noteTransition(correlation(1), {
 			type: "agent_failed",
 			error: Object.assign(new Error("first"), { code: "transport_reset" }),
@@ -338,7 +361,7 @@ describe("prompt reconciliation record", () => {
 		rec.noteTransition(correlation(3), { type: "agent_start" });
 		const startedAt = clock.now();
 		clock.advance(10);
-		rec.noteTransition(correlation(3), { type: "agent_end" });
+		rec.noteTransition(correlation(3), { type: "agent_end", finalText: "completed" });
 		const terminalAt = clock.now();
 		rec.noteTransition(correlation(3), {
 			type: "agent_failed",
@@ -346,7 +369,7 @@ describe("prompt reconciliation record", () => {
 		});
 		clock.advance(60_000);
 		rec.noteTransition(correlation(3), { type: "agent_start" });
-		rec.noteTransition(correlation(3), { type: "agent_end" });
+		rec.noteTransition(correlation(3), { type: "agent_end", finalText: "completed" });
 		expect(rec.lookup({ clientRef: "ref-frozen" })).toEqual({
 			status: "terminal_ok",
 			commandId: "command-3",
@@ -355,7 +378,7 @@ describe("prompt reconciliation record", () => {
 			acceptedAt: startedAt,
 			startedAt,
 			terminalAt,
-			receiptState: "missing",
+			receiptState: "present",
 			error: { code: "transport_reset", message: "Prompt submission failed." },
 		});
 		expect(rec.activeCount()).toBe(0);

@@ -13,6 +13,8 @@ import {
 	unregisterOwnedRegistration,
 } from "../../session/terminal-abort";
 import { Broker } from "../broker/broker";
+import { createKindAwareReconciliation } from "../bus/kind-aware-reconciliation";
+import { createPromptReconciliation } from "../bus/prompt-reconciliation";
 import { createReconciliationStore } from "../bus/reconciliation-store";
 import { CursorRegistry, QueryHandlers, RevisionStore } from "./query";
 import {
@@ -145,6 +147,76 @@ async function queryGoalState(
 	if (!response.ok) throw new Error(`goal query failed: ${JSON.stringify(response)}`);
 	return response.page?.items[0];
 }
+
+test("native prompt reconciliation fails closed for an explicitly empty assistant result", () => {
+	const reconciliation = createPromptReconciliation();
+	const correlation = { commandId: "native-empty-command", turnId: "native-empty-turn" };
+	reconciliation.admit("native-empty-ref");
+	reconciliation.noteAccepted(correlation, "native-empty-ref");
+	reconciliation.noteTransition(correlation, { type: "agent_end", finalText: "" });
+	expect(reconciliation.lookup({ clientRef: "native-empty-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_failed" },
+		receiptState: "missing",
+	});
+	reconciliation.noteTransition(correlation, { type: "agent_end", finalText: "late text" });
+	expect(reconciliation.lookup({ clientRef: "native-empty-ref" })).toMatchObject({ status: "failed" });
+});
+
+test("broker reconciliation fails closed for an empty prompt and persists the first terminal result", async () => {
+	let records: unknown[] = [];
+	const store = {
+		load: async () => records,
+		transact: async (mutator: (current: never[]) => never[]) => {
+			records = mutator(records as never);
+		},
+	} as never;
+	const reconciliation = createKindAwareReconciliation({ store });
+	const correlation = { commandId: "broker-empty-command", turnId: "broker-empty-turn" };
+	await reconciliation.noteAccepted("prompt", correlation, "broker-empty-ref");
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "", byteLength: 0, truncated: false },
+	});
+	const settled = reconciliation.lookupResult("prompt", { clientRef: "broker-empty-ref" });
+	expect(settled).toMatchObject({ status: "failed", error: { code: "prompt_failed" } });
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "late text", byteLength: 9, truncated: false },
+	});
+	const reloaded = createKindAwareReconciliation({ store });
+	await reloaded.hydrateFromStore();
+	expect(reloaded.lookupResult("prompt", { clientRef: "broker-empty-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_failed" },
+	});
+	const noOpCorrelation = { commandId: "broker-noop-command", turnId: "broker-noop-turn" };
+	await reconciliation.noteAccepted("prompt", noOpCorrelation, "broker-noop-ref");
+	await reconciliation.finalizeOutcome(
+		"prompt",
+		noOpCorrelation,
+		{ kind: "stopped", reason: "cancelled", provenance: "client_cancel" },
+		undefined,
+		"",
+	);
+	expect(reconciliation.lookupResult("prompt", { clientRef: "broker-noop-ref" })).toMatchObject({
+		status: "terminal_ok",
+	});
+});
+
+test("session-host prompt reconciliation fails closed when the accepted result is empty", async () => {
+	const reconciliation = createInvocationReconciliation();
+	const correlation = { commandId: "host-empty-command", turnId: "host-empty-turn" };
+	await reconciliation.noteAccepted("prompt", correlation, "host-empty-ref");
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "", byteLength: 0, truncated: false },
+	});
+	expect(reconciliation.lookup("prompt", { clientRef: "host-empty-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_failed" },
+	});
+});
 
 describe("SDK goal snapshot lifecycle", () => {
 	test("recovers an active nonzero-activity goal from the durable session projection", async () => {
@@ -405,7 +477,10 @@ test("durable reload keeps agent_end terminal across a paused successor transiti
 	const correlation = { commandId: "durable-race-command", turnId: "durable-race-turn" };
 	await reconciliation.noteAccepted("prompt", correlation, "durable-race-ref");
 	pauseWrites = 2;
-	const terminal = reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+	const terminal = reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+	});
 	await writeStarted[0]!.promise;
 	// A successor lifecycle event arrives while the terminal write is held. It
 	// must observe the staged terminal record and never resurrect in_flight state.
@@ -455,7 +530,10 @@ test("agent_end is not swallowed when deadline persistence fails", async () => {
 		message: "deadline",
 	});
 	await persistStarted.promise;
-	const terminal = reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+	const terminal = reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+	});
 	releasePersist.resolve();
 	await expect(deadline).rejects.toThrow("held store failed");
 	await terminal;
@@ -523,13 +601,86 @@ test("agent_end upgrades a durable deadline terminal when it races a successful 
 		code: "prompt_deadline_exceeded",
 		message: "deadline",
 	});
-	await reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+	});
 	const reloaded = createInvocationReconciliation({ store });
 	await reloaded.hydrate();
 	expect(reloaded.lookup("prompt", { clientRef: "upgrade-race-ref" })).toMatchObject({ status: "terminal_ok" });
 });
 
-test("failed agent_end upgrade persistence retains the deadline record for retry", async () => {
+test("an empty late agent_end cannot upgrade a durable prompt deadline failure", async () => {
+	let records: unknown[] = [];
+	const store = {
+		path: null,
+		load: async () => records,
+		transact: async (mutator: (current: never[]) => never[]) => {
+			records = mutator(records as never);
+		},
+	} as never;
+	const reconciliation = createInvocationReconciliation({ store });
+	const correlation = { commandId: "empty-deadline-command", turnId: "empty-deadline-turn" };
+	await reconciliation.noteAccepted("prompt", correlation, "empty-deadline-ref");
+	await reconciliation.finalizeOutcome("prompt", correlation, {
+		kind: "failed",
+		code: "prompt_deadline_exceeded",
+		message: "deadline",
+	});
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "", byteLength: 0, truncated: false },
+	});
+	expect(reconciliation.lookup("prompt", { clientRef: "empty-deadline-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_deadline_exceeded" },
+	});
+	const reloaded = createInvocationReconciliation({ store });
+	await reloaded.hydrate();
+	expect(reloaded.lookup("prompt", { clientRef: "empty-deadline-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_deadline_exceeded" },
+	});
+});
+
+test("whitespace and provider failures stay actionable across a late empty agent_end", async () => {
+	let records: unknown[] = [];
+	const store = {
+		path: null,
+		load: async () => records,
+		transact: async (mutator: (current: never[]) => never[]) => {
+			records = mutator(records as never);
+		},
+	} as never;
+	const reconciliation = createInvocationReconciliation({ store });
+	const whitespace = { commandId: "whitespace-command", turnId: "whitespace-turn" };
+	await reconciliation.noteAccepted("prompt", whitespace, "whitespace-ref");
+	await reconciliation.noteTransition("prompt", whitespace, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: " \t\n ", byteLength: 4, truncated: false },
+	});
+	expect(reconciliation.lookup("prompt", { clientRef: "whitespace-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "prompt_failed", message: "Prompt submission failed." },
+	});
+
+	const providerFailure = { commandId: "provider-command", turnId: "provider-turn" };
+	await reconciliation.noteAccepted("prompt", providerFailure, "provider-ref");
+	await reconciliation.noteTransition("prompt", providerFailure, {
+		type: "agent_failed",
+		error: Object.assign(new Error("provider leaked detail"), { code: "provider_unavailable" }),
+	});
+	await reconciliation.noteTransition("prompt", providerFailure, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "", byteLength: 0, truncated: false },
+	});
+	expect(reconciliation.lookup("prompt", { clientRef: "provider-ref" })).toMatchObject({
+		status: "failed",
+		error: { code: "provider_unavailable", message: "Prompt submission failed." },
+	});
+});
+
+test("an empty prompt terminal remains failed after a late real failure", async () => {
 	let records: unknown[] = [];
 	let writes = 0;
 	const store = {
@@ -550,9 +701,12 @@ test("failed agent_end upgrade persistence retains the deadline record for retry
 		code: "prompt_deadline_exceeded",
 		message: "deadline",
 	});
-	await expect(reconciliation.noteTransition("prompt", correlation, { type: "agent_end" })).rejects.toThrow(
-		"upgrade persist failed",
-	);
+	await expect(
+		reconciliation.noteTransition("prompt", correlation, {
+			type: "agent_end",
+			content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+		}),
+	).rejects.toThrow("upgrade persist failed");
 	expect(reconciliation.lookup("prompt", { clientRef: "upgrade-failure-ref" })).toMatchObject({
 		status: "failed",
 		error: { code: "prompt_deadline_exceeded" },
@@ -563,17 +717,60 @@ test("failed agent_end upgrade persistence retains the deadline record for retry
 		status: "failed",
 		error: { code: "prompt_deadline_exceeded" },
 	});
-	await reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+	});
 	const reloaded = createInvocationReconciliation({ store });
 	await reloaded.hydrate();
 	expect(reloaded.lookup("prompt", { clientRef: "upgrade-failure-ref" })).toMatchObject({ status: "terminal_ok" });
+});
+
+test("late cancellation and non-text activity upgrade deadline terminals", async () => {
+	const makeStore = () => {
+		let records: unknown[] = [];
+		return {
+			path: null,
+			load: async () => records,
+			transact: async (mutator: (current: never[]) => never[]) => {
+				records = mutator(records as never);
+			},
+		} as never;
+	};
+	const cancelled = createInvocationReconciliation({ store: makeStore() });
+	const cancelledCorrelation = { commandId: "late-cancel-command", turnId: "late-cancel-turn" };
+	await cancelled.noteAccepted("prompt", cancelledCorrelation, "late-cancel-ref");
+	await cancelled.finalizeOutcome("prompt", cancelledCorrelation, {
+		kind: "failed",
+		code: "prompt_deadline_exceeded",
+		message: "deadline",
+	});
+	await cancelled.noteTransition("prompt", cancelledCorrelation, {
+		type: "agent_end",
+		outcome: { kind: "stopped", reason: "cancelled", provenance: "client_cancel" },
+	});
+	expect(cancelled.lookup("prompt", { clientRef: "late-cancel-ref" })).toMatchObject({ status: "terminal_ok" });
+
+	const activity = createInvocationReconciliation({ store: makeStore() });
+	const activityCorrelation = { commandId: "late-activity-command", turnId: "late-activity-turn" };
+	await activity.noteAccepted("prompt", activityCorrelation, "late-activity-ref");
+	await activity.finalizeOutcome("prompt", activityCorrelation, {
+		kind: "failed",
+		code: "prompt_deadline_exceeded",
+		message: "deadline",
+	});
+	await activity.noteTransition("prompt", activityCorrelation, { type: "agent_end", hasActivity: true });
+	expect(activity.lookup("prompt", { clientRef: "late-activity-ref" })).toMatchObject({ status: "terminal_ok" });
 });
 
 test("a reason attached after a prompt settled is never replaced by a later failure", async () => {
 	const reconciliation = createInvocationReconciliation();
 	const correlation = { commandId: "late-reason-command", turnId: "late-reason-turn" };
 	await reconciliation.noteAccepted("prompt", correlation, "late-reason-ref");
-	await reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+	await reconciliation.noteTransition("prompt", correlation, {
+		type: "agent_end",
+		content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+	});
 	const claimed = reconciliation.lookup("prompt", { clientRef: "late-reason-ref" }) as Record<string, unknown>;
 	expect(claimed).toEqual({
 		status: "terminal_ok",
@@ -649,7 +846,10 @@ test("retains terminal host reconciliation records past the 15-minute window", a
 		reconciliation.admit("skill", "aged-skill-ref");
 		await reconciliation.noteAccepted("prompt", promptCorrelation, "aged-ref");
 		await reconciliation.noteAccepted("skill", skillCorrelation, "aged-skill-ref");
-		await reconciliation.noteTransition("prompt", promptCorrelation, { type: "agent_end" });
+		await reconciliation.noteTransition("prompt", promptCorrelation, {
+			type: "agent_end",
+			content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+		});
 		await reconciliation.noteTransition("skill", skillCorrelation, { type: "agent_end" });
 
 		clock += 15 * 60_000 + 1;
@@ -679,7 +879,10 @@ test("capacity eviction still releases the clientRef and reports honest unknown"
 		const correlation = { commandId: `capacity-command-${index}`, turnId: `capacity-turn-${index}` };
 		reconciliation.admit("prompt", `capacity-ref-${index}`);
 		await reconciliation.noteAccepted("prompt", correlation, `capacity-ref-${index}`);
-		await reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+		await reconciliation.noteTransition("prompt", correlation, {
+			type: "agent_end",
+			content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+		});
 	}
 	expect(reconciliation.lookup("prompt", { clientRef: "capacity-ref-1" })).toEqual({
 		status: "unknown",
@@ -1870,10 +2073,10 @@ describe("SessionSdkSessionRuntime", () => {
 			prompt("conn-b", "stale-b");
 			await waitResponse("stale-b");
 			// A later AGENT-INITIATED turn starts: the pending queue is empty, so
-			// the owner stays conn-a (B's stale connection is not associated).
+			// the predecessor's conn-a owner is cleared and no SDK client owns it.
 			await handlers.get("agent_start")?.({ type: "agent_start" }, ctx);
-			// B's abort must NOT stop the agent-initiated turn.
-			transport.feed("conn-b", {
+			// A's stale owner must NOT stop the agent-initiated turn.
+			transport.feed("conn-a", {
 				type: "control_request",
 				id: "stale-owner-abort",
 				operation: "turn.abort",
@@ -1983,6 +2186,40 @@ describe("SessionSdkSessionRuntime", () => {
 			expect(seamCalls).toHaveLength(0);
 		} finally {
 			await handlers.get("session_shutdown")?.({}, ctx);
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("agent-initiated successor activity cannot renew a stale predecessor deadline", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-stale-deadline-owner-"));
+		try {
+			const harness = await invocationHarness("stale-deadline-owner", cwd, {
+				settings: {
+					get: (key: string) =>
+						key === "sdk.promptDeadlineMs" ? 25 : key === "sdk.promptMaxRuntimeMs" ? 60_000 : undefined,
+				} as unknown as Settings,
+				sendUserMessage: async (_content, options) => {
+					await options?.onPreflightAcceptCommit?.();
+					await neverSettlingPromise();
+				},
+			});
+			const prompt = await harness.control("turn.prompt", { text: "predecessor" });
+			expect(prompt.ok).toBe(true);
+			const ids = { commandId: prompt.result?.commandId, turnId: prompt.result?.turnId };
+			await harness.emit("agent_start");
+			// Empty drain represents an agent-initiated successor with no SDK owner.
+			await harness.emit("agent_start");
+			for (let i = 0; i < 3; i += 1) {
+				await harness.emit("tool_execution_start");
+				await Bun.sleep(15);
+			}
+			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({
+				status: "failed",
+				error: { code: "prompt_deadline_exceeded" },
+			});
+			await harness.stop();
+		} finally {
+			await Bun.sleep(50);
 			await rm(cwd, { recursive: true, force: true });
 		}
 	});
@@ -2985,7 +3222,7 @@ async function invocationHarness(
 	sessionId: string,
 	cwd: string,
 	hooks: {
-		sendUserMessage?: (content: unknown, options?: PreflightHooks & { deliverAs?: string }) => Promise<void>;
+		sendUserMessage?: (content: unknown, options?: PreflightHooks & { deliverAs?: string }) => Promise<unknown>;
 		invokeSkill?: (name: string, args?: string, options?: PreflightHooks) => Promise<unknown>;
 		abort?: () => void;
 		isIdle?: () => boolean;
@@ -3010,7 +3247,10 @@ async function invocationHarness(
 		on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) {
 			handlers.set(event, handler);
 		},
-		sendUserMessage: hooks.sendUserMessage ?? (async () => {}),
+		sendUserMessage: async (content: unknown, options?: PreflightHooks & { deliverAs?: string }) => {
+			const result = await hooks.sendUserMessage?.(content, options);
+			return result === undefined ? "completed" : result;
+		},
 	} as unknown as ExtensionAPI;
 	const interceptorStore = hooks.persistInterceptor
 		? createInterceptorReconciliationStore(
@@ -3429,7 +3669,10 @@ describe("post-acceptance invocation terminalization", () => {
 					},
 				],
 			});
-			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({ status: "terminal_ok" });
+			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({
+				status: "failed",
+				error: { code: "prompt_failed" },
+			});
 			await harness.stop();
 		} finally {
 			await Bun.sleep(50);
@@ -3460,7 +3703,10 @@ describe("post-acceptance invocation terminalization", () => {
 					},
 				],
 			});
-			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({ status: "terminal_ok" });
+			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({
+				status: "failed",
+				error: { code: "prompt_failed" },
+			});
 			await harness.stop();
 		} finally {
 			await Bun.sleep(50);
@@ -3489,7 +3735,8 @@ describe("post-acceptance invocation terminalization", () => {
 			});
 			await harness.emit("agent_end", event);
 			expect(await settledStatus(harness, "turn.prompt_status", ids)).toMatchObject({
-				status: "terminal_ok",
+				status: "failed",
+				error: { code: "prompt_failed" },
 			});
 			await harness.stop();
 		} finally {
@@ -3530,7 +3777,9 @@ describe("post-acceptance invocation terminalization", () => {
 				error: { code: "provider_http_402" },
 			});
 			expect((await harness.query("turn.prompt_status", replacementIds)).result?.status).toBe("in_flight");
-			await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+			await harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: "completed" }],
+			});
 			expect(await settledStatus(harness, "turn.prompt_status", replacementIds)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -3656,7 +3905,9 @@ describe("post-acceptance invocation terminalization", () => {
 				expect(successor.ok).toBe(true);
 				const successorIds = { commandId: successor.result?.commandId, turnId: successor.result?.turnId };
 				await harness.emit("agent_start");
-				await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+				await harness.emit("agent_end", {
+					messages: [{ role: "assistant", stopReason: "stop", content: "completed" }],
+				});
 				secondInflight.resolve();
 				expect(await settledStatus(harness, "turn.prompt_status", successorIds)).toMatchObject({
 					status: "terminal_ok",
@@ -3789,7 +4040,9 @@ describe("post-acceptance invocation terminalization", () => {
 			expect(successor.ok).toBe(true);
 			const successorIds = { commandId: successor.result?.commandId, turnId: successor.result?.turnId };
 			await harness.emit("agent_start");
-			await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+			await harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: "completed" }],
+			});
 			secondInflight.resolve();
 			expect(await settledStatus(harness, "turn.prompt_status", successorIds)).toMatchObject({
 				status: "terminal_ok",
@@ -3938,7 +4191,7 @@ describe("post-acceptance invocation terminalization", () => {
 				status: "failed",
 				error: { code: "aborted" },
 			});
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			expect(await settledStatus(harness, "turn.prompt_status", secondIds)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -3989,8 +4242,8 @@ describe("post-acceptance invocation terminalization", () => {
 			expect(await harness.query("turn.prompt_status", successorIds)).toMatchObject({
 				result: { status: expect.stringMatching(/accepted|in_flight/) },
 			});
-			await harness.emit("agent_end");
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			expect(await settledStatus(harness, "turn.prompt_status", successorIds)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -4078,7 +4331,7 @@ describe("post-acceptance invocation terminalization", () => {
 			expect(accepted.ok).toBe(true);
 			const successorIds = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
 			await harness.emit("agent_start");
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			expect(await settledStatus(harness, "turn.prompt_status", successorIds)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -4277,7 +4530,7 @@ describe("post-acceptance invocation terminalization", () => {
 			const accepted = await harness.control("turn.prompt", { text: "hello" });
 			const { commandId, turnId } = accepted.result ?? {};
 			await harness.emit("agent_start");
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			const claimed = await settledStatus(harness, "turn.prompt_status", { commandId, turnId });
 			expect(claimed).toMatchObject({ status: "terminal_ok" });
 			inflight.reject(Object.assign(new Error("late provider failure"), { code: "upstream_error" }));
@@ -4445,7 +4698,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			const first = await harness.control("turn.prompt", { text: "first" });
 			expect(first.ok).toBe(true);
 			await harness.emit("agent_start");
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			const followUpB = await harness.control("turn.follow_up", { text: "b" });
 			const followUpC = await harness.control("turn.follow_up", { text: "c" });
 			promoted[0]?.({ startsOwnRun: true });
@@ -4593,7 +4846,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			}
 			const midRun = await harness.query("turn.prompt_status", ids);
 			expect(midRun.result?.status).not.toBe("failed");
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			const final = await harness.query("turn.prompt_status", ids);
 			expect(final.result?.status).toBe("terminal_ok");
 			await harness.stop();
@@ -4688,7 +4941,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			// The consuming run ends. The consumed submission must terminalize
 			// WITH it (terminal_ok, never a fabricated prompt_deadline_exceeded):
 			// with the bug it would still be parked in pending as merely accepted.
-			await handlers.get("agent_end")?.({}, ctx);
+			await handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: "completed" }] }, ctx);
 			const statusOf = async (ids: { commandId?: string; turnId?: string }, frameId: string) => {
 				transport.feed("conn-a", {
 					type: "query_request",
@@ -4766,7 +5019,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			expect(midRun.result?.status).not.toBe("terminal_ok");
 			expect(midRun.result?.status).not.toBe("failed");
 			// The in-flight run ends: the diverted correlation terminalizes with it.
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			expect(await settledStatus(harness, "turn.prompt_status", idsRaced)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -4825,7 +5078,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			expect(queued.result?.status).not.toBe("failed");
 			// Real consumption re-leases and attaches to the in-flight run.
 			consumed?.({ startsOwnRun: false });
-			await harness.emit("agent_end");
+			await harness.emit("agent_end", { messages: [{ role: "assistant", content: "completed" }] });
 			expect(await settledStatus(harness, "turn.prompt_status", idsRaced)).toMatchObject({
 				status: "terminal_ok",
 			});
@@ -5265,6 +5518,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			const acceptedA = (await waitFrame("settle-early-a")) as { result?: { commandId?: string; turnId?: string } };
 			const idsA = { commandId: acceptedA.result?.commandId, turnId: acceptedA.result?.turnId };
 			const statusDeadline = Date.now() + 15_000;
+			let settledStatus: string | undefined;
 			for (;;) {
 				transport.feed("conn-a", {
 					type: "query_request",
@@ -5276,10 +5530,12 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 					result?: { status?: string };
 				};
 				transport.sent.splice(transport.sent.indexOf(statusFrame), 1);
-				if (statusFrame.result?.status === "terminal_ok") break;
+				settledStatus = statusFrame.result?.status;
+				if (statusFrame.result?.status === "terminal_ok" || statusFrame.result?.status === "failed") break;
 				if (Date.now() > statusDeadline) throw new Error("settled prompt never reported terminal_ok");
 				await Bun.sleep(20);
 			}
+			expect(settledStatus).toBe("failed");
 			// conn-b's prompt is accepted and hangs; its run then starts.
 			transport.feed("conn-b", {
 				type: "control_request",
@@ -5954,7 +6210,7 @@ test("SDK-only host lets every connection whose follow-up was promoted abort the
 			Promise.resolve(options?.onPreflightAcceptCommit?.()).then(() => {
 				if (options?.onQueuedPromoted) promoted.push(options.onQueuedPromoted);
 				options?.onPreflightAccepted?.();
-				return {};
+				return "completed";
 			}),
 	} as unknown as ExtensionAPI;
 	const transport = memoryTransport();
@@ -6042,7 +6298,7 @@ test("SDK-only host lets every connection whose follow-up was promoted abort the
 		// invocation left the remaining follow-ups durably accepted — their
 		// result lookups would never complete and a restart would report them
 		// failed even though they ran in the shared turn.
-		await handlers.get("agent_end")?.({ type: "agent_end" }, ctx);
+		await handlers.get("agent_end")?.({ type: "agent_end", stopReason: "cancelled", messages: [] }, ctx);
 		{
 			const terminalDeadline = Date.now() + 15_000;
 			const promptStatuses = () =>

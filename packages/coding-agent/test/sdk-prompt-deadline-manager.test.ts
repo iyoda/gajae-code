@@ -21,6 +21,7 @@ interface FakeReconciliation {
 	noteTransitionFailures: number;
 	uncertainCalls: number;
 	noteTransitionFrames: string[];
+	lastNoteTransitionFrame?: { type?: string; content?: unknown; hasActivity?: boolean; outcome?: unknown };
 	finalizeCodes: string[];
 	uncertainFailures: number;
 	uncertainStarted?: () => void;
@@ -60,9 +61,14 @@ function fakeReconciliation(): {
 		state,
 		reconciliation: {
 			lookup: () => ({ status: state.status, ...(state.error === undefined ? {} : { error: state.error }) }),
-			noteTransition: async (_kind: string, _correlation: unknown, frame?: { type?: string }) => {
+			noteTransition: async (
+				_kind: string,
+				_correlation: unknown,
+				frame?: { type?: string; content?: unknown; hasActivity?: boolean; outcome?: unknown },
+			) => {
 				state.noteTransitionCalls += 1;
 				state.noteTransitionFrames.push(frame?.type ?? "unknown");
+				state.lastNoteTransitionFrame = frame;
 				if (state.noteTransitionCalls <= state.noteTransitionFailures) throw new Error("terminal replay failed");
 				state.status = state.error === undefined ? "terminal_ok" : "failed";
 			},
@@ -187,6 +193,30 @@ describe("PromptDeadlineManager expiry reconciliation (#4668)", () => {
 		expect(manager.has(correlation)).toBe(true);
 		await Bun.sleep(2_300);
 		expect(state.noteTransitionCalls).toBeGreaterThanOrEqual(2);
+		expect(manager.has(correlation)).toBe(false);
+	});
+
+	test("retries preserve terminal content and cancellation evidence", async () => {
+		const { reconciliation, state } = fakeReconciliation();
+		state.noteTransitionFailures = 1;
+		const manager = new PromptDeadlineManager({
+			reconciliation: reconciliation as never,
+			getLeaseMs: () => 20,
+			getMaxMs: () => 60_000,
+		});
+		const correlation = { commandId: "cmd-evidence-retry", turnId: "turn-evidence-retry" };
+		manager.noteTerminalTransition(correlation, undefined, {
+			content: { version: 1, type: "text", text: "completed", byteLength: 9, truncated: false },
+			hasActivity: true,
+			outcome: { kind: "stopped", reason: "cancelled", provenance: "client_cancel" },
+		});
+		await Bun.sleep(2_300);
+		expect(state.lastNoteTransitionFrame).toMatchObject({
+			type: "agent_end",
+			content: { text: "completed" },
+			hasActivity: true,
+			outcome: { kind: "stopped", reason: "cancelled" },
+		});
 		expect(manager.has(correlation)).toBe(false);
 	});
 

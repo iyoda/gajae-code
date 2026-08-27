@@ -23,11 +23,13 @@
  */
 
 import { PROMPT_FAILURE_CODE_MAX, sanitizePromptFailure } from "../prompt-failure";
+import type { SdkPromptTerminalOutcome } from "../prompt-status";
 import type { ReceiptState } from "../receipt-state";
 
 export { PROMPT_FAILURE_CODE_MAX, sanitizePromptFailure };
 export const PROMPT_RECONCILIATION_ACTIVE_CAPACITY = 128;
 export const PROMPT_RECONCILIATION_TERMINAL_CAPACITY = 256;
+const EMPTY_PROMPT_FAILURE = { code: "prompt_failed", message: "Prompt submission failed." } as const;
 
 export type PromptReconciliationStatus = "accepted" | "in_flight" | "terminal_ok" | "failed";
 
@@ -101,8 +103,13 @@ export interface PromptReconciliation {
 		correlation: PromptCorrelation | undefined,
 		frame:
 			| { type: "agent_start" }
-			| { type: "agent_end"; finalText?: string }
-			| { type: "agent_failed"; error: unknown; finalText?: string },
+			| {
+					type: "agent_end";
+					finalText?: string;
+					hasActivity?: boolean;
+					outcome?: SdkPromptTerminalOutcome;
+			  }
+			| { type: "agent_failed"; error: unknown; finalText?: string; hasActivity?: boolean },
 	): void;
 	lookup(selector: { commandId?: string; turnId?: string; clientRef?: string }): TurnPromptReconciliation;
 	cleanup(): void;
@@ -190,8 +197,13 @@ export function createPromptReconciliation(options: { now?: () => number } = {})
 		correlation: PromptCorrelation | undefined,
 		frame:
 			| { type: "agent_start" }
-			| { type: "agent_end"; finalText?: string }
-			| { type: "agent_failed"; error: unknown; finalText?: string },
+			| {
+					type: "agent_end";
+					finalText?: string;
+					hasActivity?: boolean;
+					outcome?: SdkPromptTerminalOutcome;
+			  }
+			| { type: "agent_failed"; error: unknown; finalText?: string; hasActivity?: boolean },
 	) => {
 		if (!correlation) return;
 		const record = records.get(keyOf(correlation));
@@ -221,6 +233,18 @@ export function createPromptReconciliation(options: { now?: () => number } = {})
 		if (frame.type === "agent_failed") {
 			record.status = "failed";
 			record.error = sanitizePromptFailure(frame.error);
+		} else if (record.error !== undefined) {
+			// Preserve an actionable provider failure already recorded before a late
+			// empty agent_end; the empty frame cannot downgrade or replace its cause.
+			record.status = "failed";
+		} else if (frame.type === "agent_end" && frame.outcome?.kind === "stopped") {
+			record.status = "terminal_ok";
+		} else if (!frame.finalText?.trim() && !frame.hasActivity) {
+			// A prompt cannot claim successful completion without assistant content.
+			// Keep the terminal transition first-wins, but fail closed instead of
+			// exposing an empty zero-token turn as terminal_ok.
+			record.status = "failed";
+			record.error = EMPTY_PROMPT_FAILURE;
 		} else {
 			record.status = "terminal_ok";
 		}

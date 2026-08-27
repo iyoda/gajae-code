@@ -7,6 +7,7 @@ import {
 	promptDeadlineAt,
 	recordAttributableProgress,
 } from "./prompt-deadline-lease";
+import type { TurnResultContent } from "./turn-result";
 
 const MAX_EXPIRY_RETRIES = 5;
 const MAX_UNCERTAINTY_RETRIES = 3;
@@ -21,6 +22,12 @@ export type PromptDeadlineOutcome = {
 	message: string;
 	provenance: "deadline";
 };
+
+export interface PromptTerminalTransitionEvidence {
+	content?: TurnResultContent;
+	hasActivity?: boolean;
+	outcome?: { kind: "stopped"; reason: "cancelled"; provenance: "client_cancel" };
+}
 
 function leaseKey(correlation: InvocationCorrelation): string {
 	return `${correlation.commandId}:${correlation.turnId}`;
@@ -37,6 +44,7 @@ export class PromptDeadlineManager {
 	readonly #expiring = new Set<string>();
 	readonly #pendingTerminalTransitions = new Set<string>();
 	readonly #pendingTerminalFailureReasons = new Map<string, { code: string; message: string }>();
+	readonly #pendingTerminalEvidence = new Map<string, PromptTerminalTransitionEvidence>();
 	readonly #getLeaseMs: () => number;
 	readonly #getMaxMs: () => number;
 	readonly #now: () => number;
@@ -102,7 +110,10 @@ export class PromptDeadlineManager {
 						error: Object.assign(new Error(failureReason.message), { code: failureReason.code }),
 					} as never);
 				}
-				await this.#reconciliation.noteTransition("prompt", correlation, { type: "agent_end" });
+				await this.#reconciliation.noteTransition("prompt", correlation, {
+					type: "agent_end",
+					...this.#pendingTerminalEvidence.get(key),
+				});
 				// Supersession check before retiring ownership (exact-head review P1):
 				// attributable progress during the awaited writes renews the lease
 				// past its deadline, so this replay instance must back off and
@@ -367,6 +378,7 @@ export class PromptDeadlineManager {
 	noteTerminalTransition(
 		correlation: InvocationCorrelation,
 		pendingFailure?: { code: string; message: string },
+		evidence?: PromptTerminalTransitionEvidence,
 	): void {
 		const key = leaseKey(correlation);
 		if (!this.#leases.has(key)) {
@@ -377,6 +389,7 @@ export class PromptDeadlineManager {
 			this.onAccepted(correlation);
 		}
 		this.#pendingTerminalTransitions.add(key);
+		if (evidence !== undefined) this.#pendingTerminalEvidence.set(key, evidence);
 		// Compound failure-plus-terminal recovery intent (exact-head review HIGH):
 		// when expiry replays this real terminal transition after a failed write, it
 		// must re-record the failure reason BEFORE agent_end, or the abandoned or
@@ -395,6 +408,7 @@ export class PromptDeadlineManager {
 		this.#expiring.delete(key);
 		this.#pendingTerminalTransitions.delete(key);
 		this.#pendingTerminalFailureReasons.delete(key);
+		this.#pendingTerminalEvidence.delete(key);
 	}
 
 	clearAll(): void {
@@ -407,6 +421,7 @@ export class PromptDeadlineManager {
 		this.#expiring.clear();
 		this.#pendingTerminalTransitions.clear();
 		this.#pendingTerminalFailureReasons.clear();
+		this.#pendingTerminalEvidence.clear();
 	}
 
 	/** For tests: current deadline or undefined if no lease. */
