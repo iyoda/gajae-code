@@ -18,6 +18,10 @@ async function fuzzyFindNative(): Promise<NativeFuzzyFind> {
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
+function isAbsolutePathLike(value: string): boolean {
+	return path.isAbsolute(value) || path.win32.isAbsolute(value);
+}
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
@@ -589,7 +593,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	async #resolveScopedFuzzyQuery(
 		rawQuery: string,
 	): Promise<{ baseDir: string; query: string; displayBase: string } | null> {
-		const slashIndex = rawQuery.lastIndexOf("/");
+		const slashIndex = Math.max(rawQuery.lastIndexOf("/"), rawQuery.lastIndexOf("\\"));
 		if (slashIndex === -1) {
 			return null;
 		}
@@ -606,15 +610,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			baseDir = path.join(this.#basePath, displayBase);
 		}
 
-		try {
-			if (!(await fs.promises.stat(baseDir)).isDirectory()) {
-				return null;
-			}
-		} catch {
+		const resolvedDir = await this.#resolveDirectoryPath(baseDir);
+		if (!resolvedDir) {
 			return null;
 		}
 
-		return { baseDir, query, displayBase };
+		return {
+			baseDir: resolvedDir,
+			query,
+			displayBase: this.#formatResolvedDirectoryPrefix(displayBase, resolvedDir),
+		};
 	}
 
 	#scopedPathForDisplay(displayBase: string, relativePath: string): string {
@@ -622,6 +627,61 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return `/${relativePath}`;
 		}
 		return `${displayBase}${relativePath}`;
+	}
+
+	async #resolveDirectoryPath(candidate: string): Promise<string | null> {
+		const absoluteCandidate = path.resolve(candidate);
+		const root = path.parse(absoluteCandidate).root;
+		const relativePath = path.relative(root, absoluteCandidate);
+		const components = relativePath ? relativePath.split(path.sep).filter(Boolean) : [];
+		let resolvedPath = root;
+
+		for (const component of components) {
+			let entries: fs.Dirent[];
+			try {
+				entries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+				throw error;
+			}
+
+			const exactEntry = entries.find(entry => entry.name === component);
+			const matchingEntries = exactEntry
+				? [exactEntry]
+				: entries.filter(entry => entry.name.normalize("NFC") === component.normalize("NFC"));
+			// An exact spelling is unambiguous even when a Linux directory contains
+			// both NFC and NFD variants. A normalized-only match must not guess
+			// between siblings, since doing so can expose the wrong subtree.
+			if (matchingEntries.length !== 1) return null;
+
+			const entry = matchingEntries[0];
+			if (!entry) return null;
+			let isDirectory = entry.isDirectory();
+			if (!isDirectory && entry.isSymbolicLink()) {
+				isDirectory = (await fs.promises.stat(path.join(resolvedPath, entry.name))).isDirectory();
+			}
+			if (!isDirectory) return null;
+			resolvedPath = path.join(resolvedPath, entry.name);
+		}
+
+		return resolvedPath;
+	}
+
+	#formatResolvedDirectoryPrefix(rawPrefix: string, resolvedDir: string): string {
+		const normalizedResolvedDir = resolvedDir.replaceAll(path.sep, "/");
+		if (rawPrefix === "~" || rawPrefix.startsWith("~/")) {
+			const homeRelative = path.relative(path.resolve(os.homedir()), resolvedDir).replaceAll(path.sep, "/");
+			return homeRelative ? `~/${homeRelative}/` : "~/";
+		}
+		if (isAbsolutePathLike(rawPrefix)) {
+			return normalizedResolvedDir === "/" ? "/" : `${normalizedResolvedDir}/`;
+		}
+
+		const relative = path.relative(path.resolve(this.#basePath), resolvedDir).replaceAll(path.sep, "/");
+		if (rawPrefix.startsWith("./")) {
+			return relative ? `./${relative}/` : "./";
+		}
+		return relative ? `${relative}/` : "";
 	}
 
 	async #getCachedDirEntries(searchDir: string): Promise<{ entries: fs.Dirent[]; resolvedDir: string }> {
@@ -632,23 +692,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return { entries: cached.entries, resolvedDir: cached.resolvedDir };
 		}
 
-		const searchDirs = [...new Set([searchDir, searchDir.normalize("NFD"), searchDir.normalize("NFC")])];
-		let entries: fs.Dirent[] | undefined;
-		let resolvedDir: string | undefined;
-		for (const candidate of searchDirs) {
-			try {
-				entries = await fs.promises.readdir(candidate, { withFileTypes: true });
-				resolvedDir = candidate;
-				break;
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-					throw error;
-				}
-			}
-		}
-		if (!entries || !resolvedDir) {
+		const resolvedDir = await this.#resolveDirectoryPath(searchDir);
+		if (!resolvedDir) {
 			throw new Error(`Directory not found: ${searchDir}`);
 		}
+		const entries = await fs.promises.readdir(resolvedDir, { withFileTypes: true });
 		this.#dirCache.set(searchDir, { entries, resolvedDir, timestamp: now });
 
 		if (this.#dirCache.size > 100) {
@@ -696,7 +744,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 			if (isRootPrefix) {
 				// Complete from specified position
-				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
+				if (rawPrefix.startsWith("~") || isAbsolutePathLike(expandedPrefix)) {
 					searchDir = expandedPrefix;
 				} else {
 					searchDir = path.join(this.#basePath, expandedPrefix);
@@ -704,7 +752,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				searchPrefix = "";
 			} else if (rawPrefix.endsWith("/")) {
 				// If prefix ends with /, show contents of that directory
-				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
+				if (rawPrefix.startsWith("~") || isAbsolutePathLike(expandedPrefix)) {
 					searchDir = expandedPrefix;
 				} else {
 					searchDir = path.join(this.#basePath, expandedPrefix);
@@ -714,7 +762,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				// Split into directory and file prefix
 				const dir = path.dirname(expandedPrefix);
 				const file = path.basename(expandedPrefix);
-				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
+				if (rawPrefix.startsWith("~") || isAbsolutePathLike(expandedPrefix)) {
 					searchDir = dir;
 				} else {
 					searchDir = path.join(this.#basePath, dir);
@@ -725,24 +773,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const { entries, resolvedDir } = await this.#getCachedDirEntries(searchDir);
 			const suggestions: AutocompleteItem[] = [];
 			const lowerSearchPrefix = searchPrefix.normalize("NFC").toLowerCase();
-			const resolvedDirectoryPrefix = (() => {
-				if (resolvedDir === searchDir) return rawPrefix.endsWith("/") ? rawPrefix : path.dirname(rawPrefix);
-
-				const normalizedResolvedDir = resolvedDir.replaceAll(path.sep, "/");
-				let prefix: string;
-				if (rawPrefix.startsWith("~")) {
-					const homeRelative = path.relative(this.#expandHomePath("~"), resolvedDir).replaceAll(path.sep, "/");
-					prefix = homeRelative ? `~/${homeRelative}` : "~";
-				} else if (path.isAbsolute(expandedPrefix)) {
-					prefix = normalizedResolvedDir;
-				} else {
-					const relative = path.relative(this.#basePath, resolvedDir).replaceAll(path.sep, "/");
-					prefix = rawPrefix.startsWith("./") && relative ? `./${relative}` : relative;
-				}
-				return prefix ? `${prefix}/` : prefix;
-			})();
-			const resolvedDisplayPrefix =
-				resolvedDir === searchDir ? rawPrefix : `${resolvedDirectoryPrefix}${searchPrefix}`;
+			const displayDirectoryPrefix = this.#formatResolvedDirectoryPrefix(rawPrefix, resolvedDir);
 
 			for (const entry of entries) {
 				if (!entry.name.normalize("NFC").toLowerCase().startsWith(lowerSearchPrefix)) {
@@ -757,7 +788,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				let isDirectory = entry.isDirectory();
 				if (!isDirectory && entry.isSymbolicLink()) {
 					try {
-						const fullPath = path.join(searchDir, entry.name);
+						const fullPath = path.join(resolvedDir, entry.name);
 						isDirectory = (await fs.promises.stat(fullPath)).isDirectory();
 					} catch {
 						// Broken symlink, file deleted between readdir and stat, or permission error
@@ -765,41 +796,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					}
 				}
 
-				let relativePath: string;
 				const name = entry.name;
-				const displayPrefix = resolvedDisplayPrefix;
-
-				if (displayPrefix.endsWith("/")) {
-					// If prefix ends with /, append entry to the prefix
-					relativePath = displayPrefix + name;
-				} else if (displayPrefix.includes("/")) {
-					// Preserve ~/ format for home directory paths
-					if (displayPrefix.startsWith("~/")) {
-						const homeRelativeDir = displayPrefix.slice(2); // Remove ~/
-						const dir = path.dirname(homeRelativeDir);
-						relativePath = `~/${dir === "." ? name : path.join(dir, name)}`;
-					} else if (displayPrefix.startsWith("/")) {
-						// Absolute path - construct properly
-						const dir = path.dirname(displayPrefix);
-						if (dir === "/") {
-							relativePath = `/${name}`;
-						} else {
-							relativePath = `${dir}/${name}`;
-						}
-					} else {
-						relativePath = path.join(path.dirname(displayPrefix), name);
-						if (displayPrefix.startsWith("./") && !relativePath.startsWith("./")) {
-							relativePath = `./${relativePath}`;
-						}
-					}
-				} else {
-					// For standalone entries, preserve ~/ if original prefix was ~/
-					if (displayPrefix.startsWith("~")) {
-						relativePath = `~/${name}`;
-					} else {
-						relativePath = name;
-					}
-				}
+				const relativePath = `${displayDirectoryPrefix}${name}`;
 
 				const pathValue = isDirectory ? `${relativePath}/` : relativePath;
 				const value = buildCompletionValue(pathValue, {
@@ -833,6 +831,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	async #getFuzzyFileSuggestions(query: string, options: { isQuotedPrefix: boolean }): Promise<AutocompleteItem[]> {
 		try {
 			const scopedQuery = await this.#resolveScopedFuzzyQuery(query);
+			if (query.includes("/") && !scopedQuery) {
+				return [];
+			}
 			const searchPath = scopedQuery?.baseDir ?? this.#basePath;
 			const fuzzyQuery = scopedQuery?.query ?? query;
 			const result = await (await fuzzyFindNative())(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath));
