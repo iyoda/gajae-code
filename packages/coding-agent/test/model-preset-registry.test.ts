@@ -992,6 +992,39 @@ describe("signed model preset registry", () => {
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
 	});
 
+	test("rejects pinning a retained revoked generation", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.history[0].revoked = true;
+		await Bun.write(statePath, JSON.stringify(state));
+
+		await expect(setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 })).rejects.toThrow(
+			/revoked/i,
+		);
+	});
+
+	test("unpinning revoked-only history leaves no active revision", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: 1 });
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const statePath = path.join(data.agentDir, "model-presets", "state.json");
+		const state = await Bun.file(statePath).json();
+		state.history[0].revoked = true;
+		state.activeRevision = undefined;
+		await Bun.write(statePath, JSON.stringify(state));
+		const controlPath = path.join(data.agentDir, "model-presets", "control.json");
+		const control = await Bun.file(controlPath).json();
+		control.pinnedRevision = 1;
+		await Bun.write(controlPath, JSON.stringify(control));
+
+		await setModelPresetRegistryPin({ agentDir: data.agentDir, revision: undefined });
+		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).activeRevision).toBeUndefined();
+	});
+
 	test("preserves the anti-rollback floor when the highest cached generation is revoked", async () => {
 		const data = await fixture();
 		await accept(data, signedRegistry(data.privateKey, 1));

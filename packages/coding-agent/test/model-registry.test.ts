@@ -2543,6 +2543,33 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("authHeader uses the already-resolved apiKeyEnv token exactly once", () => {
+			const keyEnv = `GJC_TEST_AUTH_HEADER_KEY_${Snowflake.next()}`;
+			const tokenEnv = `GJC_TEST_AUTH_HEADER_TOKEN_${Snowflake.next()}`;
+			const restoreKey = setEnvForTest(keyEnv, tokenEnv);
+			const restoreToken = setEnvForTest(tokenEnv, "resolved-token");
+			try {
+				writeRawModelsJson({
+					anthropic: {
+						baseUrl: "https://anthropic-proxy.example.com/v1",
+						apiKey: keyEnv,
+						authHeader: true,
+					},
+				});
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const anthropicModels = getModelsForProvider(registry, "anthropic");
+
+				expect(anthropicModels.length).toBeGreaterThan(1);
+				for (const model of anthropicModels) {
+					expect(model.headers?.Authorization).toBe("Bearer resolved-token");
+				}
+			} finally {
+				restoreToken();
+				restoreKey();
+			}
+		});
+
 		test("apiKey-only override supplies fallback auth for built-in models", async () => {
 			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
 			delete Bun.env.OPENAI_API_KEY;

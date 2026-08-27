@@ -1196,8 +1196,7 @@ function mergeAuthHeader(
 	if (!authHeader || !apiKeyConfig) {
 		return nextHeaders;
 	}
-	const resolvedKey = resolveApiKeyConfig(apiKeyConfig);
-	return resolvedKey ? { ...nextHeaders, Authorization: `Bearer ${resolvedKey}` } : nextHeaders;
+	return apiKeyConfig ? { ...nextHeaders, Authorization: `Bearer ${apiKeyConfig}` } : nextHeaders;
 }
 
 /**

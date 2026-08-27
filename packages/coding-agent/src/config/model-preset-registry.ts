@@ -2116,14 +2116,15 @@ export async function setModelPresetRegistryPin(
 		validateStateGenerations(state, effectiveTrustedKeys(options));
 		if (revision === undefined) {
 			const highest = state.history.reduce(
-				(value, item) => Math.max(value, item.manifest.signed.registryRevision),
+				(value, item) => (item.revoked ? value : Math.max(value, item.manifest.signed.registryRevision)),
 				0,
 			);
-			await writeAtomicJson(paths.state, { ...state, activeRevision: highest || state.activeRevision });
+			await writeAtomicJson(paths.state, { ...state, activeRevision: highest || undefined });
 		}
 		if (revision !== undefined) {
 			const generation = state.history.find(item => item.manifest.signed.registryRevision === revision);
 			if (!generation) throw new Error(`Cannot pin unaccepted registry revision ${revision}.`);
+			if (generation.revoked) throw new Error(`Cannot pin revoked registry revision ${revision}.`);
 		}
 		const current = loadControlSync(agentDir);
 		await writeAtomicJson(paths.control, { ...current, pinnedRevision: revision });
