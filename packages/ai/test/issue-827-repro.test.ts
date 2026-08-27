@@ -121,7 +121,7 @@ describe("issue #827 lineage — kimi reasoning models avoid incompatible forced
 			baseUrl: "https://api.moonshot.ai/v1",
 			id: "kimi-k2.6",
 			name: "Kimi K2.6",
-			reasoning: false,
+			reasoning: true,
 		};
 		const body = (await captureBody(model, {
 			toolChoice: { type: "tool", name: "echo" },
@@ -145,6 +145,7 @@ describe("issue #827 lineage — kimi reasoning models avoid incompatible forced
 			id: "claude-sonnet-4-6",
 			name: "Claude Sonnet 4.6 (LiteLLM)",
 			reasoning: true,
+			compat: { supportsReasoningEffort: true },
 		};
 
 		const body = (await captureBody(model, {
@@ -162,6 +163,7 @@ describe("issue #827 lineage — kimi reasoning models avoid incompatible forced
 			api: "openai-completions",
 			id: "gpt-5-mini",
 			reasoning: true,
+			compat: { supportsReasoningEffort: true },
 		};
 
 		const body = (await captureBody(model, {

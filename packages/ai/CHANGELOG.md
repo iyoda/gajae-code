@@ -8,6 +8,8 @@
 - `AuthGatewayBootOptions` now requires live authority callbacks (`hasProviderCredential`, `reloadProviderCredentials`, and `validateProviderCredential`). Gateway dispatch holds the authority lease through `streamSimple()` admission and rejects credentials revoked during asynchronous selection instead of sending a stale key.
 - `auth-broker serve` now requires an `AuthCredentialStore` with atomic `allocateMonotonicSequence` support for durable broker incarnation epochs; unsupported custom stores fail closed before binding and must migrate to the durable cache-backed contract.
 
+## [0.15.3] - 2026-08-27
+
 ### Fixed
 
 - Valid JSON `\uXXXX` tool arguments now execute as their canonical decoded strings instead of entering the escaped-non-ASCII resample loop. Provider adapters retain guard metadata only for malformed JSON, duplicate/deep evidence, and unpaired UTF-16 surrogates, so those cases remain fail-closed while standard escaped Hangul, emoji surrogate pairs, and printable ASCII no longer consume retries or terminate managed runs.
