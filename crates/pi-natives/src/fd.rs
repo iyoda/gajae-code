@@ -109,9 +109,10 @@ fn score_fuzzy_path(
 	}
 
 	// Match against the full relative path only when the user typed a path-style
-	// query (contains '/'). Plain queries should match by basename only, otherwise
-	// '@plan' surfaces every file whose ancestor directories contain 'plan'.
-	let query_has_slash = query_lower.contains('/');
+	// query (contains a path separator). Plain queries should match by basename
+	// only, otherwise '@plan' surfaces every file whose ancestor directories
+	// contain 'plan'.
+	let query_has_slash = query_lower.contains('/') || query_lower.contains('\\');
 
 	let file_name = Path::new(path)
 		.file_name()
@@ -209,7 +210,9 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
 	}
 
-	let query_lower = nfc_normalize(config.query.trim()).to_lowercase();
+	let query_lower = nfc_normalize(config.query.trim())
+		.to_lowercase()
+		.replace('\\', "/");
 	let normalized_query = normalize_fuzzy_text(&query_lower);
 	let query_chars: Vec<char> = normalized_query.chars().collect();
 	if !query_lower.is_empty() && normalized_query.is_empty() {
@@ -262,7 +265,9 @@ mod tests {
 	use super::*;
 
 	fn score(path: &str, query: &str) -> u32 {
-		let query_lower = nfc_normalize(query.trim()).to_lowercase();
+		let query_lower = nfc_normalize(query.trim())
+			.to_lowercase()
+			.replace('\\', "/");
 		let normalized_query = normalize_fuzzy_text(&query_lower);
 		let query_chars: Vec<char> = normalized_query.chars().collect();
 		score_fuzzy_path(path, false, &query_lower, &normalized_query, &query_chars)
@@ -284,6 +289,11 @@ mod tests {
 	fn nfc_query_matches_nfd_path_segment() {
 		let nfd_dir = "\u{1103}\u{1169}\u{11A8}\u{1109}\u{1165}/readme.md";
 		assert!(score(nfd_dir, "\u{B3C5}\u{C11C}/read") > 0);
+	}
+
+	#[test]
+	fn windows_separator_query_matches_forward_slash_path() {
+		assert!(score("src/readme.md", "src\\read") > 0);
 	}
 
 	#[test]
