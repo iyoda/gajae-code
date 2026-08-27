@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	formatDeepInterviewSelectorPrompt,
+	isDeepInterviewAskQuestion,
 	renderDeepInterviewAskQuestion,
 } from "@gajae-code/coding-agent/deep-interview/render-middleware";
 import {
@@ -67,6 +68,18 @@ describe("shared workflow placeholder semantics", () => {
 		for (const question of PLACEHOLDERS) expect(askSchema.safeParse(roundQuestion(question)).success).toBe(false);
 		expect(askSchema.safeParse(roundQuestion("Which export behavior is required?")).success).toBe(true);
 	});
+
+	it("preserves ordinary null metadata and rejects encoded deep-interview containers", () => {
+		const ordinary = roundQuestion("TODO");
+		(ordinary.questions as Array<Record<string, unknown>>)[0].deepInterview = null;
+		expect(recoverRoundZeroIntentContract(ordinary).outcome).toBe("passthrough");
+
+		const encoded = JSON.stringify(roundQuestion("TODO"));
+		expect(recoverRoundZeroIntentContract(encoded as unknown as Record<string, unknown>)).toMatchObject({
+			outcome: "reject",
+			code: "ask-deep-interview-question-body-required",
+		});
+	});
 });
 
 describe("deep-interview placeholder rendering", () => {
@@ -75,5 +88,12 @@ describe("deep-interview placeholder rendering", () => {
 		expect(formatDeepInterviewSelectorPrompt(raw)).toBeNull();
 		// @ts-expect-error test intentionally supplies an uninitialized theme
 		expect(renderDeepInterviewAskQuestion(raw, undefined)).toBeNull();
+	});
+
+	it("rejects placeholder-only Round 0 topology bodies", () => {
+		const raw = "Round 0 | Topology confirmation | Ambiguity: not scored yet\n\nTODO";
+		expect(formatDeepInterviewSelectorPrompt(raw)).toBeNull();
+		expect(renderDeepInterviewAskQuestion(raw, undefined as never)).toBeNull();
+		expect(isDeepInterviewAskQuestion(raw)).toBe(false);
 	});
 });

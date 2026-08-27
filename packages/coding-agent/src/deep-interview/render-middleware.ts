@@ -10,7 +10,7 @@ import {
 	type ViewportAnchorSource,
 	type ViewportAnchorSourceRenderer,
 } from "@gajae-code/tui";
-import { isWorkflowPlaceholderText } from "../gjc-runtime/workflow-placeholder";
+import { isLegacyDeepInterviewPlaceholder, isWorkflowPlaceholderText } from "../gjc-runtime/workflow-placeholder";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 
 interface RoundQuestionModel {
@@ -205,11 +205,13 @@ function parseTopologyQuestion(text: string): TopologyQuestionModel | null {
 		if (inQuestion) questionLines.push(trimmed);
 		else contextLines.push(trimmed);
 	}
+	const question = questionLines.join("\n");
+	if (isWorkflowPlaceholderText(question)) return null;
 	return {
 		kind: "topology-question",
 		context: contextLines.join("\n") || undefined,
 		components,
-		question: questionLines.join("\n"),
+		question,
 	};
 }
 
@@ -400,6 +402,7 @@ export function renderDeepInterviewAskQuestion(question: string, uiTheme: Theme)
 export function isDeepInterviewAskQuestion(question: string): boolean {
 	if (parseTopologyQuestion(question) ?? parseRoundQuestion(question)) return true;
 	const normalized = normalizeText(question);
+	if (isLegacyDeepInterviewPlaceholder(normalized)) return false;
 	return /(?:^|\n)\s*Round\s+\d+\s*\|.*?\bAmbiguity\b/i.test(normalized);
 }
 
