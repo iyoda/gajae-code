@@ -403,12 +403,57 @@ export const ESCAPED_NONASCII_RECOVERY_PROMPT = escapedNonAsciiRecoveryPrompt;
 const MAX_ESCAPED_NONASCII_RESAMPLES = 2;
 
 /** Whether any tool call in the turn carried `\uXXXX`-escaped arguments. */
+interface EscapedToolCallMetadata {
+	guarded: boolean;
+	malformed: boolean;
+	evidence: UnicodeEscapeEvidence | undefined;
+	incompleteArguments: boolean;
+	incompleteArgumentsReason: unknown;
+}
+
+const acceptedToolCallMetadata = new WeakMap<object, EscapedToolCallMetadata>();
+
+function escapedToolCallMetadata(
+	block: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+): EscapedToolCallMetadata {
+	const guardRead = managedOwnPropertyRead(block, "escapedNonAsciiArguments");
+	const evidenceRead = managedOwnPropertyRead(block, "escapedUnicodeArgumentEvidence");
+	const incompleteRead = managedPropertyRead(block, "incompleteArguments");
+	const incompleteReasonRead = managedPropertyRead(block, "incompleteArgumentsReason");
+	const inheritedGuard = managedInheritedProperty(block, "escapedNonAsciiArguments");
+	const inheritedEvidence = managedInheritedProperty(block, "escapedUnicodeArgumentEvidence");
+	let evidence: UnicodeEscapeEvidence | undefined;
+	try {
+		evidence = managedUnicodeEscapeEvidence(evidenceRead.value);
+	} catch {
+		evidence = undefined;
+	}
+	const malformedMetadata =
+		!guardRead.ok ||
+		!evidenceRead.ok ||
+		!incompleteRead.ok ||
+		!incompleteReasonRead.ok ||
+		inheritedGuard ||
+		inheritedEvidence ||
+		(typeof incompleteRead.value === "string" && SANITIZER_SENTINELS.has(incompleteRead.value)) ||
+		(typeof incompleteReasonRead.value === "string" && SANITIZER_SENTINELS.has(incompleteReasonRead.value)) ||
+		(evidenceRead.present && (evidenceRead.value === undefined || evidence === undefined || evidence.malformed));
+	const incomplete = incompleteRead.ok && incompleteRead.value === true;
+	return {
+		guarded:
+			malformedMetadata ||
+			(guardRead.present && guardRead.value === true) ||
+			(evidenceRead.present && evidenceRead.value !== undefined),
+		malformed: malformedMetadata || incomplete,
+		evidence,
+		incompleteArguments: incomplete,
+		incompleteArgumentsReason:
+			!incompleteReasonRead.ok || malformedMetadata ? "malformed" : incompleteReasonRead.value,
+	};
+}
+
 function hasEscapedNonAsciiToolCall(message: AssistantMessage): boolean {
-	return message.content.some(
-		block =>
-			block.type === "toolCall" &&
-			(block.escapedNonAsciiArguments === true || block.escapedUnicodeArgumentEvidence !== undefined),
-	);
+	return message.content.some(block => block.type === "toolCall" && escapedToolCallMetadata(block).guarded);
 }
 
 const ESCAPED_NONASCII_DIAGNOSTIC_TOOL_CALL_COUNT_MAX = 8;
@@ -419,9 +464,7 @@ function escapedNonAsciiToolCallShape(message: AssistantMessage): {
 	escapedToolCallCountCapped: boolean;
 } {
 	const count = message.content.filter(
-		block =>
-			block.type === "toolCall" &&
-			(block.escapedNonAsciiArguments === true || block.escapedUnicodeArgumentEvidence !== undefined),
+		block => block.type === "toolCall" && escapedToolCallMetadata(block).guarded,
 	).length;
 	return {
 		escapedToolCallCount: Math.min(count, ESCAPED_NONASCII_DIAGNOSTIC_TOOL_CALL_COUNT_MAX),
@@ -430,9 +473,53 @@ function escapedNonAsciiToolCallShape(message: AssistantMessage): {
 }
 
 /** Remove transient raw-evidence metadata before any message can become durable. */
+function stripToolCallEvidence<T extends { escapedUnicodeArgumentEvidence?: unknown }>(toolCall: T): T {
+	try {
+		if (nodeUtilTypes.isProxy(toolCall)) {
+			const sanitized = Object.create(null) as T;
+			for (const key of [
+				"type",
+				"id",
+				"name",
+				"arguments",
+				"thoughtSignature",
+				"intent",
+				"customWireName",
+				"escapedNonAsciiArguments",
+				"incompleteArguments",
+				"incompleteArgumentsReason",
+			]) {
+				const read = managedPropertyRead(toolCall, key);
+				if (read.ok && read.value !== undefined)
+					Object.defineProperty(sanitized, key, { value: read.value, enumerable: true });
+			}
+			return sanitized;
+		}
+		const descriptor = Object.getOwnPropertyDescriptor(toolCall, "escapedUnicodeArgumentEvidence");
+		if (!descriptor) return toolCall;
+		if (descriptor.configurable && Reflect.deleteProperty(toolCall, "escapedUnicodeArgumentEvidence"))
+			return toolCall;
+		const sanitized = Object.create(null) as T;
+		for (const key of Reflect.ownKeys(toolCall)) {
+			if (key === "escapedUnicodeArgumentEvidence") continue;
+			const own = Object.getOwnPropertyDescriptor(toolCall, key);
+			if (!own?.enumerable || !("value" in own)) continue;
+			try {
+				Object.defineProperty(sanitized, key, own);
+			} catch {
+				// Skip hostile descriptors; required fields are already captured in the record.
+			}
+		}
+		return sanitized;
+	} catch {
+		return Object.create(null) as T;
+	}
+}
+
 function stripUnicodeEscapeEvidence(message: AssistantMessage): void {
-	for (const block of message.content) {
-		if (block.type === "toolCall") delete block.escapedUnicodeArgumentEvidence;
+	for (let index = 0; index < message.content.length; index += 1) {
+		const block = message.content[index];
+		if (block?.type === "toolCall") message.content[index] = stripToolCallEvidence(block);
 	}
 }
 
@@ -614,14 +701,13 @@ function allEscapedToolCallsDisplaySafe(
 	let sawEscapedCall = false;
 	for (const block of message.content) {
 		if (block.type !== "toolCall") continue;
-		if (block.escapedNonAsciiArguments !== true && block.escapedUnicodeArgumentEvidence === undefined) continue;
+		const metadata = escapedToolCallMetadata(block);
+		if (!metadata.guarded) continue;
+		if (metadata.malformed) return false;
 		sawEscapedCall = true;
 		const tool = tools?.find(candidate => candidate.name === block.name);
 		const args = block.arguments as Record<string, unknown>;
-		if (
-			!isDisplaySafeEscapedArguments(tool, args) ||
-			!isDisplaySafeRawEscapeEvidence(tool, args, block.escapedUnicodeArgumentEvidence)
-		)
+		if (!isDisplaySafeEscapedArguments(tool, args) || !isDisplaySafeRawEscapeEvidence(tool, args, metadata.evidence))
 			return false;
 	}
 	return sawEscapedCall;
@@ -662,6 +748,25 @@ function managedPropertyRead(value: unknown, key: string): { ok: boolean; value:
 
 function managedProperty(value: unknown, key: string): unknown {
 	return managedPropertyRead(value, key).value;
+}
+
+function managedOwnPropertyRead(value: unknown, key: string): { present: boolean; ok: boolean; value: unknown } {
+	if (!value || typeof value !== "object") return { present: false, ok: true, value: undefined };
+	try {
+		if (!Object.hasOwn(value, key)) return { present: false, ok: true, value: undefined };
+		return { present: true, ok: true, value: Reflect.get(value, key) };
+	} catch {
+		return { present: true, ok: false, value: undefined };
+	}
+}
+
+function managedInheritedProperty(value: unknown, key: string): boolean {
+	if (!value || typeof value !== "object") return false;
+	try {
+		return !Object.hasOwn(value, key) && key in value;
+	} catch {
+		return true;
+	}
 }
 
 function managedTransportFailure(failure: unknown) {
@@ -756,6 +861,12 @@ function sanitizeProviderSafetyStopProvenance(
 	if (isManagedPlainRecord(detached)) {
 		const rebuilt = { ...detached } as AssistantMessage;
 		delete rebuilt.errorKind;
+		if (!Array.isArray(rebuilt.content)) {
+			const repaired = managedAssistantShell(message, model);
+			delete repaired.errorKind;
+			return repaired;
+		}
+		restoreTransientUnicodeEscapeEvidence(rebuilt.content, message);
 		return rebuilt;
 	}
 	const rebuilt = managedAssistantShell(message, model);
@@ -1955,7 +2066,11 @@ function managedAssistantShell(
 	//   `message.role === "assistant"` check passes while the detached
 	//   snapshot retains none of the message identity.
 	const source =
-		snapshotRecord !== undefined && managedProperty(snapshotRecord, "role") === "assistant" ? snapshotRecord : value;
+		snapshotRecord !== undefined &&
+		managedProperty(snapshotRecord, "role") === "assistant" &&
+		(managedProperty(snapshotRecord, "content") !== undefined || managedProperty(value, "content") === undefined)
+			? snapshotRecord
+			: value;
 	if (managedProperty(source, "role") !== "assistant") throw new ManagedAttemptSnapshotError("shell.role");
 	const rawContent = managedAttemptSnapshot(managedProperty(source, "content"));
 	// Providers may deliver `content` as a string, missing value, or a primitive
@@ -2056,11 +2171,18 @@ function managedContentBlock(block: unknown): AssistantMessage["content"] {
 
 function managedUnicodeEscapeEvidence(value: unknown): UnicodeEscapeEvidence | undefined {
 	if (!isManagedPlainRecord(value)) return undefined;
-	const positionsValue = managedProperty(value, "positions");
-	const totalPositions = managedProperty(value, "totalPositions");
-	const truncated = managedProperty(value, "truncated");
-	const malformed = managedProperty(value, "malformed");
-	const integrity = managedProperty(value, "integrity");
+	const envelopeReads = Object.fromEntries(
+		["positions", "totalPositions", "truncated", "malformed", "integrity"].map(key => [
+			key,
+			managedOwnPropertyRead(value, key),
+		]),
+	) as Record<string, { present: boolean; ok: boolean; value: unknown }>;
+	if (Object.values(envelopeReads).some(read => !read.present || !read.ok)) return undefined;
+	const positionsValue = envelopeReads.positions!.value;
+	const totalPositions = envelopeReads.totalPositions!.value;
+	const truncated = envelopeReads.truncated!.value;
+	const malformed = envelopeReads.malformed!.value;
+	const integrity = envelopeReads.integrity!.value;
 	if (!Array.isArray(positionsValue) || positionsValue.length > 32) return undefined;
 	if (
 		typeof totalPositions !== "number" ||
@@ -2075,12 +2197,19 @@ function managedUnicodeEscapeEvidence(value: unknown): UnicodeEscapeEvidence | u
 	const positions: UnicodeEscapeEvidence["positions"][number][] = [];
 	for (const positionValue of positionsValue) {
 		if (!isManagedPlainRecord(positionValue)) return undefined;
-		const offset = managedProperty(positionValue, "offset");
-		const scalarTag = managedProperty(positionValue, "scalarTag");
-		const pathTag = managedProperty(positionValue, "pathTag");
-		const location = managedProperty(positionValue, "location");
-		const valueOrdinal = managedProperty(positionValue, "valueOrdinal");
-		const valueOffset = managedProperty(positionValue, "valueOffset");
+		const positionReads = Object.fromEntries(
+			["offset", "scalarTag", "pathTag", "location", "valueOrdinal", "valueOffset"].map(key => [
+				key,
+				managedOwnPropertyRead(positionValue, key),
+			]),
+		) as Record<string, { present: boolean; ok: boolean; value: unknown }>;
+		if (Object.values(positionReads).some(read => !read.present || !read.ok)) return undefined;
+		const offset = positionReads.offset!.value;
+		const scalarTag = positionReads.scalarTag!.value;
+		const pathTag = positionReads.pathTag!.value;
+		const location = positionReads.location!.value;
+		const valueOrdinal = positionReads.valueOrdinal!.value;
+		const valueOffset = positionReads.valueOffset!.value;
 		if (
 			typeof offset !== "number" ||
 			!Number.isSafeInteger(offset) ||
@@ -2101,14 +2230,15 @@ function managedUnicodeEscapeEvidence(value: unknown): UnicodeEscapeEvidence | u
 		}
 		positions.push({ offset, scalarTag, pathTag, location, valueOrdinal, valueOffset });
 	}
-	return { positions, totalPositions, truncated, malformed, integrity };
+	const evidence = { positions, totalPositions, truncated, malformed, integrity };
+	return verifyUnicodeEscapeEvidence(evidence) ? evidence : undefined;
 }
 
 function restoreTransientUnicodeEscapeEvidence(content: AssistantMessage["content"], liveMessage: unknown): void {
 	const liveContent = managedProperty(liveMessage, "content");
 	if (!Array.isArray(liveContent)) return;
 	for (const destination of content) {
-		if (destination.type !== "toolCall") continue;
+		if (!destination || typeof destination !== "object" || destination.type !== "toolCall") continue;
 		const matches = liveContent.filter(
 			candidate =>
 				isManagedPlainRecord(candidate) &&
@@ -2116,12 +2246,52 @@ function restoreTransientUnicodeEscapeEvidence(content: AssistantMessage["conten
 				managedProperty(candidate, "id") === destination.id &&
 				managedProperty(candidate, "name") === destination.name,
 		);
-		if (matches.length !== 1) continue;
-		const rawEvidence = managedProperty(matches[0], "escapedUnicodeArgumentEvidence");
-		if (rawEvidence === undefined) continue;
-		const evidence = managedUnicodeEscapeEvidence(rawEvidence);
-		if (evidence) attachUnicodeEscapeEvidence(destination, evidence);
-		else destination.escapedNonAsciiArguments = true;
+		const evidenceReads = matches.map(candidate =>
+			managedOwnPropertyRead(candidate, "escapedUnicodeArgumentEvidence"),
+		);
+		const inheritedEvidence = matches.map(candidate =>
+			managedInheritedProperty(candidate, "escapedUnicodeArgumentEvidence"),
+		);
+		const guardReads = matches.map(candidate => managedOwnPropertyRead(candidate, "escapedNonAsciiArguments"));
+		const inheritedGuards = matches.map(candidate => managedInheritedProperty(candidate, "escapedNonAsciiArguments"));
+		if (matches.length !== 1) {
+			if (
+				evidenceReads.some(read => read.present) ||
+				inheritedEvidence.some(Boolean) ||
+				guardReads.some(read => read.present) ||
+				inheritedGuards.some(Boolean)
+			) {
+				destination.incompleteArguments = true;
+				destination.incompleteArgumentsReason = "malformed";
+			}
+			continue;
+		}
+		const guardRead = guardReads[0]!;
+		if (!guardRead.ok || inheritedGuards[0]) {
+			destination.incompleteArguments = true;
+			destination.incompleteArgumentsReason = "malformed";
+		}
+		if (guardRead.ok && guardRead.present && guardRead.value === true) destination.escapedNonAsciiArguments = true;
+		const evidenceRead = evidenceReads[0]!;
+		if (!evidenceRead.present || !evidenceRead.ok || evidenceRead.value === undefined || inheritedEvidence[0]) {
+			if (evidenceRead.present || inheritedEvidence[0]) {
+				destination.incompleteArguments = true;
+				destination.incompleteArgumentsReason = "malformed";
+			}
+			continue;
+		}
+		const rawEvidence = evidenceRead.value;
+		let evidence: UnicodeEscapeEvidence | undefined;
+		try {
+			evidence = managedUnicodeEscapeEvidence(rawEvidence);
+		} catch {
+			evidence = undefined;
+		}
+		if (evidence && !evidence.malformed) attachUnicodeEscapeEvidence(destination, evidence);
+		else {
+			destination.incompleteArguments = true;
+			destination.incompleteArgumentsReason = "malformed";
+		}
 	}
 }
 
@@ -2148,12 +2318,47 @@ function managedAssistantContent(value: unknown): AssistantMessage["content"][nu
 	const thoughtSignature = managedProperty(value, "thoughtSignature");
 	const intent = managedProperty(value, "intent");
 	const customWireName = managedProperty(value, "customWireName");
-	const incompleteArguments = managedProperty(value, "incompleteArguments");
-	const incompleteArgumentsReason = managedProperty(value, "incompleteArgumentsReason");
-	const escapedNonAsciiArguments = managedProperty(value, "escapedNonAsciiArguments");
-	const rawEscapedUnicodeArgumentEvidence = managedProperty(value, "escapedUnicodeArgumentEvidence");
-	const escapedUnicodeArgumentEvidence = managedUnicodeEscapeEvidence(rawEscapedUnicodeArgumentEvidence);
-	const escapedArgumentsGuarded = escapedNonAsciiArguments === true || rawEscapedUnicodeArgumentEvidence !== undefined;
+	const incompleteArgumentsRead = managedPropertyRead(value, "incompleteArguments");
+	const incompleteArgumentsReasonRead = managedPropertyRead(value, "incompleteArgumentsReason");
+	const escapedGuardRead = managedOwnPropertyRead(value, "escapedNonAsciiArguments");
+	const evidenceRead = managedOwnPropertyRead(value, "escapedUnicodeArgumentEvidence");
+	const inheritedGuard = managedInheritedProperty(value, "escapedNonAsciiArguments");
+	const inheritedEvidence = managedInheritedProperty(value, "escapedUnicodeArgumentEvidence");
+	const inheritedIncompleteArguments = managedInheritedProperty(value, "incompleteArguments");
+	const inheritedIncompleteArgumentsReason = managedInheritedProperty(value, "incompleteArgumentsReason");
+	const incompleteArguments = incompleteArgumentsRead.value;
+	const incompleteArgumentsReason = incompleteArgumentsReasonRead.value;
+	const incompleteMetadataSentinel =
+		(typeof incompleteArguments === "string" && SANITIZER_SENTINELS.has(incompleteArguments)) ||
+		(typeof incompleteArgumentsReason === "string" && SANITIZER_SENTINELS.has(incompleteArgumentsReason));
+	const incompleteMetadataMalformed =
+		!incompleteArgumentsRead.ok ||
+		!incompleteArgumentsReasonRead.ok ||
+		inheritedIncompleteArguments ||
+		inheritedIncompleteArgumentsReason ||
+		incompleteMetadataSentinel;
+	const escapedNonAsciiArguments = escapedGuardRead.value;
+	const rawEscapedUnicodeArgumentEvidence = evidenceRead.value;
+	let escapedUnicodeArgumentEvidence: UnicodeEscapeEvidence | undefined;
+	try {
+		escapedUnicodeArgumentEvidence = managedUnicodeEscapeEvidence(rawEscapedUnicodeArgumentEvidence);
+	} catch {
+		escapedUnicodeArgumentEvidence = undefined;
+	}
+	const invalidEscapedUnicodeEvidence =
+		(evidenceRead.present &&
+			(!evidenceRead.ok ||
+				rawEscapedUnicodeArgumentEvidence === undefined ||
+				escapedUnicodeArgumentEvidence === undefined ||
+				escapedUnicodeArgumentEvidence.malformed)) ||
+		!escapedGuardRead.ok ||
+		inheritedGuard ||
+		inheritedEvidence ||
+		incompleteMetadataMalformed;
+	const escapedArgumentsGuarded =
+		invalidEscapedUnicodeEvidence ||
+		(escapedGuardRead.present && escapedGuardRead.ok && escapedNonAsciiArguments === true) ||
+		(evidenceRead.present && evidenceRead.ok && escapedUnicodeArgumentEvidence !== undefined);
 	return {
 		type,
 		id,
@@ -2162,16 +2367,22 @@ function managedAssistantContent(value: unknown): AssistantMessage["content"][nu
 		...(typeof thoughtSignature === "string" ? { thoughtSignature } : {}),
 		...(typeof intent === "string" ? { intent } : {}),
 		...(typeof customWireName === "string" ? { customWireName } : {}),
-		...(typeof incompleteArguments === "boolean" ? { incompleteArguments } : {}),
-		...(typeof incompleteArgumentsReason === "string"
-			? {
-					incompleteArgumentsReason: incompleteArgumentsReason as
-						| "truncated"
-						| "malformed"
-						| "conflicting"
-						| "ambiguous",
-				}
-			: {}),
+		...(invalidEscapedUnicodeEvidence
+			? { incompleteArguments: true }
+			: typeof incompleteArguments === "boolean"
+				? { incompleteArguments }
+				: {}),
+		...(invalidEscapedUnicodeEvidence
+			? { incompleteArgumentsReason: "malformed" as const }
+			: typeof incompleteArgumentsReason === "string"
+				? {
+						incompleteArgumentsReason: incompleteArgumentsReason as
+							| "truncated"
+							| "malformed"
+							| "conflicting"
+							| "ambiguous",
+					}
+				: {}),
 		...(escapedArgumentsGuarded
 			? { escapedNonAsciiArguments: true }
 			: typeof escapedNonAsciiArguments === "boolean"
@@ -2590,7 +2801,57 @@ class ManagedAttemptTransaction {
 	}
 
 	acceptedAssistantSnapshot(message: AssistantMessage): AssistantMessage {
-		return this.#assistantSnapshot(message);
+		const sourceContent = Array.isArray(message.content) ? message.content : [];
+		const sourceMetadata: Array<EscapedToolCallMetadata | undefined> = [];
+		for (let index = 0; index < sourceContent.length; index += 1) {
+			const block = sourceContent[index];
+			sourceMetadata[index] = block?.type === "toolCall" ? escapedToolCallMetadata(block) : undefined;
+		}
+		let snapshot = this.#assistantSnapshot(message);
+		if (snapshot.role !== "assistant") return snapshot;
+		if (!Array.isArray(snapshot.content)) {
+			snapshot = managedAssistantShell(message, this.model, this.#degradedFieldDiagnostics, true);
+		}
+		for (let index = 0; index < sourceContent.length; index += 1) {
+			const sourceBlock = sourceContent[index];
+			if (sourceBlock?.type !== "toolCall") continue;
+			const metadata = sourceMetadata[index];
+			let snapshotBlock = snapshot.content[index];
+			if (snapshotBlock?.type !== "toolCall") {
+				const normalized = managedAssistantContent(sourceBlock);
+				if (normalized?.type !== "toolCall") continue;
+				snapshotBlock = normalized;
+				snapshot.content[index] = snapshotBlock;
+			}
+			if (metadata) {
+				const detachedMetadata = escapedToolCallMetadata(snapshotBlock);
+				const evidencePresenceChanged = Boolean(metadata.evidence) !== Boolean(detachedMetadata.evidence);
+				const metadataChanged =
+					metadata.guarded !== detachedMetadata.guarded ||
+					metadata.incompleteArguments !== detachedMetadata.incompleteArguments ||
+					evidencePresenceChanged;
+				const combinedMetadata: EscapedToolCallMetadata = {
+					guarded: metadata.guarded || detachedMetadata.guarded || metadataChanged,
+					malformed: metadata.malformed || detachedMetadata.malformed || metadataChanged,
+					evidence: metadata.evidence ?? detachedMetadata.evidence,
+					incompleteArguments: metadata.incompleteArguments || detachedMetadata.incompleteArguments,
+					incompleteArgumentsReason:
+						metadata.incompleteArgumentsReason ?? detachedMetadata.incompleteArgumentsReason,
+				};
+				if (combinedMetadata.malformed) {
+					const marked = {
+						...snapshotBlock,
+						incompleteArguments: true,
+						incompleteArgumentsReason: "malformed" as const,
+					};
+					snapshot.content[index] = marked;
+					acceptedToolCallMetadata.set(marked, combinedMetadata);
+				} else {
+					acceptedToolCallMetadata.set(snapshotBlock, combinedMetadata);
+				}
+			}
+		}
+		return snapshot;
 	}
 
 	discard(): void {
@@ -4759,20 +5020,23 @@ async function executeToolCalls(
 	let steeringMessages: AgentMessage[] | undefined;
 	let steeringCheck: Promise<void> | null = null;
 
-	const records = toolCalls.map(toolCall => ({
-		toolCall,
-		tool: findActiveTool(tools, toolCall.name),
-		args: toolCall.arguments as Record<string, unknown>,
-		eventFields: undefined as { toolCallId: string; toolName: string; intent: string | undefined } | undefined,
-		started: false,
-		result: undefined as AgentToolResult<any> | undefined,
-		isError: false,
-		skipped: false,
-		toolResultMessage: undefined as ToolResultMessage | undefined,
-		resultEmitted: false,
-		argumentValidationFailed: false,
-	}));
-
+	const records = toolCalls.map(toolCall => {
+		const metadata = acceptedToolCallMetadata.get(toolCall) ?? escapedToolCallMetadata(toolCall);
+		return {
+			toolCall: stripToolCallEvidence(toolCall),
+			metadata,
+			tool: findActiveTool(tools, toolCall.name),
+			args: toolCall.arguments as Record<string, unknown>,
+			eventFields: undefined as { toolCallId: string; toolName: string; intent: string | undefined } | undefined,
+			started: false,
+			result: undefined as AgentToolResult<any> | undefined,
+			isError: false,
+			skipped: false,
+			toolResultMessage: undefined as ToolResultMessage | undefined,
+			resultEmitted: false,
+			argumentValidationFailed: false,
+		};
+	});
 	const checkSteering = async (): Promise<void> => {
 		// Never consume steering once the run's own signal is aborted: an aborted
 		// run cannot deliver it (the loop hands drained steering back and ends), and
@@ -4800,6 +5064,7 @@ async function executeToolCalls(
 
 	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
 		if (record.resultEmitted) return;
+		record.toolCall = stripToolCallEvidence(record.toolCall);
 		const { toolCall } = record;
 		const eventFields =
 			record.eventFields ?? ({ toolCallId: toolCall.id, toolName: toolCall.name, intent: toolCall.intent } as const);
@@ -4853,6 +5118,24 @@ async function executeToolCalls(
 		stream.push({ type: "message_start", message: toolResultMessage, scope });
 		stream.push({ type: "message_end", message: toolResultMessage, scope });
 	};
+	const isInvalidEscapedRecord = (record: (typeof records)[number]): boolean => {
+		const metadata = record.metadata;
+		if (metadata.malformed) return true;
+		if (!metadata.guarded) return false;
+		return !(
+			isDisplaySafeEscapedArguments(record.tool, record.args) &&
+			isDisplaySafeRawEscapeEvidence(record.tool, record.args, metadata.evidence)
+		);
+	};
+	const hasInvalidEscapedCall = records.some(isInvalidEscapedRecord);
+	if (hasInvalidEscapedCall) {
+		for (const record of records) {
+			if (isInvalidEscapedRecord(record)) continue;
+			record.skipped = true;
+			record.toolCall = stripToolCallEvidence(record.toolCall);
+			emitToolResult(record, createSkippedToolResult(), true);
+		}
+	}
 
 	/**
 	 * Prepare every value needed to publish and invoke one dispatch before claiming that it
@@ -4911,7 +5194,7 @@ async function executeToolCalls(
 	};
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
-		if (interruptState.triggered) {
+		if (record.skipped || interruptState.triggered) {
 			// Skip both span emission and the collector orphan record here. The
 			// scheduler-task finalizer emits the skipped result and collector record;
 			// the tail sweep below remains a defensive fallback for unexpected throws.
@@ -4919,6 +5202,7 @@ async function executeToolCalls(
 			return;
 		}
 
+		record.toolCall = stripToolCallEvidence(record.toolCall);
 		const { toolCall, tool } = record;
 		let argsForExecution = toolCall.arguments as Record<string, unknown>;
 		if (intentTracing) {
@@ -4956,16 +5240,17 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
-				const escapedUnicodeArgumentEvidence = toolCall.escapedUnicodeArgumentEvidence;
-				const escapedArgumentsGuarded =
-					toolCall.escapedNonAsciiArguments || escapedUnicodeArgumentEvidence !== undefined;
-				if (escapedArgumentsGuarded) delete toolCall.escapedUnicodeArgumentEvidence;
-				if (toolCall.incompleteArguments) {
+				const metadata = record.metadata;
+				const escapedUnicodeArgumentEvidence = metadata.evidence;
+				const escapedArgumentsGuarded = metadata.guarded;
+				if (escapedArgumentsGuarded) record.toolCall = stripToolCallEvidence(record.toolCall);
+				const incompleteArguments = metadata.malformed || metadata.incompleteArguments;
+				if (incompleteArguments) {
 					record.argumentValidationFailed = true;
 					// The provider flagged this call's arguments as unsafe to execute.
 					// The typed reason selects accurate recovery guidance; callers that
 					// only read the boolean still get a safe, actionable rejection.
-					const reason = toolCall.incompleteArgumentsReason;
+					const reason = metadata.incompleteArgumentsReason;
 					const detail =
 						reason === "malformed"
 							? `The terminal arguments for tool call "${toolCall.name}" did not decode to a valid JSON object. The arguments cannot be executed. Re-issue the call with valid, complete arguments.`
@@ -5273,6 +5558,7 @@ function createAbortedToolResult(
 	reason: "aborted" | "error",
 	errorMessage?: string,
 ): ToolResultMessage {
+	toolCall = stripToolCallEvidence(toolCall);
 	const message = reason === "aborted" ? "Tool execution was aborted" : "Tool execution failed due to an error";
 	const result: AgentToolResult<any> = {
 		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
