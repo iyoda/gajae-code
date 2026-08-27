@@ -92,7 +92,11 @@ function isEmptyDeleteReceiptName(name: string): boolean {
 	return EMPTY_DELETE_RECEIPT_PATTERN.test(name);
 }
 
-export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDeleteGcRecord[]> {
+export async function collectEmptyDeleteReceipts(
+	root: string,
+	deps: { lstat?: (file: string, options: { bigint: true }) => Promise<BigIntStats> } = {},
+): Promise<EmptyDeleteGcRecord[]> {
+	const lstatFile = deps.lstat ?? ((file: string) => fs.lstat(file, { bigint: true }));
 	const records: EmptyDeleteGcRecord[] = [];
 	const resolvedRoot = path.resolve(root);
 	let rootStat: BigIntStats;
@@ -124,11 +128,15 @@ export async function collectEmptyDeleteReceipts(root: string): Promise<EmptyDel
 		const file = path.join(resolvedRoot, name);
 		let stat: BigIntStats;
 		try {
-			stat = await fs.lstat(file, { bigint: true });
+			stat = await lstatFile(file, { bigint: true });
 		} catch (error) {
-			// ENOENT is an ordinary race with concurrent cleanup; any other stat failure is
-			// a hard discovery error that must surface instead of silently shrinking the report.
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			// ENOENT is an ordinary race with concurrent cleanup, but silently dropping the
+			// entry would shrink the report without trace; record it as a raced candidate so
+			// discovery stays fail-closed. Any other stat failure is a hard discovery error.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				records.push({ root, path: file, action: "skipped", reason: "raced" });
+				continue;
+			}
 			throw error;
 		}
 		if (stat.isSymbolicLink()) {

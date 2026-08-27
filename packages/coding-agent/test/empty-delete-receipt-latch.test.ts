@@ -230,6 +230,31 @@ describe("empty .gjc-delete-* latch", () => {
 		expect(await fs.readFile(file, "utf8")).toBe("payload");
 	});
 
+	it("Test 4d: readdir/lstat race records a raced skipped candidate instead of omitting it", async () => {
+		const root = await tempRoot("gjc-gc-race-");
+		const gone = path.join(root, ".gjc-delete-session-state-lock-44444444-4444-4444-4444-444444444444.json");
+		const live = path.join(root, ".gjc-delete-session-state-lock-55555555-5555-5555-5555-555555555555.json");
+		await fs.writeFile(gone, "");
+		await fs.writeFile(live, "");
+		// Model the discovery race deterministically: both entries are present at readdir,
+		// but `gone` vanished before its lstat. Discovery must record the raced candidate
+		// instead of silently shrinking the report.
+		const collected = await collectEmptyDeleteReceipts(root, {
+			lstat: async (file, options) => {
+				if (file === gone) {
+					const error = new Error(`ENOENT: no such file or directory, lstat '${file}'`) as NodeJS.ErrnoException;
+					error.code = "ENOENT";
+					throw error;
+				}
+				return fs.lstat(file, options);
+			},
+		});
+		expect(collected.find(r => r.path === gone)).toEqual(
+			expect.objectContaining({ action: "skipped", reason: "raced" }),
+		);
+		expect(collected.find(r => r.path === live)?.action).toBe("would_remove");
+	});
+
 	it("Test 4 CLI: empty-delete-receipts requires operand", async () => {
 		const result = await runGjcGcCommand(["--empty-delete-receipts", "--json"], "/tmp", process.env, []);
 		expect(result.status).toBe(2);
