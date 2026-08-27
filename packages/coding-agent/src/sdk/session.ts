@@ -2107,6 +2107,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let ownedConventionalMcpToolNames: string[] = [];
 		let publishOwnedConventionalMcpTools = false;
 		let syncConventionalToolsForManager: ((tools: CustomTool[]) => Promise<void>) | undefined;
+		let replacementMcpToolsSync: Promise<void> = Promise.resolve();
 		let ownedPluginServersConnected = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
 		const stagedMcpCleanup = new Map<MCPManager, () => void>();
@@ -2193,7 +2194,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						nextManager.setAuthStorage(authStorage);
 						wireMcpManagerCallbacks(nextManager);
 						nextManager.setOnToolsChanged(tools => {
-							void session.refreshMCPTools(tools as CustomTool[]);
+							replacementMcpToolsSync = replacementMcpToolsSync
+								.then(() => session.refreshMCPTools(tools as CustomTool[]))
+								.catch(error => {
+									logger.warn("Failed to refresh relocated MCP tools", { error: safeErrorForLog(error) });
+								});
 						});
 						const result = await nextManager.connectServers(mergedConfigs, mergedSources as never);
 						nextCustomTools.push(...(result.tools as CustomTool[]));
