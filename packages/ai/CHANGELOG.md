@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- The built-in `kiro` provider now accepts long-lived `KIRO_API_KEY` values (`ksk_…` from [app.kiro.dev](https://app.kiro.dev/settings/api-keys)) in addition to AWS Builder ID OAuth. API-key auth talks to the Kiro service root with `tokentype: API_KEY` and discovers the live model catalog via `ListAvailableModels`. Builder ID login (`gjc auth-broker login kiro` / `AWS_BEARER_TOKEN_KIRO`) is unchanged.
+
+### Fixed
+
+- Kiro credential selection now rejects control-character injection and keeps non-`ksk_` values on the Builder ID bearer path. API-key failures redact the credential before reaching assistant error output, and the transport accepts provider header overrides without changing the documented endpoint contract.
+- API-key model discovery also retains the contributor-supplied static catalog for offline print-mode resolution, while live `ListAvailableModels` results remain authoritative when available.
+
 ## [0.15.3] - 2026-08-27
 
 ### Fixed

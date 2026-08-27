@@ -120,12 +120,12 @@ agent below.
 1. Install and authenticate GJC on the machine Orca runs agents on:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.0/scripts/install.sh -o gjc-install.sh
+   curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/gajae-code/v0.15.3/scripts/install.sh -o gjc-install.sh
    sh gjc-install.sh
    gjc auth
    ```
 
-   To pick a newer installer, change `v0.15.0` to the release tag you want (see [docs/install.md](install.md)).
+   To pick a newer installer, change `v0.15.3` to the release tag you want (see [docs/install.md](install.md)).
 
 2. In Orca, open **Settings → Agents** and add a custom agent:
 
