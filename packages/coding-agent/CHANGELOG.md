@@ -8,6 +8,8 @@
 
 ### Added
 
+- Added opt-in `compaction.adaptive.*` settings and wired them into post-turn and pre-prompt auto-compaction. Adaptive mode remains disabled by default, preserves fixed-token precedence, and exposes bounded base, aggression, call-window, and minimum-threshold controls.
+
 - The `ask` tool declares its display-only argument fields (`questions.question`, `questions.options.label`) via `displaySafeEscapedArgFields`, so an `ask` call whose question text or option labels arrive as `\uXXXX` escapes (common from Anthropic models writing Korean or emoji) completes with a single warning instead of discarding the turn, charging the managed-fallback retry budget, and ultimately failing the run. Ids, workflow-gate metadata, and deep-interview records remain load-bearing and keep the fail-closed rejection. (#4983)
 
 - Added an explicit `Copy OAuth URL` command-palette action for interactive `/login` and runtime MCP OAuth flows. It copies the exact pending authorization URL through the configured clipboard transport only after the user selects the action; it never overwrites the clipboard automatically and clears the pending URL when the flow ends. This preserves OSC 8 policy, tmux/SSH/no-hyperlink behavior, and avoids relying on padded soft-wrapped terminal rows for copying.
@@ -41,6 +43,7 @@
 - An explicit `agentDir` redirect now applies uniformly to native user-scope surfaces instead of only to MCP: `loadCapability`/`loadCapabilityForHome` set the context user scope only for an explicit agent directory, and the native SYSTEM.md, RULES.md, skills, config-dir, and AGENTS.md loaders resolve user paths from it. The process-default (no explicit `agentDir`) layout is unchanged (#4834 review).
 - `loadCapability` keeps `getAgentDir()` as the DEFAULT context user scope for native surfaces, so a process-selected non-default profile (GJC_CODING_AGENT_DIR / PI_CODING_AGENT_DIR / setAgentDir()) is never split across two directories: an explicit `options.agentDir` still wins, and `loadCapabilityForHome` still derives its scope from the supplied home (#4834 review).
 - An interactive `gjc --worktree` launch now refuses to enter a worktree another live session still holds, instead of silently joining its checkout. The guard existed only for broker-managed launches (#4862); the occupancy predicate and process observation now live in one shared module so both launch paths keep a single definition of "still running", and launch preparation is split into a planning stage that resolves the target before anything is created.
+- SDK prompts now publish a bounded structured terminal failure when a provider immediately returns HTTP 402 or 429. The accepted receipt remains non-terminal until the correlated `agent_end`, while `turn.result`/`turn.prompt_status` no longer strand the prompt as `in_flight`; replacement turns remain independently abortable and recoverable. (#4941)
 
 ## [0.15.2] - 2026-08-25
 
@@ -49,7 +52,6 @@
 - Version 0.15.1 was tagged but never published: release automation failed while deriving release notes, before any package reached npm. Everything listed under `## [0.15.1]` below ships in this release.
 
 ## [0.15.1] - 2026-08-25
-
 ### Added
 
 - Added `/language [en|ko]`, the interactive slash command for the persisted `ui.language` selection. Without arguments it reports the current language; with a canonical code, locale tag (`en-US`, `ko-KR`), endonym (`한국어`), English name, or common aliases (`eng`, `kr`, `kor`) it persists the canonical `en`/`ko` value through settings and confirms in the selected language. An unsupported value is rejected with the available list and changes nothing. See `docs/ui-language.md`.
