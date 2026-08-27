@@ -4921,6 +4921,7 @@ export class ModelRegistry {
 			delete headers.Authorization;
 			return { ...model, headers: resolved ? { ...headers, Authorization: `Bearer ${resolved}` } : headers };
 		});
+		this.#rebuildCanonicalIndex();
 	}
 
 	async #peekApiKeyForProvider(
@@ -5089,7 +5090,7 @@ export class ModelRegistry {
 			if (!resolved) return;
 			this.#customProviderApiKeys.set(providerName, resolved);
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
-			this.#runtimeProviderApiKeys.set(providerName, resolved);
+			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 			this.authStorage.setConfigApiKey(providerName, resolved);
 		}
 
