@@ -1825,6 +1825,7 @@ describe("openai-codex streaming", () => {
 			}
 
 			send(): void {
+				expect(admitted).toBe(true);
 				this.emitCodexResponse({ messageId: "msg-gated", responseId: "resp-gated", text: "ok" });
 			}
 		}

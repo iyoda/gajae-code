@@ -2634,6 +2634,7 @@ class CodexWebSocketConnection {
 		signal?: AbortSignal,
 		firstEventTimeoutMs?: number,
 		idleTimeoutMs = this.#idleTimeoutMs,
+		onRequestStart?: () => void,
 	): AsyncGenerator<Record<string, unknown>> {
 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
 			throw createCodexWebSocketTransportError("websocket connection is unavailable");
@@ -2655,6 +2656,7 @@ class CodexWebSocketConnection {
 		}
 
 		try {
+			onRequestStart?.();
 			this.#socket.send(JSON.stringify(request));
 			let sawFirstProgress = false;
 			const startedAt = Date.now();
@@ -2851,16 +2853,16 @@ async function openCodexWebSocketEventStream(
 	firstEventTimeoutMs?: number,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const connection = await getOrCreateCodexWebSocketConnection(state, url, headers, signal, options);
-	// The gateway lease must remain held through the WebSocket handshake. A
-	// broker revocation can arrive while the connection is being established;
-	// releasing admission before that await would allow a revoked key to be
-	// sent by the first stream request.
-	options?.onStreamCreated?.();
+	// The gateway lease must remain held through the WebSocket handshake and
+	// until the lazy generator is about to send the request. A broker
+	// revocation can arrive in either gap; releasing admission earlier would
+	// allow the captured key to be sent after authority was withdrawn.
 	return connection.streamRequest(
 		request,
 		signal,
 		firstEventTimeoutMs,
 		getCodexWebSocketIdleTimeoutMs(options?.streamIdleTimeoutMs),
+		options?.onStreamCreated,
 	);
 }
 
