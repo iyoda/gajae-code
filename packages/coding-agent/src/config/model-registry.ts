@@ -1469,6 +1469,7 @@ export class ModelRegistry {
 	#sessionCanonicalVariants = new Map<string, string>();
 	#customProviderApiKeys: Map<string, string> = new Map();
 	#customProviderApiKeyEnvNames: Map<string, string> = new Map();
+	#customProviderAuthHeaders: Map<string, boolean> = new Map();
 	#providerWebSearchModes: Map<string, WebSearchMode> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#optionalAuthProviders: Set<string> = new Set();
@@ -1808,6 +1809,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#customProviderApiKeyEnvNames.clear();
+		this.#customProviderAuthHeaders.clear();
 		this.#providerWebSearchModes.clear();
 		this.#keylessProviders.clear();
 		this.#optionalAuthProviders.clear();
@@ -2431,6 +2433,7 @@ export class ModelRegistry {
 				? undefined
 				: (providerConfig.apiKeyEnv ?? (localOpenAICompat?.apiKey ? undefined : localOpenAICompat?.apiKeyEnv));
 			if (rotatingApiKeyEnv) this.#customProviderApiKeyEnvNames.set(providerName, rotatingApiKeyEnv);
+			if (providerConfig.authHeader !== undefined) this.#customProviderAuthHeaders.set(providerName, providerConfig.authHeader);
 			const localOpenAICompatApiKeyConfig = localOpenAICompat
 				? localOpenAICompat.apiKey
 					? resolveApiKeyConfig(localOpenAICompat.apiKey)
@@ -4906,10 +4909,18 @@ export class ModelRegistry {
 		if (resolved === undefined) {
 			this.#customProviderApiKeys.delete(provider);
 			this.authStorage.removeConfigApiKey(provider);
-			return;
+		} else {
+			this.#customProviderApiKeys.set(provider, resolved);
+			this.authStorage.setConfigApiKey(provider, resolved, { envSourced: true });
 		}
-		this.#customProviderApiKeys.set(provider, resolved);
-		this.authStorage.setConfigApiKey(provider, resolved, { envSourced: true });
+		const authHeader = this.#customProviderAuthHeaders.get(provider);
+		if (authHeader !== true) return;
+		this.#models = this.#models.map(model => {
+			if (model.provider !== provider) return model;
+			const headers = { ...(model.headers ?? {}) };
+			delete headers.Authorization;
+			return { ...model, headers: resolved ? { ...headers, Authorization: `Bearer ${resolved}` } : headers };
+		});
 	}
 
 	async #peekApiKeyForProvider(
@@ -5074,11 +5085,12 @@ export class ModelRegistry {
 		}
 
 		if (config.apiKey) {
-			this.#customProviderApiKeys.set(providerName, config.apiKey);
-			// Persist runtime API keys so they survive #reloadStaticModels() cycles
-			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 			const resolved = resolveApiKeyConfig(config.apiKey);
-			if (resolved) this.authStorage.setConfigApiKey(providerName, resolved);
+			if (!resolved) return;
+			this.#customProviderApiKeys.set(providerName, resolved);
+			// Persist runtime API keys so they survive #reloadStaticModels() cycles
+			this.#runtimeProviderApiKeys.set(providerName, resolved);
+			this.authStorage.setConfigApiKey(providerName, resolved);
 		}
 
 		if (config.models && config.models.length > 0) {
@@ -5090,7 +5102,7 @@ export class ModelRegistry {
 					config.baseUrl!,
 					config.api,
 					config.headers,
-					config.apiKey,
+					config.apiKey ? resolveApiKeyConfig(config.apiKey) : undefined,
 					config.authHeader,
 					config.compat,
 					config.requestTransform,
@@ -5150,7 +5162,7 @@ export class ModelRegistry {
 				api: config.api,
 				baseUrl: config.baseUrl,
 				headers: config.headers,
-				apiKey: config.apiKey,
+				apiKey: config.apiKey ? resolveApiKeyConfig(config.apiKey) : undefined,
 				authHeader: config.authHeader,
 				compat: config.compat,
 				requestTransform: config.requestTransform,

@@ -2121,8 +2121,7 @@ export async function setModelPresetRegistryPin(
 	const agentDir = effectiveAgentDir(options);
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
-		const state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(options));
+		const state = recoverStateForRead(loadStateSync(agentDir), effectiveTrustedKeys(options));
 		if (revision === undefined) {
 			const highest = state.history.reduce(
 				(value, item) => (item.revoked ? value : Math.max(value, item.manifest.signed.registryRevision)),
@@ -2136,6 +2135,7 @@ export async function setModelPresetRegistryPin(
 			if (generation.revoked) throw new Error(`Cannot pin revoked registry revision ${revision}.`);
 		}
 		const current = loadControlSync(agentDir);
+		await writeAtomicJson(paths.state, state);
 		await writeAtomicJson(paths.control, { ...current, pinnedRevision: revision });
 	});
 	notifyRegistryChanges(agentDir);
@@ -2147,13 +2147,13 @@ export async function rollbackModelPresetRegistry(
 	const agentDir = effectiveAgentDir(options);
 	const paths = registryPaths(agentDir);
 	await withFileLock(paths.transaction, async () => {
-		const state = loadStateSync(agentDir);
-		validateStateGenerations(state, effectiveTrustedKeys(options));
+		const state = recoverStateForRead(loadStateSync(agentDir), effectiveTrustedKeys(options));
 		const control = loadControlSync(agentDir);
 		const activeRevision = control.pinnedRevision ?? state.activeRevision;
 		const revision =
 			options.revision ??
 			state.history
+				.filter(item => !item.revoked)
 				.map(item => item.manifest.signed.registryRevision)
 				.filter(candidate => activeRevision === undefined || candidate < activeRevision)
 				.sort((left, right) => right - left)[0];

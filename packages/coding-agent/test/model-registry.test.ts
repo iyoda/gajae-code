@@ -2570,6 +2570,29 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("refreshes auth headers when an apiKeyEnv credential rotates", async () => {
+			const keyEnv = `GJC_TEST_ROTATING_AUTH_HEADER_KEY_${Snowflake.next()}`;
+			const restoreKey = setEnvForTest(keyEnv, "initial-rotating-key");
+			try {
+				writeRawModelsJson({
+					anthropic: {
+						baseUrl: "https://anthropic-proxy.example.com/v1",
+						apiKeyEnv: keyEnv,
+						authHeader: true,
+					},
+				});
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(getModelsForProvider(registry, "anthropic")[0]?.headers?.Authorization).toBe(
+					"Bearer initial-rotating-key",
+				);
+				Bun.env[keyEnv] = "rotated-key";
+				await registry.getApiKeyForProvider("anthropic");
+				expect(getModelsForProvider(registry, "anthropic")[0]?.headers?.Authorization).toBe("Bearer rotated-key");
+			} finally {
+				restoreKey();
+			}
+		});
+
 		test("apiKey-only override supplies fallback auth for built-in models", async () => {
 			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
 			delete Bun.env.OPENAI_API_KEY;
@@ -6169,6 +6192,37 @@ describe("ModelRegistry", () => {
 			await registry.refresh("offline");
 			await expect(registry.getApiKeyForProvider("runtime-proxy")).resolves.toBe("resolved-runtime-provider-key");
 			expect(registry.getEffectiveProviderAuth("runtime-proxy")).toBe("key");
+		} finally {
+			restoreKey();
+		}
+	});
+
+	test("materializes a resolved runtime apiKey in auth headers", () => {
+		const envName = "GJC_TEST_RUNTIME_AUTH_HEADER_KEY";
+		const restoreKey = setEnvForTest(envName, "resolved-runtime-auth-key");
+		try {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("runtime-auth", {
+				baseUrl: "https://runtime-auth.example/v1",
+				api: "openai-completions",
+				apiKey: envName,
+				authHeader: true,
+				models: [
+					{
+						id: "runtime-auth-model",
+						name: "Runtime Auth Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 100_000,
+						maxTokens: 8_000,
+					},
+				],
+			});
+
+			expect(registry.find("runtime-auth", "runtime-auth-model")?.headers?.Authorization).toBe(
+				"Bearer resolved-runtime-auth-key",
+			);
 		} finally {
 			restoreKey();
 		}
