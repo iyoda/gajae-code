@@ -992,6 +992,24 @@ describe("signed model preset registry", () => {
 		expect(getModelPresetRegistryStatus({ agentDir: data.agentDir }).pinnedRevision).toBeUndefined();
 	});
 
+	test("preserves the anti-rollback floor when the highest cached generation is revoked", async () => {
+		const data = await fixture();
+		await accept(data, signedRegistry(data.privateKey, 1));
+		data.trustedKeys.get("test-key")!.revokedAt = "2027-01-01T00:00:00.000Z";
+		const rotated = crypto.generateKeyPairSync("ed25519");
+		data.trustedKeys.set("rotated-key", {
+			keyId: "rotated-key",
+			publicKeyPem: rotated.publicKey.export({ type: "spki", format: "pem" }).toString(),
+			validFrom: "2026-01-01T00:00:00.000Z",
+		});
+		await expect(
+			accept(data, signedRegistry(rotated.privateKey, 1, undefined, undefined, undefined, undefined, "rotated-key")),
+		).rejects.toThrow(/equivocation|downgrade/i);
+		const state = await Bun.file(path.join(data.agentDir, "model-presets", "state.json")).json();
+		expect(state.highestSeenRevision).toBe(1);
+		expect(state.revokedHistory).toHaveLength(1);
+	});
+
 	test("uses ETag 304 only with a verified warm cache", async () => {
 		const data = await fixture();
 		const registry = signedRegistry(data.privateKey, 1);

@@ -445,12 +445,18 @@ type AcceptedGeneration = {
 	retainedFromRevision?: number;
 };
 
+type RevokedGenerationCheckpoint = {
+	manifest: ModelPresetRegistryManifest;
+	manifestSha256: string;
+};
+
 type RegistryState = {
 	version: 1;
 	activeRevision?: number;
 	highestSeenRevision?: number;
 	highestSeenManifestSha256?: string;
 	history: AcceptedGeneration[];
+	revokedHistory?: RevokedGenerationCheckpoint[];
 	lastCheckedAt?: string;
 	lastError?: string;
 };
@@ -720,6 +726,7 @@ function assertCompatible(compatibility: z.infer<typeof CompatibilitySchema>): v
 function verifyManifest(
 	manifest: ModelPresetRegistryManifest,
 	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+	allowRevoked = false,
 ): void {
 	assertCompatible(manifest.signed.compatibility);
 	if (manifest.signed.revision !== String(manifest.signed.registryRevision).padStart(8, "0"))
@@ -730,7 +737,7 @@ function verifyManifest(
 	const publishedAt = Date.parse(manifest.signed.publishedAt);
 	if (!Number.isFinite(publishedAt) || publishedAt < Date.parse(key.validFrom))
 		throw new Error("Registry manifest predates its signing key validity.");
-	if (key.revokedAt) throw new Error("Registry manifest signing key is revoked.");
+	if (key.revokedAt && !allowRevoked) throw new Error("Registry manifest signing key is revoked.");
 	const signature = decodeCanonicalEd25519Signature(manifest.signature.value);
 	if (
 		!crypto.verify(null, Buffer.from(canonicalModelPresetRegistryJson(manifest.signed)), key.publicKeyPem, signature)
@@ -807,10 +814,11 @@ function assertProfilePresetReferences(
 function validateGeneration(
 	generation: AcceptedGeneration,
 	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+	allowRevoked = false,
 ): AcceptedGeneration {
 	const manifest = ModelPresetRegistryManifestSchema.parse(generation.manifest);
 	assertSafeRegistryDocument(manifest);
-	verifyManifest(manifest, trustedKeys);
+	verifyManifest(manifest, trustedKeys, allowRevoked);
 	assertManifestBindings(manifest);
 	const snapshotBytes = new TextEncoder().encode(canonicalModelPresetRegistryJson(generation.snapshot));
 	assertContentDescriptor(snapshotBytes, manifest.signed.snapshot, "Cached registry snapshot");
@@ -977,7 +985,22 @@ function parseState(value: unknown): RegistryState {
 			retainedFromRevision,
 		};
 	});
-	return { ...state, version: 1, history, lastError };
+	if (Array.isArray(state.revokedHistory) && state.revokedHistory.length > MODEL_PRESET_REGISTRY_MAX_HISTORY)
+		throw new Error("Registry revoked checkpoint history exceeds its bound.");
+	const revokedHistory = (Array.isArray(state.revokedHistory) ? state.revokedHistory : []).map((entry, index) => {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry))
+			throw new Error(`Registry revoked checkpoint ${index} is invalid.`);
+		const checkpoint = entry as Partial<RevokedGenerationCheckpoint>;
+		const manifest = ModelPresetRegistryManifestSchema.safeParse(checkpoint.manifest);
+		if (
+			!manifest.success ||
+			typeof checkpoint.manifestSha256 !== "string" ||
+			!SHA256_PATTERN.test(checkpoint.manifestSha256)
+		)
+			throw new Error(`Registry revoked checkpoint ${index} is invalid.`);
+		return { manifest: manifest.data, manifestSha256: checkpoint.manifestSha256 };
+	});
+	return { ...state, version: 1, history, revokedHistory, lastError };
 }
 
 function loadStateSync(agentDir: string): RegistryState {
@@ -1483,7 +1506,39 @@ function validateStateGenerations(
 		if (byRevision.has(revision)) throw new Error(`Registry history contains duplicate revision ${revision}.`);
 		byRevision.set(revision, generation);
 	}
+	const revokedByRevision = new Map<number, RevokedGenerationCheckpoint>();
+	for (const checkpoint of state.revokedHistory ?? []) {
+		const revision = checkpoint.manifest.signed.registryRevision;
+		if (byRevision.has(revision) || revokedByRevision.has(revision))
+			throw new Error(`Registry history contains duplicate revision ${revision}.`);
+		const key = trustedKeys.get(checkpoint.manifest.signature.keyId);
+		if (!key?.revokedAt)
+			throw new Error(`Registry revoked checkpoint key is not revoked: ${checkpoint.manifest.signature.keyId}.`);
+		assertSafeRegistryDocument(checkpoint.manifest);
+		assertCompatible(checkpoint.manifest.signed.compatibility);
+		if (checkpoint.manifest.signed.revision !== String(revision).padStart(8, "0"))
+			throw new Error("Registry revoked checkpoint revision identity is inconsistent.");
+		assertManifestBindings(checkpoint.manifest);
+		const manifestSha256 = sha256(canonicalModelPresetRegistryJson(checkpoint.manifest));
+		if (manifestSha256 !== checkpoint.manifestSha256)
+			throw new Error("Registry revoked checkpoint manifest digest is invalid.");
+		const signature = decodeCanonicalEd25519Signature(checkpoint.manifest.signature.value);
+		if (
+			!crypto.verify(
+				null,
+				Buffer.from(canonicalModelPresetRegistryJson(checkpoint.manifest.signed)),
+				key.publicKeyPem,
+				signature,
+			)
+		)
+			throw new Error("Registry revoked checkpoint signature verification failed.");
+		revokedByRevision.set(revision, checkpoint);
+	}
 	const highestHistoryRevision = [...byRevision.keys()].reduce((highest, revision) => Math.max(highest, revision), 0);
+	const highestRevokedRevision = [...revokedByRevision.keys()].reduce(
+		(highest, revision) => Math.max(highest, revision),
+		0,
+	);
 	if (state.activeRevision !== undefined && !byRevision.has(state.activeRevision))
 		throw new Error(`Registry selected revision ${state.activeRevision} is missing from accepted history.`);
 	if (state.highestSeenRevision === undefined) {
@@ -1494,8 +1549,15 @@ function validateStateGenerations(
 			throw new Error("Registry highest-seen manifest checkpoint is incomplete.");
 		if (state.highestSeenRevision < highestHistoryRevision)
 			throw new Error("Registry highest-seen revision is older than accepted history.");
+		if (state.highestSeenRevision < highestRevokedRevision)
+			throw new Error("Registry highest-seen revision is older than revoked history.");
 		const checkpoint = byRevision.get(state.highestSeenRevision);
-		if (!checkpoint || checkpoint.manifestSha256 !== state.highestSeenManifestSha256)
+		const revokedCheckpoint = revokedByRevision.get(state.highestSeenRevision);
+		if (
+			(!checkpoint && !revokedCheckpoint) ||
+			(checkpoint && checkpoint.manifestSha256 !== state.highestSeenManifestSha256) ||
+			(revokedCheckpoint && revokedCheckpoint.manifestSha256 !== state.highestSeenManifestSha256)
+		)
 			throw new Error("Registry highest-seen manifest checkpoint is not bound to accepted history.");
 	}
 	const validated = new Set<number>();
@@ -1579,15 +1641,62 @@ function recoverLatestVerifiedGeneration(
 	return latest;
 }
 
-function recoveryStateFromGeneration(generation: AcceptedGeneration | undefined): RegistryState {
-	if (!generation) return { version: 1, history: [] };
-	const checkpoint = withoutRetainedEntries(generation);
+function recoverRevokedCheckpoints(
+	state: RegistryState,
+	trustedKeys: ReadonlyMap<string, ModelPresetRegistryTrustedKey>,
+): RevokedGenerationCheckpoint[] {
+	const checkpoints = new Map<number, RevokedGenerationCheckpoint>();
+	for (const checkpoint of state.revokedHistory ?? [])
+		checkpoints.set(checkpoint.manifest.signed.registryRevision, checkpoint);
+	for (const generation of state.history) {
+		const key = trustedKeys.get(generation.manifest.signature.keyId);
+		if (!key?.revokedAt) continue;
+		try {
+			const verified = validateGeneration(generation, trustedKeys, true);
+			checkpoints.set(verified.manifest.signed.registryRevision, {
+				manifest: verified.manifest,
+				manifestSha256: verified.manifestSha256,
+			});
+		} catch {
+			// A revoked generation can be retained only when its signed content and bindings remain intact.
+		}
+	}
+	return [...checkpoints.values()].sort(
+		(left, right) => right.manifest.signed.registryRevision - left.manifest.signed.registryRevision,
+	);
+}
+
+function recoveryStateFromGeneration(
+	generation: AcceptedGeneration | undefined,
+	revokedHistory: readonly RevokedGenerationCheckpoint[] = [],
+	priorState?: RegistryState,
+): RegistryState {
+	const history = generation ? [withoutRetainedEntries(generation)] : [];
+	const activeRevision = generation?.manifest.signed.registryRevision;
+	const priorFloor = priorState?.highestSeenRevision;
+	const priorFloorCheckpoint =
+		priorFloor === undefined
+			? undefined
+			: revokedHistory.find(
+					item =>
+						item.manifest.signed.registryRevision === priorFloor &&
+						item.manifestSha256 === priorState?.highestSeenManifestSha256,
+				);
+	const floor =
+		priorFloorCheckpoint && (priorFloor ?? 0) > (activeRevision ?? 0)
+			? priorFloorCheckpoint
+			: generation
+				? { manifest: generation.manifest, manifestSha256: generation.manifestSha256 }
+				: priorFloorCheckpoint;
+	if (!floor)
+		return { version: 1, history, revokedHistory: revokedHistory.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY) };
 	return {
 		version: 1,
-		activeRevision: checkpoint.manifest.signed.registryRevision,
-		highestSeenRevision: checkpoint.manifest.signed.registryRevision,
-		highestSeenManifestSha256: checkpoint.manifestSha256,
-		history: [checkpoint],
+		activeRevision,
+		highestSeenRevision: floor.manifest.signed.registryRevision,
+		highestSeenManifestSha256: floor.manifestSha256,
+		history,
+		revokedHistory: revokedHistory.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY),
 	};
 }
 
@@ -1620,7 +1729,11 @@ async function recordFailure(
 				try {
 					validateStateGenerations(state, trustedKeys);
 				} catch {
-					state = recoveryStateFromGeneration(recoverLatestVerifiedGeneration(state, trustedKeys));
+					state = recoveryStateFromGeneration(
+						recoverLatestVerifiedGeneration(state, trustedKeys),
+						recoverRevokedCheckpoints(state, trustedKeys),
+						state,
+					);
 					stateIsVerified = false;
 				}
 			}
@@ -1723,22 +1836,28 @@ async function refreshModelPresetRegistryInner(
 				const trustedKeys = effectiveTrustedKeys(dependencies);
 				let stateIsVerified = true;
 				let recoveryGeneration: AcceptedGeneration | undefined;
+				let recoveredState: RegistryState | undefined;
 				try {
 					validateStateGenerations(state, trustedKeys);
 				} catch {
 					stateIsVerified = false;
 					recoveryGeneration = recoverLatestVerifiedGeneration(state, trustedKeys);
+					recoveredState = recoveryStateFromGeneration(
+						recoveryGeneration,
+						recoverRevokedCheckpoints(state, trustedKeys),
+						state,
+					);
 				}
 				const usableState: RegistryState = stateIsVerified
 					? state
-					: { ...state, activeRevision: undefined, history: [] };
+					: (recoveredState ?? { ...state, activeRevision: undefined, history: [] });
 				const effectivePinnedRevision = stateIsVerified ? control.pinnedRevision : undefined;
 				const trustedHighestSeenRevision = stateIsVerified
 					? state.highestSeenRevision
-					: recoveryGeneration?.manifest.signed.registryRevision;
+					: recoveredState?.highestSeenRevision;
 				const trustedHighestSeenManifestSha256 = stateIsVerified
 					? state.highestSeenManifestSha256
-					: recoveryGeneration?.manifestSha256;
+					: recoveredState?.highestSeenManifestSha256;
 				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
 						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
@@ -1947,6 +2066,7 @@ async function refreshModelPresetRegistryInner(
 							highestSeenRevision: Math.max(trustedHighestSeenRevision ?? 0, manifest.signed.registryRevision),
 							highestSeenManifestSha256: manifestSha256,
 							history,
+							revokedHistory: usableState.revokedHistory?.slice(0, MODEL_PRESET_REGISTRY_MAX_HISTORY),
 							lastCheckedAt: now.toISOString(),
 							lastError: undefined,
 						},
