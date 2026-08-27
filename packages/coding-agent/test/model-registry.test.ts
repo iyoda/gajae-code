@@ -2552,7 +2552,7 @@ describe("ModelRegistry", () => {
 				writeRawModelsJson({
 					anthropic: {
 						baseUrl: "https://anthropic-proxy.example.com/v1",
-						apiKey: keyEnv,
+						apiKey: tokenEnv,
 						authHeader: true,
 					},
 				});

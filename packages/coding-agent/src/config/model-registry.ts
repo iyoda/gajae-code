@@ -2423,7 +2423,9 @@ export class ModelRegistry {
 			if (providerConfig.openaiCompat?.apiKey)
 				this.#configuredApiKeyEnvNames.add(providerConfig.openaiCompat.apiKey);
 			if (providerConfig.webSearch) this.#providerWebSearchModes.set(providerName, providerConfig.webSearch);
-			const providerApiKeyConfig = providerConfig.apiKey ?? resolveApiKeyEnvConfig(providerConfig.apiKeyEnv);
+			const providerApiKeyConfig = providerConfig.apiKey
+				? resolveApiKeyConfig(providerConfig.apiKey)
+				: resolveApiKeyEnvConfig(providerConfig.apiKeyEnv);
 			const localOpenAICompat = providerConfig.openaiCompat;
 			const rotatingApiKeyEnv = providerConfig.apiKey
 				? undefined
