@@ -1487,7 +1487,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				label: job.label,
 				cwdSensitive: true,
 				signal,
-				originatingTurn: resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(ownedManager)) !== undefined,
+				originatingTurn: this.session.isActiveToolCall
+					? this.session.isActiveToolCall(toolCallId)
+					: resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(ownedManager)) !== undefined,
 				outputRef: {
 					jobId: job.jobId,
 					generation: jobGeneration,
@@ -2084,8 +2086,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			registerOwnedIfLineaged(bridgeManager, toolCallId, bridgeJobId, bridgeEndpointId);
 
 			const bridgeFoldRequest = Promise.withResolvers<void>();
-			const bridgeOriginatingTurn =
-				resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(bridgeManager)) !== undefined;
+			const bridgeOriginatingTurn = this.session.isActiveToolCall
+				? this.session.isActiveToolCall(toolCallId)
+				: resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(bridgeManager)) !== undefined;
 			const unregisterBridgeFold = this.session.registerForegroundFoldParticipant?.({
 				kind: "client-terminal",
 				jobId: bridgeJobId,
@@ -2289,8 +2292,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							label: ptyLabel,
 							cwdSensitive: true,
 							signal,
-							originatingTurn:
-								resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(ptyManager)) !== undefined,
+							originatingTurn: this.session.isActiveToolCall
+								? this.session.isActiveToolCall(toolCallId)
+								: resolveToolLineage(toolCallId, AsyncJobManager.endpointIdOf(ptyManager)) !== undefined,
 							outputRef: {
 								jobId: ptyJobId,
 								generation: ptyGeneration,

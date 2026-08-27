@@ -2575,6 +2575,7 @@ export class AgentSession {
 	 * own turn without pausing any later turn.
 	 */
 	#foldStopRequested = false;
+	readonly #activeToolCallIds = new Set<string>();
 	/**
 	 * The single linearization point for folding a foreground wait. Arrow deps
 	 * capture `this` but are only invoked after construction.
@@ -2593,7 +2594,6 @@ export class AgentSession {
 		// This mirrors exactly what the sdk delivery seam does for a live receipt
 		// delivery, so the parked path cannot rely on an unrelated idle rearm.
 		deliverParked: (job, disposition) => {
-			this.#ownedAsyncJobManager?.clearParkedDelivery(job.generation);
 			const endpointId = this.#ownedAsyncJobManager
 				? AsyncJobManager.endpointIdOf(this.#ownedAsyncJobManager)
 				: undefined;
@@ -2613,17 +2613,29 @@ export class AgentSession {
 					}
 				: undefined;
 			const allowArtifact = ownedCompletion === undefined || isOwnedCompletionEnvelopeAllowed(ownedCompletion);
-			void formatParkedAsyncResult(this.sessionManager, disposition.text, allowArtifact).then(formattedResult => {
-				if (!this.#foldCoordinator.claimCompletionDelivery(job)) return;
-				this.yieldQueue.enqueue("async-result", {
-					jobId: disposition.receipt.jobId,
-					generation: disposition.receipt.jobGeneration,
-					result: `${formattedResult}\n\n${describeFoldReceipt(disposition.receipt)}`,
-					job,
-					durationMs: undefined,
-					ownedCompletion,
+			void formatParkedAsyncResult(this.sessionManager, disposition.text, allowArtifact)
+				.then(formattedResult => {
+					if (!this.#foldCoordinator.claimCompletionDelivery(job)) {
+						this.#ownedAsyncJobManager?.clearParkedDelivery(job.generation);
+						return;
+					}
+					try {
+						this.yieldQueue.enqueue("async-result", {
+							jobId: disposition.receipt.jobId,
+							generation: disposition.receipt.jobGeneration,
+							result: `${formattedResult}\n\n${describeFoldReceipt(disposition.receipt)}`,
+							job,
+							durationMs: undefined,
+							ownedCompletion,
+						});
+					} finally {
+						this.#ownedAsyncJobManager?.clearParkedDelivery(job.generation);
+					}
+				})
+				.catch(error => {
+					this.#ownedAsyncJobManager?.clearParkedDelivery(job.generation);
+					logger.warn("Parked folded delivery formatting failed", { error: String(error) });
 				});
-			});
 		},
 	});
 
@@ -4037,6 +4049,7 @@ export class AgentSession {
 		this.#asyncJobProviderSessionId = config.asyncJobProviderSessionId;
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
 		this.agent.afterToolCall = ctx => {
+			this.#activeToolCallIds.delete(ctx.toolCall.id);
 			settleToolLineageRegistrationWindow(ctx.toolCall.id, this.#ownedRegistrationEndpoint());
 			return this.#ttsrAfterToolCall(ctx);
 		};
@@ -4048,6 +4061,7 @@ export class AgentSession {
 		// original tool call id and must retain the same owned-completion origin.
 		// They are superseded by a rebind on the same id or by bounded eviction.
 		this.agent.beforeToolCall = ctx => {
+			this.#activeToolCallIds.add(ctx.toolCall.id);
 			const lineageIdHash = this.#turnLineageIdHash;
 			if (lineageIdHash) {
 				bindToolLineage(ctx.toolCall.id, {
@@ -8503,6 +8517,10 @@ export class AgentSession {
 	 */
 	registerForegroundFoldParticipant(adapter: FoldAdapter): () => void {
 		return this.#foldCoordinator.registerParticipant(adapter);
+	}
+
+	isActiveToolCall(toolCallId: string): boolean {
+		return this.#activeToolCallIds.has(toolCallId);
 	}
 
 	/** The session-owned fold coordinator, for delivery-side receipt lookup. */
