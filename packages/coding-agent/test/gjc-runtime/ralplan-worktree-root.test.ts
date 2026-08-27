@@ -244,6 +244,25 @@ describe("ralplan --worktree-root explicit target binding (#4693)", () => {
 		expect(await pathExists(path.join(dispatcher, ".gjc"))).toBe(false);
 	});
 
+	it("validates a committed target with Windows-safe git argv", async () => {
+		const session = "wt-windows-safe-head";
+		const target = await initRepo("gjc-ralplan-target-");
+		const dispatcher = await initRepo("gjc-ralplan-dispatcher-");
+
+		const seed = await runNativeRalplanCommand(
+			["--worktree-root", target, "--session-id", session, "--json", "windows-safe target task"],
+			dispatcher,
+		);
+
+		expect(seed.status).toBe(0);
+		expect(JSON.parse(seed.stdout ?? "{}")).toMatchObject({
+			ok: true,
+			repository_binding: { worktreeRoot: await realpath(target) },
+		});
+		expect(await pathExists(path.join(target, ".gjc"))).toBe(true);
+		expect(await pathExists(path.join(dispatcher, ".gjc"))).toBe(false);
+	});
+
 	it("supports resume/restart: re-seed and later writes keep the same bound target run", async () => {
 		const session = "wt-resume";
 		const target = await initRepo("gjc-ralplan-target-");
