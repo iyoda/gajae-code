@@ -2108,6 +2108,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let publishOwnedConventionalMcpTools = false;
 		let ownedPluginServersConnected = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
+		let disposeStagedMcpCleanup: (() => void) | undefined;
 		const wireMcpManagerCallbacks = (manager: MCPManager): void => {
 			manager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(manager);
@@ -2184,6 +2185,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							agentDir,
 							settings,
 						});
+						disposeStagedMcpCleanup = session.registerToolSessionCleanup(() => nextManager?.disconnectAll());
 						nextManager.setAuthStorage(authStorage);
 						wireMcpManagerCallbacks(nextManager);
 						const result = await nextManager.connectServers(mergedConfigs, mergedSources as never);
@@ -2203,6 +2205,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					} catch (disconnectError) {
 						cleanupError = disconnectError;
 					}
+					if (cleanupError === undefined) {
+						disposeStagedMcpCleanup?.();
+						disposeStagedMcpCleanup = undefined;
+					}
 					if (cleanupError !== undefined) throw attachMcpCleanupDiagnostic(error, cleanupError);
 					throw error;
 				}
@@ -2216,6 +2222,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						} catch (disconnectError) {
 							cleanupError = disconnectError;
 						}
+						if (cleanupError === undefined) {
+							disposeStagedMcpCleanup?.();
+							disposeStagedMcpCleanup = undefined;
+						}
 						if (cleanupError !== undefined) throw attachMcpCleanupDiagnostic(error, cleanupError);
 						throw error;
 					}
@@ -2224,6 +2234,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				ownsMcpManager = Boolean(nextManager);
 				await session.replaceOwnedMcpManager(nextManager);
 				await session.refreshMCPTools((nextManager?.getTools() ?? []) as CustomTool[]);
+				disposeStagedMcpCleanup?.();
+				disposeStagedMcpCleanup = undefined;
 			}
 			cwdCapturingToolNames.length = 0;
 			cwdCapturingToolNames.push(...nextCwdCapturing);
