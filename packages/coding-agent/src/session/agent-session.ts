@@ -2620,6 +2620,7 @@ export class AgentSession {
 						return;
 					}
 					try {
+						this.#ownedAsyncJobManager?.retainDeliveryClaim(job);
 						this.yieldQueue.enqueue("async-result", {
 							jobId: disposition.receipt.jobId,
 							generation: disposition.receipt.jobGeneration,
