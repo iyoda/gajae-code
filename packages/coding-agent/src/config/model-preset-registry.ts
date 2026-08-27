@@ -1836,11 +1836,14 @@ async function refreshModelPresetRegistryInner(
 				const trustedHighestSeenManifestSha256 = stateIsVerified
 					? state.highestSeenManifestSha256
 					: (recoveredState?.highestSeenManifestSha256 ?? recoveryGeneration?.manifestSha256);
+				if (!stateIsVerified && trustedHighestSeenRevision === undefined)
+					throw new Error("Registry cache anti-rollback checkpoint cannot be reconstructed.");
 				const latest = usableState.history.reduce<AcceptedGeneration | undefined>(
 					(current, item) =>
-						!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
-							? item
-							: current,
+						item.revoked ||
+						(current && item.manifest.signed.registryRevision <= current.manifest.signed.registryRevision)
+							? current
+							: item,
 					undefined,
 				);
 				const manifestUrl = assertHttpsUrl(effectiveManifestUrl(dependencies), "Registry manifest URL");
@@ -1852,13 +1855,16 @@ async function refreshModelPresetRegistryInner(
 					latest?.etag && latest.manifestUrl === manifestUrl.href ? { "If-None-Match": latest.etag } : {},
 				);
 				if (manifestResponse.response.status === 304) {
-					const currentState = loadStateSync(agentDir);
-					validateStateGenerations(currentState, effectiveTrustedKeys(dependencies));
+					const currentState = recoverStateForRead(
+						loadStateSync(agentDir),
+						effectiveTrustedKeys(dependencies, agentDir),
+					);
 					const currentLatest = currentState.history.reduce<AcceptedGeneration | undefined>(
 						(current, item) =>
-							!current || item.manifest.signed.registryRevision > current.manifest.signed.registryRevision
-								? item
-								: current,
+							item.revoked ||
+							(current && item.manifest.signed.registryRevision <= current.manifest.signed.registryRevision)
+								? current
+								: item,
 						undefined,
 					);
 					if (!currentLatest) throw new Error("Registry returned 304 without a verified cached generation.");
