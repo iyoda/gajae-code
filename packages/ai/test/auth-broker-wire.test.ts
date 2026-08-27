@@ -279,9 +279,7 @@ describe("auth-broker wire surface", () => {
 				"If-None-Match": `"${legacyBody.generation}"`,
 			},
 		});
-		expect(legacyUnchanged.status).toBe(200);
-		const legacyRefreshBody = (await legacyUnchanged.json()) as { generation: number };
-		expect(legacyRefreshBody.generation).toBe(legacyBody.generation);
+		expect(legacyUnchanged.status).toBe(304);
 
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const unchanged = await client.fetchSnapshot({
