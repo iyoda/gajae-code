@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `gjc update` now recognizes an already verified standalone binary during package-manager shim migration, avoiding repeated downloads and post-update work while clearly explaining the required PATH ordering.
+
 - The `ask` tool now rejects empty or whitespace-only custom answers on every local and remote input path. Remote invalid answers receive a visible explanation and are retried at most three times with an event-loop yield between attempts before the ask is cancelled; local empty custom input is never returned as a valid answer. (#5001)
 
 ## [0.15.3] - 2026-08-27

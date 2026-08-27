@@ -11,6 +11,7 @@
  * not from any AGPL reference implementation.
  */
 import { $credentialEnv, $env, extractHttpStatusFromError } from "@gajae-code/utils";
+import type { Effort } from "../model-thinking";
 import type {
 	Api,
 	AssistantMessage,
@@ -28,12 +29,15 @@ import { transportFailureFacts } from "../utils/fallback-transport";
 import { withHttpStatus } from "../utils/http-inspector";
 import { captureUnicodeEscapeEvidence } from "../utils/json-parse";
 import { decodeEventStream } from "./aws-eventstream";
+import { isKiroApiKey, streamKiroApiKey } from "./kiro-api-key";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider options
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface KiroCodeWhispererOptions extends StreamOptions {
+	/** Effort level for Kiro API-key reasoning. */
+	reasoning?: Effort | boolean;
 	/** AWS region for the CodeWhisperer streaming endpoint. */
 	region?: string;
 	/** Profile ARN for enterprise IAM Identity Center accounts. */
@@ -143,6 +147,11 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 	context: Context,
 	options: KiroCodeWhispererOptions,
 ): AssistantMessageEventStream => {
+	const token = resolveBearerToken(options.apiKey);
+	if (isKiroApiKey(token)) {
+		return streamKiroApiKey(model, context, { ...options, apiKey: token });
+	}
+
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -175,7 +184,7 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 			const bearerToken = resolveBearerToken(options.apiKey);
 			if (!bearerToken) {
 				throw new Error(
-					"No Kiro credentials found. Run 'gjc auth-broker login kiro' to authenticate via AWS Builder ID, or set AWS_BEARER_TOKEN_KIRO.",
+					"No Kiro credentials found. Set KIRO_API_KEY (ksk_ from https://app.kiro.dev/settings/api-keys) or run 'gjc auth-broker login kiro'.",
 				);
 			}
 
@@ -541,7 +550,7 @@ function handleToolUseEvent(
 
 function resolveBearerToken(apiKey: string | undefined): string | undefined {
 	if (!apiKey) {
-		return $credentialEnv("AWS_BEARER_TOKEN_KIRO") ?? undefined;
+		return $credentialEnv("KIRO_API_KEY") ?? $credentialEnv("AWS_BEARER_TOKEN_KIRO") ?? undefined;
 	}
 
 	// Structured API key (from getOAuthApiKey) contains the access token as JSON
