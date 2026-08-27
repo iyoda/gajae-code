@@ -752,11 +752,12 @@ export async function resolveRalplanTargetRoot(
 	// command shell before git receives the argument. HEAD is sufficient after
 	// resolving a repository root: an unborn or non-commit HEAD still fails the
 	// same validation, while the argv remains shell-safe on every platform.
-	const verified = Bun.spawn(["git", "-C", canonical, "rev-parse", "--verify", "HEAD"], {
+	const verified = Bun.spawn(["git", "-C", canonical, "cat-file", "-t", "HEAD"], {
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	if ((await verified.exited) !== 0) {
+	const [verifiedType, verifiedExit] = await Promise.all([new Response(verified.stdout).text(), verified.exited]);
+	if (verifiedExit !== 0 || verifiedType.trim() !== "commit") {
 		throw new RalplanCommandError(2, `ralplan --worktree-root is not a valid git worktree: ${canonical}`);
 	}
 	let worktreeRoot: string;
